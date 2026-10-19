@@ -538,7 +538,7 @@ select * from t_alert_event where seq &gt; $1 order by seq limit 200;</code></pr
                                           │  │ 检测器（每 5 秒）         │  │
                                           │  │  · 增量读最近窗口数据     │  │
                                           │  │  · upsert 心跳读模型表    │  │
-                                          │  │  · 离线 / 阈值 / 变化率   │  │
+                                          │  │  · 离线 / 阈值 / 故障     │  │
                                           │  └──────────────────────────┘  │
                                           │  ┌──────────────────────────┐  │
                                           │  │ 统计器（读连续聚合）      │  │
@@ -626,7 +626,7 @@ select * from t_alert_event where seq &gt; $1 order by seq limit 200;</code></pr
   dedup_key       varchar(200) not null,        -- 去重键：规则+通道+级别
   sensor_no       varchar(50) not null,
   channel_key     varchar(50) not null default '',
-  alert_type      varchar(40) not null,         -- DEV-OFFLINE / THR-HI / RATE-HI ...
+  alert_type      varchar(40) not null,         -- DEV-OFFLINE / THR-HI / DEV-STUCK ...
   severity        smallint    not null,         -- 1三级 2二级 3一级
   status          smallint    not null default 20,  -- 10pending 20firing 30acked 40resolved 50closed 60silenced 70suppressed
   first_fire_time timestamp   not null,
@@ -747,7 +747,7 @@ create table t_alert_rule_version (
     <thead><tr><th>标准</th><th>名称</th><th>对预警的规定</th></tr></thead>
     <tbody>
       <tr class="hl"><td><strong>T/CECS 529-2018</strong></td><td>大跨度桥梁结构健康监测系统预警阈值标准</td><td><strong>最对口。</strong>按构件（桥塔/缆索/主梁/桥墩/锚碇/支座/伸缩缝）和参数逐项给阈值；四级预警。正文付费未获取，目录与级别表已确认</td></tr>
-      <tr><td>GB 50982-2014</td><td>建筑与桥梁结构监测技术规范</td><td>3.1.8（强制性条文）要求「应设定监测预警值」+「应分级制定」；3.3.5 施工期宜按「分区、分级、分阶段」；3.4.5 使用期结合「长期数据积累」；3.3.6 明确要求根据<strong>应力或变形速率</strong>调整监测频次（变化率指标有规范依据）</td></tr>
+      <tr><td>GB 50982-2014</td><td>建筑与桥梁结构监测技术规范</td><td>3.1.8（强制性条文）要求「应设定监测预警值」+「应分级制定」；3.3.5 施工期宜按「分区、分级、分阶段」；3.4.5 使用期结合「长期数据积累」；3.3.6 明确要求根据<strong>应力或变形状态</strong>调整监测频次</td></tr>
       <tr><td>JT/T 1037-2022</td><td>公路桥梁结构监测技术规范</td><td>2022 版全部代替 2016 版，关键改动：把「安全预警」改为「<strong>超限报警</strong>」并更改报警级别，<strong>新增涡振报警要求</strong>（11.3）。方向是从「阈值型安全预警」转向「超限报警 + 结构健康评估」</td></tr>
       <tr><td>DB34/T 3703.5-2022</td><td>长大桥梁养护指南 第5部分：健康监测报警阈值设定</td><td>安徽省地标，最「参数化落地」的一部。风速明确「黄/橙用 3 s 或 2 min 平均风速，红用 10 min 平均风速」——<strong>同一物理量按不同平均时长分档</strong>，这个思路对风致响应监测很有参考价值</td></tr>
       <tr><td>ISO 18649 / 14963 / 16587 / 4866</td><td>桥梁动力测试与结构状态监测</td><td>只规定「怎么测、怎么评」，<strong>不规定阈值数值</strong>。ISO 16587 最接近「阈值设定原则」，但仍不给数</td></tr>
@@ -790,7 +790,6 @@ create table t_alert_rule_version (
     <tbody>
       <tr><td><code>DEV-OFFLINE</code></td><td>心跳超时 / 离线</td><td class="n">3</td><td>距最后数据超过自适应超时</td><td>见 <a href="#s02">02</a></td></tr>
       <tr><td><code>DEV-GAP</code></td><td>数据超时但未断</td><td class="n">1</td><td>空洞大于 3× 期望周期，但未达离线阈值</td><td>k=3</td></tr>
-      <tr><td><code>DEV-SPIKE</code></td><td>跳变 / 毛刺</td><td class="n">2</td><td>偏离前 5 点中位数超过 6×MAD</td><td>用中位数+MAD 抗野值，单点不告警</td></tr>
       <tr><td><code>DEV-STUCK</code></td><td>恒定值（死值）</td><td class="n">2</td><td>连续 N 点数值完全相等且累计 ≥ 300 秒</td><td>阈值按期望周期自适应</td></tr>
       <tr><td><code>DEV-OOR</code></td><td>量程越界</td><td class="n">3</td><td>超出 <code>t_sensor.range</code> 解析出的量程</td><td>容差 5%</td></tr>
       <tr><td><code>DEV-DUP-TS</code></td><td>重复时间戳</td><td class="n">1</td><td>同键同时间出现多行</td><td>窗口 60 秒</td></tr>
@@ -811,12 +810,10 @@ create table t_alert_rule_version (
   </table></div>
   <p><strong>评估顺序</strong>：引擎按 level 从高到低评估，命中即停，避免一次越限同时产生三条告警。</p>
 
-  <h4>变化率类 / 统计类 / 系统类</h4>
+  <h4>统计类 / 系统类</h4>
   <div class="tw"><table>
     <thead><tr><th>编码</th><th>名称</th><th class="n">级别</th><th>说明</th></tr></thead>
     <tbody>
-      <tr><td><code>RATE-HI</code></td><td>变化速率超限</td><td class="n">2</td><td>|Δvalue/Δt| 超过阈值。参考值：位移 1 mm/s、应变 50 MPa/s、倾角 0.1°/s</td></tr>
-      <tr><td><code>RATE-JUMP</code></td><td>单步跳变</td><td class="n">2</td><td>|Δvalue| 超量程 10% 且超 8×MAD</td></tr>
       <tr><td><code>STAT-MEAN</code></td><td>均值偏移</td><td class="n">2</td><td>1 小时均值偏离 7 天同时段基线 3σ</td></tr>
       <tr><td><code>STAT-STD</code></td><td>方差异常</td><td class="n">2</td><td>窗口标准差超基线 3 倍</td></tr>
       <tr><td><code>STAT-DRIFT</code></td><td>基线漂移</td><td class="n">1</td><td>7 天滚动基线单调偏移超 3σ</td></tr>
@@ -881,7 +878,7 @@ select add_continuous_aggregate_policy('cagg_stat_1min',
       <li><strong>连续聚合不能 join 外部表</strong>，所以「超阈值时长」这类需要对照阈值表的统计做不进去，要另用定时任务写普通表。</li>
       <li><strong>改聚合定义要 DROP 重建</strong>，重建期间要重新物化全历史（11.58 亿行，预计数十分钟）。<strong>上线前务必把统计量定全。</strong></li>
       <li><strong>跨粒度汇总均值不能用 <code>avg(val_avg)</code></strong>，必须 <code>sum(val_sum)/sum(sample_count)</code>；标准差同理需要平方和。这是最容易算错的地方。</li>
-      <li><strong>TimescaleDB Toolkit 没装。</strong>实测库里只有 <code>plpgsql</code> 和 <code>timescaledb</code> 两个扩展，所以 <code>stats_agg</code>、<code>counter_agg</code>、<code>heartbeat_agg</code> 这些超函数<strong>当前用不了</strong>。如果要用（对趋势回归、变化率、缺失检测很有价值），需要先 <code>CREATE EXTENSION timescaledb_toolkit</code> 并确认服务器有对应的包。不用的话，用原生聚合函数加窗口函数也能实现，只是代码多一些。</li>
+      <li><strong>TimescaleDB Toolkit 没装。</strong>实测库里只有 <code>plpgsql</code> 和 <code>timescaledb</code> 两个扩展，所以 <code>stats_agg</code>、<code>counter_agg</code>、<code>heartbeat_agg</code> 这些超函数<strong>当前用不了</strong>。如果要用（对趋势回归、缺失检测很有价值），需要先 <code>CREATE EXTENSION timescaledb_toolkit</code> 并确认服务器有对应的包。不用的话，用原生聚合函数加窗口函数也能实现，只是代码多一些。</li>
     </ul>
   </div>
 

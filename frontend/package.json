@@ -4,9 +4,9 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --port 5173 --host",
+    "dev": "vite --port 5174 --host",
     "build": "vite build",
-    "preview": "vite preview --port 5173"
+    "preview": "vite preview --port 5174"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",

@@ -51,7 +51,6 @@
             <el-option label="全量归档区间 (2026-09-21 ~ 09-30)" value="ALL" />
             <el-option label="吞吐峰值日 (2026-09-28 00:00 ~ 23:59)" value="2026-09-28" />
             <el-option label="峰值核心段 (2026-09-28 12:00 ~ 16:00)" value="2026-09-28-PEAK" />
-            <el-option label="断流波动段 (2026-09-30 14:00 ~ 18:00)" value="2026-09-30-DROP" />
           </el-select>
         </div>
       </div>
@@ -66,7 +65,7 @@
       </div>
     </div>
 
-    <!-- 2. Active Sensor 5 Summary KPI Cards (val_max + max_time, val_min + min_time, val_avg, val_std, gap_count) -->
+    <!-- 2. Active Sensor Summary KPI Cards -->
     <div class="extremes-kpi-row">
       <div class="shm-card ext-kpi-card max-card">
         <div class="ext-kpi-head">
@@ -124,21 +123,6 @@
         </div>
       </div>
 
-      <div class="shm-card ext-kpi-card gap-card">
-        <div class="ext-kpi-head">
-          <span>🔌 >1000ms 采样断流次数 (gap_count)</span>
-          <el-tag size="small" :type="extremeSummary.totalGaps > 0 ? 'danger' : 'success'">
-            {{ extremeSummary.totalGaps > 0 ? '存在断流' : '连续完整' }}
-          </el-tag>
-        </div>
-        <div class="ext-kpi-val mono-num" :class="extremeSummary.totalGaps > 0 ? 'red-val' : 'green-val'">
-          {{ extremeSummary.totalGaps || 0 }}
-          <small>次</small>
-        </div>
-        <div class="ext-kpi-sub mono-num">
-          L1红线: [{{ activeThresholds.level1Lower ?? '-' }}, {{ activeThresholds.level1Upper ?? '-' }}] {{ activeMeta.unit }}
-        </div>
-      </div>
     </div>
 
     <!-- 3. Interactive ECharts Max/Min/Avg Envelope Chart + Threshold Overlay -->
@@ -303,8 +287,7 @@ const extremeSummary = reactive({
   windowMin: null,
   windowMinTime: '',
   windowAvg: null,
-  totalSamples: 0,
-  totalGaps: 0
+  totalSamples: 0
 })
 
 const envelopeChartRef = ref(null)
@@ -380,9 +363,6 @@ function resolveTimeRangeParams() {
   }
   if (selectedTimePreset.value === '2026-09-28-PEAK') {
     return { startTime: '2026-09-28 12:00:00', endTime: '2026-09-28 16:00:00' }
-  }
-  if (selectedTimePreset.value === '2026-09-30-DROP') {
-    return { startTime: '2026-09-30 14:00:00', endTime: '2026-09-30 18:00:00' }
   }
   return {}
 }
@@ -522,7 +502,7 @@ function renderEnvelopeChart() {
             ↳ 极值时刻 min_time: ${item.minTime}
           </div>
           <div style="border-top:1px solid #264378;margin-top:4px;padding-top:4px;font-size:11px;color:#cbd5e1;">
-            标准差(val_std): ${item.valStd} | 样本数: ${item.sampleCount} | >1000ms断流: ${item.gapCount}次
+            标准差(val_std): ${item.valStd} | 样本数: ${item.sampleCount}
           </div>
         `
       }
@@ -690,7 +670,7 @@ onBeforeUnmount(() => {
 
 .extremes-kpi-row {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 12px;
 }
 
@@ -702,8 +682,6 @@ onBeforeUnmount(() => {
 .min-card { border-top: 3px solid #38bdf8; }
 .avg-card { border-top: 3px solid #00e699; }
 .std-card { border-top: 3px solid #ff8f1f; }
-.gap-card { border-top: 3px solid #a855f7; }
-
 .ext-kpi-head {
   display: flex;
   align-items: center;
@@ -781,6 +759,63 @@ onBeforeUnmount(() => {
 @media (max-width: 1400px) {
   .extremes-kpi-row {
     grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (max-width: 1100px) {
+  .control-bar,
+  .ctrl-left,
+  .ctrl-right {
+    align-items: flex-start;
+  }
+
+  .control-bar,
+  .ctrl-left {
+    flex-direction: column;
+  }
+
+  .ctrl-left,
+  .ctrl-right {
+    width: 100%;
+  }
+
+  .extremes-kpi-row {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .extremes-dashboard-view {
+    gap: 10px;
+  }
+
+  .ctrl-group {
+    align-items: flex-start;
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .ctrl-group :deep(.el-select),
+  .ctrl-group :deep(.el-radio-group) {
+    width: 100% !important;
+  }
+
+  .extremes-kpi-row {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .chart-legend-tags {
+    margin-top: 8px;
+  }
+
+  .shm-card-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .envelope-chart-box {
+    height: 330px;
   }
 }
 </style>

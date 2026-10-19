@@ -8,12 +8,8 @@
           <strong class="mono-num">{{ allRulesCount }}</strong>
         </div>
         <div class="wb-stat-item">
-          <span class="wb-label">已投运监控 (Enabled)</span>
-          <strong class="mono-num green-txt">{{ enabledRulesCount }}</strong>
-        </div>
-        <div class="wb-stat-item">
-          <span class="wb-label">未投运工程预留 (Disabled)</span>
-          <strong class="mono-num muted-txt">{{ disabledRulesCount }}</strong>
+          <span class="wb-label">覆盖物理量类型</span>
+          <strong class="mono-num green-txt">{{ physicalQuantityOptions.length }}</strong>
         </div>
         <div class="wb-stat-item">
           <span class="wb-label">去直流分量通道 (AC幅值)</span>
@@ -65,17 +61,6 @@
               :label="`${pq} (${countByPq(pq)}通道)`"
               :value="pq"
             />
-          </el-select>
-
-          <el-select
-            v-model="filters.monitorEnabled"
-            placeholder="投运状态 (全部208)"
-            clearable
-            size="small"
-            style="width: 175px"
-          >
-            <el-option label="✅ 已投运启用 (185)" :value="true" />
-            <el-option label="⏸️ 未投运停用 (23)" :value="false" />
           </el-select>
 
           <el-input
@@ -154,7 +139,7 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="采样间隔 / 断流超时" width="145" align="center">
+        <el-table-column label="采样间隔 / 离线超时" width="145" align="center">
           <template #default="{ row }">
             <div class="mono-num" style="font-size: 11px">
               <div>采样: {{ row.expected_interval_ms }}ms</div>
@@ -165,11 +150,26 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="防抖点数 / 迟滞回差" width="135" align="center">
+        <el-table-column label="物理量程 [最小值, 最大值]" width="190" align="center">
           <template #default="{ row }">
             <div class="mono-num" style="font-size: 11px">
-              <div>确认: {{ row.confirm_points || 1 }}点</div>
-              <div>回差: {{ row.hysteresis ?? 0 }}</div>
+              [{{ formatLim(row.range_min) }}, {{ formatLim(row.range_max) }}]
+            </div>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="死值判定时间" width="125" align="center">
+          <template #default="{ row }">
+            <div class="mono-num" style="font-size: 11px">
+              {{ row.stuck_time_ms || '-' }}ms
+            </div>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="连续超限确认点数" width="135" align="center">
+          <template #default="{ row }">
+            <div class="mono-num" style="font-size: 11px">
+              <div>{{ row.confirm_points || 1 }} 点</div>
             </div>
           </template>
         </el-table-column>
@@ -182,32 +182,19 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="投运开关" width="95" align="center">
+        <el-table-column prop="create_by" label="创建人" width="100" align="center">
           <template #default="{ row }">
-            <el-switch
-              v-model="row.monitor_enabled"
-              size="small"
-              @change="(val) => handleQuickToggleEnable(row, val)"
-            />
+            <span class="mono-num">{{ row.create_by || 'system' }}</span>
           </template>
         </el-table-column>
 
-        <el-table-column label="版本" width="75" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" type="primary" effect="plain" class="mono-num">v{{ row.version || 1 }}</el-tag>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="操作 (调参 / 试算 / 历史回滚)" width="225" fixed="right" align="center">
+        <el-table-column label="操作 (调参 / 试算)" width="180" fixed="right" align="center">
           <template #default="{ row }">
             <el-button type="primary" link size="small" @click="openEditModal(row)">
               编辑阈值
             </el-button>
             <el-button type="success" link size="small" @click="openSimulatorDialog(row)">
               回放试算
-            </el-button>
-            <el-button type="warning" link size="small" @click="openHistoryDrawer(row)">
-              版本历史({{ getHistoryCount(row) }})
             </el-button>
           </template>
         </el-table-column>
@@ -272,7 +259,7 @@
           </el-col>
 
           <el-col :span="12">
-            <el-form-item label="断流超时阈值 (ms)">
+            <el-form-item label="离线超时阈值 (ms)">
               <el-input-number v-model="editForm.offline_timeout_ms" :min="200" :step="500" style="width: 100%" />
             </el-form-item>
           </el-col>
@@ -283,41 +270,31 @@
           </el-col>
 
           <el-col :span="12">
+            <el-form-item label="量程最小值">
+              <el-input-number v-model="editForm.range_min" :precision="5" :controls="false" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="量程最大值">
+              <el-input-number v-model="editForm.range_max" :precision="5" :controls="false" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+
+          <el-col :span="12">
+            <el-form-item label="死值判定时间 (ms)">
+              <el-input-number v-model="editForm.stuck_time_ms" :min="1" :step="1000" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="连续防抖点数 (N)">
               <el-input-number v-model="editForm.confirm_points" :min="1" :max="30" style="width: 100%" />
             </el-form-item>
           </el-col>
           <el-col :span="12">
-            <el-form-item label="迟滞回差 (Hysteresis)">
-              <el-input-number v-model="editForm.hysteresis" :min="0" :step="0.1" :precision="4" style="width: 100%" />
-            </el-form-item>
-          </el-col>
-
-          <el-col :span="12">
-            <el-form-item label="去直流偏移 (AC幅值)">
-              <el-switch v-model="editForm.remove_dc_offset" active-text="开启" inactive-text="关闭" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="通道投运状态">
-              <el-switch v-model="editForm.monitor_enabled" active-text="已投运" inactive-text="未投运" />
-            </el-form-item>
-          </el-col>
-
-          <el-col :span="12">
-            <el-form-item label="修订人 (update_by)">
-              <el-input v-model="editForm.update_by" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="当前版本号">
-              <el-tag type="info">v{{ editForm.version || 1 }} ➔ 保存后升级为 v{{ (editForm.version || 1) + 1 }}</el-tag>
-            </el-form-item>
-          </el-col>
-
-          <el-col :span="24">
-            <el-form-item label="调参原因 (写入日志)">
-              <el-input v-model="editForm.change_reason" placeholder="填写工程标定依据或试算结论..." />
+            <el-form-item label="去直流处理">
+              <el-tag :type="editForm.remove_dc_offset ? 'warning' : 'info'" effect="plain">
+                {{ editForm.remove_dc_offset ? '按传感器类型自动去直流' : '原始值判定' }}
+              </el-tag>
             </el-form-item>
           </el-col>
         </el-row>
@@ -396,30 +373,18 @@
           </el-col>
 
           <el-col :span="12">
-            <el-form-item label="断流超时 (ms)">
+            <el-form-item label="离线超时 (ms)">
               <el-input-number v-model="batchForm.offline_timeout_ms" :min="200" :step="500" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="死值判定时间 (ms)">
+              <el-input-number v-model="batchForm.stuck_time_ms" :min="1" :step="1000" style="width: 100%" />
             </el-form-item>
           </el-col>
           <el-col :span="12">
             <el-form-item label="连续防抖点数">
               <el-input-number v-model="batchForm.confirm_points" :min="1" :max="20" style="width: 100%" />
-            </el-form-item>
-          </el-col>
-
-          <el-col :span="12">
-            <el-form-item label="修订工程师">
-              <el-input v-model="batchForm.update_by" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="批量投运状态">
-              <el-switch v-model="batchForm.monitor_enabled" active-text="全部启用" inactive-text="全部停用" />
-            </el-form-item>
-          </el-col>
-
-          <el-col :span="24">
-            <el-form-item label="批量标定原因">
-              <el-input v-model="batchForm.change_reason" />
             </el-form-item>
           </el-col>
         </el-row>
@@ -469,15 +434,6 @@
             </el-select>
           </div>
 
-          <div class="sim-field">
-            <label>去直流偏移 (AC幅值评估)</label>
-            <el-switch
-              v-model="simForm.remove_dc_offset"
-              active-text="开启去直流"
-              inactive-text="原始值评估"
-              @change="runDryRunSimulation"
-            />
-          </div>
         </div>
 
         <!-- Proposed 3-Level Threshold Inputs -->
@@ -542,61 +498,13 @@
       </template>
     </el-dialog>
 
-    <!-- 6. Version History (`history_log` JSONB) & One-Click Rollback Drawer -->
-    <el-drawer
-      v-model="historyDrawerVisible"
-      :title="`调参版本历史 (history_log) 与一键回滚 — ${historyTargetRule?.sensor_name || ''} (${historyTargetRule?.sensor_no || ''})`"
-      size="580px"
-      destroy-on-close
-    >
-      <div v-if="historyTargetRule" class="history-drawer-body">
-        <div class="curr-rule-banner mono-num">
-          <div>当前生效版本: <strong>v{{ historyTargetRule.version || 1 }}</strong> | 最后修改人: {{ historyTargetRule.update_by || 'system' }}</div>
-          <div>当前L1: [{{ historyTargetRule.level1_lower }}, {{ historyTargetRule.level1_upper }}] | L2: [{{ historyTargetRule.level2_lower }}, {{ historyTargetRule.level2_upper }}] | L3: [{{ historyTargetRule.level3_lower }}, {{ historyTargetRule.level3_upper }}]</div>
-        </div>
-
-        <el-timeline v-if="parsedHistoryLogs.length > 0" style="margin-top: 16px">
-          <el-timeline-item
-            v-for="(h, idx) in parsedHistoryLogs"
-            :key="idx"
-            :timestamp="`${h.time || ''} · 版本 v${h.version || idx + 1}`"
-            placement="top"
-            type="primary"
-          >
-            <div class="hist-item-card">
-              <div class="hist-head">
-                <el-tag size="small" type="primary">v{{ h.version || idx + 1 }}</el-tag>
-                <span>修订人: <strong>{{ h.update_by || 'admin' }}</strong></span>
-                <el-button
-                  type="warning"
-                  size="small"
-                  plain
-                  style="margin-left: auto"
-                  @click="handleRollbackToVersion(historyTargetRule, h)"
-                >
-                  ⏪ 一键回滚至此版本
-                </el-button>
-              </div>
-              <div class="hist-reason">原因: {{ h.change_reason || '在线阈值标定' }}</div>
-              <div class="hist-vals mono-num">
-                <div>L1(红): [{{ h.level1?.[0] ?? '-' }}, {{ h.level1?.[1] ?? '-' }}]</div>
-                <div>L2(橙): [{{ h.level2?.[0] ?? '-' }}, {{ h.level2?.[1] ?? '-' }}]</div>
-                <div>L3(黄): [{{ h.level3?.[0] ?? '-' }}, {{ h.level3?.[1] ?? '-' }}]</div>
-              </div>
-            </div>
-          </el-timeline-item>
-        </el-timeline>
-
-        <el-empty v-else description="该通道尚无历史修订记录，修改一次阈值后将自动记录版本快照" />
-      </div>
-    </el-drawer>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import * as echarts from 'echarts'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { Operation, DataAnalysis } from '@element-plus/icons-vue'
 import {
   listThresholdsApi,
@@ -614,7 +522,6 @@ const physicalQuantityOptions = ref([])
 const filters = reactive({
   stationName: '',
   physicalQuantity: '',
-  monitorEnabled: null,
   keyword: ''
 })
 
@@ -623,8 +530,6 @@ const pageSize = ref(25)
 
 // Stats
 const allRulesCount = computed(() => rules.value.length || 208)
-const enabledRulesCount = computed(() => rules.value.filter((r) => r.monitor_enabled).length || 185)
-const disabledRulesCount = computed(() => rules.value.filter((r) => !r.monitor_enabled).length || 23)
 const dcOffsetRulesCount = computed(() => rules.value.filter((r) => r.remove_dc_offset).length)
 const highFreqRulesCount = computed(() => rules.value.filter((r) => Number(r.expected_interval_ms || 1000) <= 1000).length)
 
@@ -632,9 +537,6 @@ const filteredRules = computed(() => {
   return rules.value.filter((r) => {
     if (filters.stationName && r.station_name !== filters.stationName) return false
     if (filters.physicalQuantity && r.physical_quantity !== filters.physicalQuantity) return false
-    if (filters.monitorEnabled !== null && filters.monitorEnabled !== undefined && filters.monitorEnabled !== '') {
-      if (Boolean(r.monitor_enabled) !== filters.monitorEnabled) return false
-    }
     if (filters.keyword.trim()) {
       const kw = filters.keyword.trim().toLowerCase()
       const text = `${r.sensor_no || ''} ${r.sensor_name || ''} ${r.channel || ''} ${r.physical_quantity || ''}`.toLowerCase()
@@ -656,7 +558,6 @@ function countByPq(pq) {
 function resetRuleFilters() {
   filters.stationName = ''
   filters.physicalQuantity = ''
-  filters.monitorEnabled = null
   filters.keyword = ''
   page.value = 1
 }
@@ -671,21 +572,6 @@ async function fetchThresholds() {
     ElMessage.error(`加载208条阈值规则失败: ${err?.message || ''}`)
   } finally {
     loading.value = false
-  }
-}
-
-async function handleQuickToggleEnable(row, val) {
-  try {
-    await updateThresholdApi(row.id, {
-      monitor_enabled: val,
-      update_by: '值班工程师',
-      change_reason: val ? '启用通道监控' : '标记未投运通道停用监控'
-    })
-    ElMessage.success(`${row.sensor_name} (${row.sensor_no}) 已${val ? '开启投运监控' : '停用监控'}`)
-    emit('refresh-global')
-  } catch (err) {
-    row.monitor_enabled = !val
-    ElMessage.error(`更新投运状态失败: ${err?.message || ''}`)
   }
 }
 
@@ -707,12 +593,10 @@ const editForm = reactive({
   offline_timeout_ms: 1000,
   expected_interval_ms: 1000,
   confirm_points: 3,
-  hysteresis: 0.1,
-  remove_dc_offset: false,
-  monitor_enabled: true,
-  version: 1,
-  update_by: '张工 (SHM结构工程师)',
-  change_reason: '根据桥梁健康监测规范及历史极值包络调整三级阈值'
+  range_min: null,
+  range_max: null,
+  stuck_time_ms: 30000,
+  remove_dc_offset: false
 })
 
 function openEditModal(row) {
@@ -731,12 +615,10 @@ function openEditModal(row) {
     offline_timeout_ms: Number(row.offline_timeout_ms ?? 1000),
     expected_interval_ms: Number(row.expected_interval_ms ?? 1000),
     confirm_points: Number(row.confirm_points ?? 3),
-    hysteresis: Number(row.hysteresis ?? 0.1),
-    remove_dc_offset: Boolean(row.remove_dc_offset),
-    monitor_enabled: Boolean(row.monitor_enabled),
-    version: Number(row.version ?? 1),
-    update_by: '张工 (SHM结构工程师)',
-    change_reason: '根据历史实测包络线微调三级预警阈值'
+    range_min: row.range_min === null || row.range_min === undefined ? null : Number(row.range_min),
+    range_max: row.range_max === null || row.range_max === undefined ? null : Number(row.range_max),
+    stuck_time_ms: Number(row.stuck_time_ms ?? 30000),
+    remove_dc_offset: Boolean(row.remove_dc_offset)
   })
   editDialogVisible.value = true
 }
@@ -753,8 +635,21 @@ async function submitSingleEdit() {
 
   savingSingle.value = true
   try {
-    await updateThresholdApi(editForm.id, { ...editForm })
-    ElMessage.success(`阈值规则已保存并完成零停机热更新 (新版本 v${editForm.version + 1})`)
+    await updateThresholdApi(editForm.id, {
+      level1_upper: editForm.level1_upper,
+      level1_lower: editForm.level1_lower,
+      level2_upper: editForm.level2_upper,
+      level2_lower: editForm.level2_lower,
+      level3_upper: editForm.level3_upper,
+      level3_lower: editForm.level3_lower,
+      offline_timeout_ms: editForm.offline_timeout_ms,
+      expected_interval_ms: editForm.expected_interval_ms,
+      confirm_points: editForm.confirm_points,
+      range_min: editForm.range_min,
+      range_max: editForm.range_max,
+      stuck_time_ms: editForm.stuck_time_ms
+    })
+    ElMessage.success('阈值规则已保存并完成零停机热更新')
     editDialogVisible.value = false
     await fetchThresholds()
     emit('refresh-global')
@@ -778,9 +673,7 @@ const batchForm = reactive({
   level3_lower: -7.0,
   offline_timeout_ms: 1000,
   confirm_points: 3,
-  monitor_enabled: true,
-  update_by: '张工 (SHM结构工程师)',
-  change_reason: '按物理量统一标定三级预警阈值'
+  stuck_time_ms: 30000
 })
 
 function openBatchDialog() {
@@ -802,6 +695,7 @@ function onBatchPqChange(pq) {
     batchForm.level3_lower = Number(sample.level3_lower ?? -7)
     batchForm.offline_timeout_ms = Number(sample.offline_timeout_ms ?? 1000)
     batchForm.confirm_points = Number(sample.confirm_points ?? 3)
+    batchForm.stuck_time_ms = Number(sample.stuck_time_ms ?? 30000)
   }
 }
 
@@ -839,8 +733,7 @@ const simForm = reactive({
   level2_upper: 9.5,
   level2_lower: -9.0,
   level3_upper: 7.5,
-  level3_lower: -7.0,
-  remove_dc_offset: false
+  level3_lower: -7.0
 })
 
 function openSimulatorDialog(targetRow = null) {
@@ -856,7 +749,6 @@ function openSimulatorDialog(targetRow = null) {
     simForm.level2_lower = Number(row.level2_lower ?? -9.0)
     simForm.level3_upper = Number(row.level3_upper ?? 7.5)
     simForm.level3_lower = Number(row.level3_lower ?? -7.0)
-    simForm.remove_dc_offset = Boolean(row.remove_dc_offset)
   }
   simDialogVisible.value = true
   nextTick(() => {
@@ -875,7 +767,6 @@ function jumpToSimulateFromEdit() {
   simForm.level2_lower = editForm.level2_lower
   simForm.level3_upper = editForm.level3_upper
   simForm.level3_lower = editForm.level3_lower
-  simForm.remove_dc_offset = editForm.remove_dc_offset
   editDialogVisible.value = false
   simDialogVisible.value = true
   nextTick(() => {
@@ -895,7 +786,6 @@ function onSimRuleSelect(key) {
     simForm.level2_lower = Number(row.level2_lower ?? -9.0)
     simForm.level3_upper = Number(row.level3_upper ?? 7.5)
     simForm.level3_lower = Number(row.level3_lower ?? -7.0)
-    simForm.remove_dc_offset = Boolean(row.remove_dc_offset)
     runDryRunSimulation()
   }
 }
@@ -922,7 +812,6 @@ async function runDryRunSimulation() {
       level2_lower: simForm.level2_lower,
       level3_upper: simForm.level3_upper,
       level3_lower: simForm.level3_lower,
-      remove_dc_offset: simForm.remove_dc_offset,
       start_time,
       end_time
     })
@@ -1023,9 +912,8 @@ async function applySimulatedThresholds() {
       level2_lower: simForm.level2_lower,
       level3_upper: simForm.level3_upper,
       level3_lower: simForm.level3_lower,
-      remove_dc_offset: simForm.remove_dc_offset,
-      update_by: '张工 (回放试算标定)',
-      change_reason: `通过历史数据回放试算台验证后保存 (试算触发率 ${simResult.value?.proposedHits?.alertRatePct ?? 0}%)`
+      expected_interval_ms: row.expected_interval_ms,
+      confirm_points: row.confirm_points
     })
     ElMessage.success('已将试算阈值正式保存并热更新至实时检测引擎！')
     simDialogVisible.value = false
@@ -1036,66 +924,6 @@ async function applySimulatedThresholds() {
   } finally {
     savingFromSim.value = false
   }
-}
-
-// History Log & One-Click Rollback
-const historyDrawerVisible = ref(false)
-const historyTargetRule = ref(null)
-
-const parsedHistoryLogs = computed(() => {
-  if (!historyTargetRule.value) return []
-  const raw = historyTargetRule.value.history_log
-  let arr = []
-  if (Array.isArray(raw)) {
-    arr = raw
-  } else if (typeof raw === 'string') {
-    try {
-      arr = JSON.parse(raw)
-    } catch (_) {
-      arr = []
-    }
-  }
-  return [...arr].reverse()
-})
-
-function getHistoryCount(row) {
-  if (Array.isArray(row.history_log)) return row.history_log.length
-  return 0
-}
-
-function openHistoryDrawer(row) {
-  historyTargetRule.value = { ...row }
-  historyDrawerVisible.value = true
-}
-
-async function handleRollbackToVersion(ruleRow, histItem) {
-  const [l1_l, l1_u] = histItem.level1 || histItem.prev_level1 || [ruleRow.level1_lower, ruleRow.level1_upper]
-  const [l2_l, l2_u] = histItem.level2 || histItem.prev_level2 || [ruleRow.level2_lower, ruleRow.level2_upper]
-  const [l3_l, l3_u] = histItem.level3 || histItem.prev_level3 || [ruleRow.level3_lower, ruleRow.level3_upper]
-
-  try {
-    await ElMessageBox.confirm(
-      `确定将【${ruleRow.sensor_name}】的三级阈值回滚至版本 v${histItem.version} 的配置吗？`,
-      '版本一键回滚确认',
-      { type: 'warning', confirmButtonText: '确认回滚', cancelButtonText: '取消' }
-    )
-    const res = await updateThresholdApi(ruleRow.id, {
-      level1_lower: Number(l1_l),
-      level1_upper: Number(l1_u),
-      level2_lower: Number(l2_l),
-      level2_upper: Number(l2_u),
-      level3_lower: Number(l3_l),
-      level3_upper: Number(l3_u),
-      update_by: '值班工程师 (版本回滚)',
-      change_reason: `一键回滚至历史版本 v${histItem.version}`
-    })
-    ElMessage.success(`已成功回滚至 v${histItem.version} 配置并热更新生效！`)
-    if (res.threshold) {
-      historyTargetRule.value = res.threshold
-    }
-    await fetchThresholds()
-    emit('refresh-global')
-  } catch (_) {}
 }
 
 function formatLim(val) {
@@ -1366,5 +1194,70 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
   font-size: 11px;
   color: #93c5fd;
+}
+
+@media (max-width: 1100px) {
+  .workbench-top-bar,
+  .filter-bar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .wb-stats,
+  .wb-actions,
+  .filter-left,
+  .filter-right {
+    width: 100%;
+  }
+
+  .sim-form-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .threshold-workbench-view {
+    gap: 10px;
+  }
+
+  .wb-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+
+  .wb-actions,
+  .filter-left {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .wb-actions :deep(.el-button),
+  .filter-left :deep(.el-select),
+  .filter-left :deep(.el-input),
+  .filter-left :deep(.el-button) {
+    width: 100% !important;
+  }
+
+  .table-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .sim-form-grid,
+  .sim-compare-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .sim-threshold-inputs {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .dialog-footer-split {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
 }
 </style>

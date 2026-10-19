@@ -1,37 +1,35 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
-import AlertCenterView from '../views/AlertCenterView.vue'
-import ExtremesDashboardView from '../views/ExtremesDashboardView.vue'
-import WindRoseView from '../views/WindRoseView.vue'
-import ThresholdWorkbenchView from '../views/ThresholdWorkbenchView.vue'
+import AlertManagementView from '../views/AlertManagementView.vue'
+import AnalysisView from '../views/AnalysisView.vue'
 
 const routes = [
   {
     path: '/',
-    redirect: '/alerts'
+    redirect: '/analysis'
+  },
+  {
+    path: '/analysis',
+    name: 'Analysis',
+    component: AnalysisView,
+    meta: { title: '数据分析' }
   },
   {
     path: '/alerts',
-    name: 'AlertCenter',
-    component: AlertCenterView,
-    meta: { title: '综合预警监控中心' }
+    name: 'AlertManagement',
+    component: AlertManagementView,
+    meta: { title: '预警管理' }
   },
   {
     path: '/extremes',
-    name: 'ExtremesDashboard',
-    component: ExtremesDashboardView,
-    meta: { title: '传感器定时最大最小值看板' }
+    redirect: '/analysis'
   },
   {
     path: '/wind-rose',
-    name: 'WindRose',
-    component: WindRoseView,
-    meta: { title: '桥梁风玫瑰图与风场分析' }
+    redirect: '/analysis'
   },
   {
     path: '/thresholds',
-    name: 'ThresholdWorkbench',
-    component: ThresholdWorkbenchView,
-    meta: { title: '三级阈值调试与历史回放试算台' }
+    redirect: '/analysis'
   }
 ]
 

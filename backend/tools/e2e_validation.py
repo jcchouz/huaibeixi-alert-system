@@ -36,9 +36,13 @@ except Exception:
     pass
 
 import psycopg2
-import psycopg2.extras
 
 from app.config import DSN, get_db_cursor
+from app.domain.alert_types import (
+    ALERT_DIRECTION_LOWER,
+    ALERT_DIRECTION_NONE,
+    ALERT_DIRECTION_UPPER,
+)
 from app.engine import AlertAnalyticsEngine
 
 # --------------------------------------------------------------------------- #
@@ -62,33 +66,26 @@ ANOMALIES: Dict[Tuple[str, str], Dict[int, Dict[str, Any]]] = {
         2: {"mode": "band", "lo": 43.5, "hi": 44.5},     # L1 (red) escalation
         3: {"mode": "band", "lo": 28.0, "hi": 34.0},     # back inside L3 -> recover
     },
-    ("wy-sj-01", "y"): {0: {"mode": "const", "v": 30.0}},   # STUCK
-    ("zd-wg-01", "x"): {1: {"mode": "skip"}, 2: {"mode": "skip"}},   # OFFLINE child
-    ("zd-wg-01", "y"): {1: {"mode": "skip"}, 2: {"mode": "skip"}},   # -> DAQ_OFFLINE
-    ("wprs-02", ""): {0: {"mode": "pairs", "points": [(0.0, 0.0), (1.0, 100.0)]}},  # RATE
+    ("wy-sj-01", "y"): {0: {"mode": "const", "v": 30.0}},   # 传感器死值
+    ("zd-wg-01", "x"): {1: {"mode": "skip"}, 2: {"mode": "skip"}},   # 传感器离线
+    ("zd-wg-01", "y"): {1: {"mode": "skip"}, 2: {"mode": "skip"}},   # 采集仪离线
     ("wlg-10", ""): {
         1: {"mode": "band", "lo": -260.0, "hi": -255.0},  # LOWER L3
-        2: {"mode": "band", "lo": -330.0, "hi": -322.0},  # OOR + LOWER L1
+        2: {"mode": "band", "lo": -330.0, "hi": -322.0},  # 超物理量程 + LOWER L1
     },
     ("yb-sx01-a", "stress"): {0: {"mode": "pairs", "points": [(0.0, 0.0), (1.0, 0.0), (5.0, 0.0)]}},  # GAP
-    ("accl-02", "x"): {0: {"mode": "spike", "base": 0.0, "spike": 1.2}},  # SPIKE
-    ("wlg-08", ""): {0: {"mode": "mixedcase"}},   # DATA_CONFLICT
 }
 
-# dedup_key -> (final alert_status, final alert_level)
+# sensor identity -> (final alert_status, final alert_level)
 # The device-level DAQ alert key is added dynamically in ``phase_verify`` because
 # the engine keys it on the collect-instrument id, not on the sensor number.
 EXPECTED_ALERTS: List[Tuple[str, int, int]] = [
-    ("wy-sj-01:x:THRESHOLD:UPPER", 2, 1),
-    ("wy-sj-01:y:STUCK:NONE", 2, 3),
-    ("zd-wg-01:x:OFFLINE:NONE", 2, 1),
-    ("zd-wg-01:y:OFFLINE:NONE", 2, 1),
-    ("wprs-02::RATE:NONE", 2, 2),
-    ("yb-sx01-a:stress:GAP_1000MS:NONE", 2, 3),
-    ("accl-02:x:SPIKE:NONE", 2, 2),
-    ("wlg-08::DATA_CONFLICT:NONE", 2, 3),
-    ("wlg-10::THRESHOLD:LOWER", 2, 1),
-    ("wlg-10::OOR:NONE", 2, 2),
+    (f"wy-sj-01:x:阈值超限:{ALERT_DIRECTION_UPPER}", 0, 1),
+    (f"wy-sj-01:y:传感器死值:{ALERT_DIRECTION_NONE}", 0, 3),
+    (f"zd-wg-01:x:传感器离线:{ALERT_DIRECTION_NONE}", 0, 3),
+    (f"zd-wg-01:y:传感器离线:{ALERT_DIRECTION_NONE}", 0, 3),
+    (f"wlg-10::阈值超限:{ALERT_DIRECTION_LOWER}", 0, 1),
+    (f"wlg-10::超物理量程:{ALERT_DIRECTION_LOWER}", 0, 3),
 ]
 
 DAQ_SENSOR = "zd-wg-01"
@@ -121,17 +118,10 @@ def rule_key(rule: Dict[str, Any]) -> Tuple[str, str]:
 
 def normal_band(rule: Dict[str, Any]) -> Tuple[float, float]:
     """Centre/amplitude of a benign signal that sits inside level-3 limits."""
-    ext = rule.get("ext_params") or {}
     lo = rule.get("level3_lower")
     hi = rule.get("level3_upper")
-    pmin = ext.get("physical_min")
-    pmax = ext.get("physical_max")
-    lo = float(lo) if lo is not None else (float(pmin) if pmin is not None else 0.0)
-    hi = float(hi) if hi is not None else (float(pmax) if pmax is not None else 1.0)
-    if pmin is not None and float(pmin) > lo:
-        lo = float(pmin)
-    if pmax is not None and float(pmax) < hi:
-        hi = float(pmax)
+    lo = float(lo) if lo is not None else 0.0
+    hi = float(hi) if hi is not None else 1.0
     if hi <= lo:
         hi = lo + max(1.0, abs(lo) * 0.01)
     centre = (lo + hi) / 2.0
@@ -160,10 +150,6 @@ def window_points(rule: Dict[str, Any], n: int, spec: Optional[Dict[str, Any]]) 
             v = lo + (hi - lo) * (math.sin(i * 0.37) + 1.0) / 2.0
         elif mode == "const":
             v = float(spec["v"])
-        elif mode == "spike":
-            v = float(spec["base"])
-            if i == n // 2:
-                v = float(spec["spike"])
         else:
             v = normal_value(rule, i)
         pts.append((off, v))
@@ -176,7 +162,6 @@ def load_rules() -> List[Dict[str, Any]]:
             """
             SELECT *
             FROM public.t_alert_threshold
-            WHERE is_delete = false AND monitor_enabled = true
             ORDER BY sensor_no, channel
             """
         )
@@ -207,11 +192,8 @@ def build_window_rows(
         iv = int(rule.get("expected_interval_ms") or 1000)
         hz = 1000.0 / max(1, iv)
         n = max(1, int(round(hz * WINDOW_SECONDS * scale)))
-        for i, (off, val) in enumerate(window_points(rule, n, spec)):
-            emit_sensor = sensor
-            if spec and spec.get("mode") == "mixedcase":
-                emit_sensor = sensor.upper() if i % 2 == 0 else sensor.lower()
-            rows.append((emit_sensor, ch, float(val), win_start + timedelta(seconds=off)))
+        for off, val in window_points(rule, n, spec):
+            rows.append((sensor, ch, float(val), win_start + timedelta(seconds=off)))
     return rows
 
 
@@ -238,11 +220,17 @@ def insert_rows(rows: List[Tuple[Any, ...]], target_rate: float, pace: bool = Tr
         cur = conn.cursor()
         for start in range(0, len(rows), INSERT_BATCH):
             batch = rows[start:start + INSERT_BATCH]
-            psycopg2.extras.execute_values(
-                cur,
-                "INSERT INTO public.t_monitor (sensor_no, channel, value, time) VALUES %s",
-                batch,
-                page_size=1000,
+            payload = io.StringIO()
+            for sensor_no, channel, value, ts in batch:
+                # t_monitor identifiers and numeric values contain no CSV delimiters.
+                payload.write(
+                    f"{sensor_no},{channel},{value},{ts.strftime('%Y-%m-%d %H:%M:%S.%f')}\n"
+                )
+            payload.seek(0)
+            cur.copy_expert(
+                "COPY public.t_monitor (sensor_no, channel, value, time) "
+                "FROM STDIN WITH (FORMAT csv)",
+                payload,
             )
             conn.commit()
             sent += len(batch)
@@ -258,25 +246,23 @@ def insert_rows(rows: List[Tuple[Any, ...]], target_rate: float, pace: bool = Tr
 
 
 def fetch_alert_map() -> Dict[str, Dict[str, Any]]:
-    """dedup_key -> latest alert row (by seq)."""
+    """alert identity -> latest alert row (by seq)."""
     with get_db_cursor() as cur:
         cur.execute(
             """
             SELECT *
             FROM public.t_alert_record
-            WHERE dedup_key IS NOT NULL
             ORDER BY seq ASC
             """
         )
         out: Dict[str, Dict[str, Any]] = {}
         for r in cur.fetchall():
-            out[r["dedup_key"]] = dict(r)
+            key = (
+                f"{r['sensor_no'].lower()}:{r.get('channel') or ''}:"
+                f"{r['alert_type']}:{r.get('direction') or ALERT_DIRECTION_NONE}"
+            )
+            out[key] = dict(r)
         return out
-
-
-def events_of(row: Dict[str, Any]) -> List[str]:
-    log = row.get("timeline_log") or []
-    return [str(e.get("event")) for e in log if isinstance(e, dict)]
 
 
 def snapshot_alert_record(conn: Any) -> bytes:
@@ -388,10 +374,10 @@ def phase_detect(args: argparse.Namespace) -> bool:
         with get_db_cursor() as cur:
             cur.execute(
                 """
-                SELECT dedup_key, alert_type, alert_level, alert_status, direction
+                SELECT sensor_no, channel, alert_type, alert_level, alert_status, direction
                 FROM public.t_alert_record
-                WHERE is_delete = false AND peak_time >= %s AND peak_time < %s
-                ORDER BY dedup_key
+                WHERE create_time >= %s AND create_time < %s
+                ORDER BY sensor_no, channel, alert_type, direction
                 """,
                 (ws, we),
             )
@@ -399,8 +385,12 @@ def phase_detect(args: argparse.Namespace) -> bool:
             if len(rows) > 40:
                 print(f"          ({len(rows)} alerts in window, showing 40)")
             for r in rows[:40]:
+                identity = (
+                    f"{r['sensor_no'].lower()}:{r.get('channel') or ''}:"
+                    f"{r['alert_type']}:{r.get('direction') or ALERT_DIRECTION_NONE}"
+                )
                 print(
-                    f"          - {r['dedup_key']:<45} type={r['alert_type']:<14} "
+                    f"          - {identity:<45} type={r['alert_type']:<14} "
                     f"L{r['alert_level']} status={r['alert_status']} dir={r['direction']}"
                 )
     return True
@@ -429,7 +419,13 @@ def phase_verify(args: argparse.Namespace) -> bool:
         cur.execute("SELECT instrument_id FROM public.t_sensor WHERE LOWER(sensor_no) = %s LIMIT 1", (DAQ_SENSOR,))
         r = cur.fetchone()
     if r and r["instrument_id"]:
-        expected_list.append((f"{r['instrument_id'].lower()}:__DAQ__:DAQ_OFFLINE:NONE", 2, 1))
+        expected_list.append(
+            (
+                f"{r['instrument_id'].lower()}:__DAQ__:采集仪离线:{ALERT_DIRECTION_NONE}",
+                0,
+                3,
+            )
+        )
 
     for key, status, level in expected_list:
         row = alerts.get(key)
@@ -444,30 +440,29 @@ def phase_verify(args: argparse.Namespace) -> bool:
         c.check(int(row["alert_level"]) == level, f"alert {key} level == {level}", f"got {row['alert_level']}")
 
     # escalation / debounce specifics
-    row = alerts.get("wy-sj-01:x:THRESHOLD:UPPER")
+    row = alerts.get(f"wy-sj-01:x:阈值超限:{ALERT_DIRECTION_UPPER}")
     if row:
-        c.check(int(row["trigger_count"]) >= 3, "wy-sj-01/x THRESHOLD debounced across windows",
+        c.check(int(row["trigger_count"]) >= 3, "wy-sj-01/x 阈值超限 debounced across windows",
                 f"trigger_count={row['trigger_count']}")
-        c.check(row["end_ts"] is not None, "wy-sj-01/x THRESHOLD auto-recovered (end_ts set)")
-        ev = events_of(row)
-        c.check("TRIGGER" in ev and "RECOVER" in ev, "wy-sj-01/x THRESHOLD timeline has TRIGGER+RECOVER", str(ev))
-        snap = row.get("threshold_snapshot") or {}
-        c.check(bool(snap) and "level1" in snap, "wy-sj-01/x THRESHOLD snapshot persisted", str(snap)[:120])
-        c.check(int(row.get("rule_version") or 0) >= 1, "wy-sj-01/x THRESHOLD rule_version set")
 
-    row = alerts.get("zd-wg-01:x:OFFLINE:NONE")
+    row = alerts.get(f"zd-wg-01:x:传感器离线:{ALERT_DIRECTION_NONE}")
     if row:
-        ev = events_of(row)
-        c.check("SUPPRESSED_BY_DAQ" in ev, "zd-wg-01/x child OFFLINE suppressed by DAQ", str(ev))
-    row = alerts.get("zd-wg-01:y:OFFLINE:NONE")
+        c.check(int(row["alert_status"]) == 0, "zd-wg-01/x 传感器离线 remains active")
+    row = alerts.get(f"zd-wg-01:y:传感器离线:{ALERT_DIRECTION_NONE}")
     if row:
-        ev = events_of(row)
-        c.check("SUPPRESSED_BY_DAQ" in ev, "zd-wg-01/y child OFFLINE suppressed by DAQ", str(ev))
-    daq_key = next((k for k, _, _ in expected_list if k.endswith(":__DAQ__:DAQ_OFFLINE:NONE")), None)
+        c.check(int(row["alert_status"]) == 0, "zd-wg-01/y 传感器离线 remains active")
+    daq_key = next(
+        (
+            k
+            for k, _, _ in expected_list
+            if k.endswith(f":__DAQ__:采集仪离线:{ALERT_DIRECTION_NONE}")
+        ),
+        None,
+    )
     row = alerts.get(daq_key) if daq_key else None
     if row:
-        c.check(row["end_ts"] is not None, "DAQ_OFFLINE auto-recovered after instrument resumes")
-        c.check(int(row["trigger_count"]) >= 2, "DAQ_OFFLINE aggregated over >=2 windows",
+        c.check(int(row["alert_status"]) == 0, "采集仪离线 remains active")
+        c.check(int(row["trigger_count"]) >= 2, "采集仪离线 aggregated over >=2 windows",
                 f"trigger_count={row['trigger_count']}")
 
     # 1m statistics
@@ -476,14 +471,14 @@ def phase_verify(args: argparse.Namespace) -> bool:
             """
             SELECT COUNT(*) AS c
             FROM public.t_stat_record
-            WHERE period_type = '1m' AND is_delete = false
+            WHERE period_type = '1m'
               AND stat_time >= %s AND stat_time < %s
             """,
             (STREAM_START, STREAM_START + timedelta(seconds=args.windows * 60)),
         )
         got = int(cur.fetchone()["c"])
         skipped = 0
-        for key, spec in ANOMALIES.items():
+        for _, spec in ANOMALIES.items():
             skipped += sum(1 for w, s in spec.items() if s.get("mode") == "skip" and w < args.windows)
         expected = len(load_rules()) * args.windows - skipped
         c.check(got == expected, f"1m stat rows == {expected}", f"got {got}")
@@ -512,7 +507,7 @@ def phase_verify(args: argparse.Namespace) -> bool:
 
         cur.execute(
             """
-            SELECT gap_count, sample_count
+            SELECT sample_count
             FROM public.t_stat_record
             WHERE period_type = '1m' AND sensor_no = 'yb-sx01-a' AND channel = 'stress'
               AND stat_time = %s
@@ -523,7 +518,6 @@ def phase_verify(args: argparse.Namespace) -> bool:
         if r is None:
             c.check(False, "1m stat row for yb-sx01-a/stress @22:00 exists", "missing")
         else:
-            c.check(int(r["gap_count"]) == 1, "yb-sx01-a/stress gap_count == 1", f"got {r['gap_count']}")
             c.check(int(r["sample_count"]) == 3, "yb-sx01-a/stress sample_count == 3", f"got {r['sample_count']}")
 
         # 10m wind rose
@@ -562,13 +556,17 @@ def phase_verify(args: argparse.Namespace) -> bool:
     with get_db_cursor() as cur:
         cur.execute(
             """
-            SELECT DISTINCT dedup_key
+            SELECT DISTINCT sensor_no, channel, alert_type, direction
             FROM public.t_alert_record
-            WHERE is_delete = false AND peak_time >= %s AND peak_time < %s
+            WHERE create_time >= %s AND create_time < %s
             """,
             (STREAM_START, STREAM_START + timedelta(seconds=args.windows * 60)),
         )
-        seen = {r["dedup_key"] for r in cur.fetchall()}
+        seen = {
+            f"{r['sensor_no'].lower()}:{r.get('channel') or ''}:"
+            f"{r['alert_type']}:{r.get('direction') or ALERT_DIRECTION_NONE}"
+            for r in cur.fetchall()
+        }
     extra = sorted(seen - expected_keys)
     if extra:
         print(f"[verify] INFO  {len(extra)} additional alerts appeared in the window:")
@@ -603,7 +601,7 @@ def phase_clean(args: argparse.Namespace, snapshot: Optional[bytes]) -> bool:
             print(f"[clean] restored t_alert_record: {before} -> {after} rows")
         else:
             cur.execute(
-                "DELETE FROM public.t_alert_record WHERE peak_time >= %s AND peak_time < %s",
+                "DELETE FROM public.t_alert_record WHERE create_time >= %s AND create_time < %s",
                 (WIND_START, TEST_END),
             )
             conn.commit()

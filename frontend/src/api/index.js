@@ -5,29 +5,78 @@ const http = axios.create({
   timeout: 25000
 })
 
+export const AUTH_TOKEN_KEY = 'huaibeixi_auth_token'
+
+export function getAuthToken() {
+  return localStorage.getItem(AUTH_TOKEN_KEY) || ''
+}
+
+export function setAuthToken(token) {
+  if (token) {
+    localStorage.setItem(AUTH_TOKEN_KEY, token)
+  } else {
+    localStorage.removeItem(AUTH_TOKEN_KEY)
+  }
+  window.dispatchEvent(new CustomEvent('auth:token-changed'))
+}
+
+http.interceptors.request.use((config) => {
+  const token = getAuthToken()
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
 http.interceptors.response.use(
   (response) => response.data,
   (error) => {
-    const detail = error?.response?.data?.detail || error?.message || '网络请求异常'
+    const payload = error?.response?.data
+    const detail =
+      payload?.error?.message ||
+      payload?.detail ||
+      error?.message ||
+      '网络请求异常'
+    if (error?.response?.status === 401) {
+      localStorage.removeItem(AUTH_TOKEN_KEY)
+      window.dispatchEvent(new CustomEvent('auth:unauthorized'))
+    }
     return Promise.reject(new Error(detail))
   }
 )
 
 export const ALERT_TYPE_MAP = {
-  THRESHOLD: '三级阈值超限',
-  OFFLINE: '1000ms离线/断流',
-  GAP_1000MS: '1000ms采样断流',
-  DAQ_OFFLINE: '采集仪批量离线',
-  RATE: '变形速率突变',
-  STUCK: '传感器死值故障',
-  OOR: '超物理量程',
-  SPIKE: '毛刺跳变',
-  DATA_CONFLICT: '双源时间戳冲突'
+  阈值超限: '阈值超限',
+  传感器离线: '传感器离线',
+  采集仪离线: '采集仪离线',
+  传感器死值: '传感器死值',
+  超物理量程: '超物理量程'
 }
 
 export function formatAlertTypeLabel(type) {
   if (!type) return '未知类型'
   return ALERT_TYPE_MAP[type] || type
+}
+
+export async function loginApi(username, password) {
+  const response = await http.post('/auth/login', { username, password })
+  setAuthToken(response.access_token)
+  return response
+}
+
+export async function getCurrentUserApi() {
+  return await http.get('/auth/me')
+}
+
+export function logoutApi() {
+  setAuthToken('')
+}
+
+export function buildAlertStreamUrl(afterSeq = 0) {
+  const token = getAuthToken()
+  const query = new URLSearchParams({ afterSeq: String(afterSeq) })
+  if (token) query.set('token', token)
+  return `/api/alerts/stream?${query.toString()}`
 }
 
 // 1. Overview & KPI Summary
@@ -60,7 +109,6 @@ export async function getAlertsSummaryApi() {
       unackedAlertsCount: data.unackedAlertsCount ?? 0,
       ackedAlertsCount: data.ackedAlertsCount ?? 0,
       resolvedAlertsCount: data.resolvedAlertsCount ?? 0,
-      suppressedAlertsCount: data.suppressedAlertsCount ?? 0,
       totalAlertsCount: data.totalAlertsCount ?? 0,
       level1Count: data.level1Count ?? 0,
       level2Count: data.level2Count ?? 0,
@@ -90,12 +138,22 @@ export async function listAlertsApi(params = {}) {
   return await http.get('/alerts', { params })
 }
 
+export async function createAlertApi(payload = {}) {
+  const res = await http.post('/alerts', {
+    sensorNo: payload.sensor_no ?? payload.sensorNo,
+    channel: payload.channel ?? '',
+    alertType: payload.alert_type ?? payload.alertType ?? '阈值超限',
+    alertLevel: Number(payload.alert_level ?? payload.alertLevel ?? 1),
+    triggerVal: Number(payload.trigger_val ?? payload.triggerVal ?? 0)
+  })
+  return res.alert || res
+}
+
 // 4. Acknowledge Single Alert
 export async function ackAlertApi(alertId, payload = {}) {
   const body = {
-    alertStatus: payload.new_status ?? payload.alertStatus ?? payload.alert_status ?? 1,
-    ackBy: payload.ack_user ?? payload.ackBy ?? payload.ack_by ?? '值班工程师',
-    remark: payload.ack_note ?? payload.remark ?? '已确认处置'
+    alertStatus: 1,
+    ackBy: payload.ack_user ?? payload.ackBy ?? payload.ack_by ?? '值班工程师'
   }
   const res = await http.post(`/alerts/${alertId}/ack`, body)
   return res.alert || res
@@ -105,9 +163,12 @@ export async function ackAlertApi(alertId, payload = {}) {
 export async function ackAllAlertsApi(payload = {}) {
   return await http.post('/alerts/ack-all', {
     ackBy: payload.ackBy || '值班工程师',
-    alertLevel: payload.alertLevel ?? null,
-    remark: payload.remark || '值班工程师一键批量确认处置'
+    alertLevel: payload.alertLevel ?? null
   })
+}
+
+export async function deleteAlertApi(alertId) {
+  return await http.delete(`/alerts/${alertId}`)
 }
 
 // 6. Engine Replay & Live Simulation Control

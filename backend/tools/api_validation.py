@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import sys
 import threading
 import time
@@ -31,8 +32,9 @@ import psycopg2
 
 from app.config import DSN, get_db_cursor
 
-BASE = "http://127.0.0.1:8090"
+BASE = os.getenv("API_BASE_URL", "http://127.0.0.1:8090").rstrip("/")
 SNAP_DIR = Path(__file__).resolve().parent / "_snap"
+AUTH_TOKEN = os.getenv("AUTH_TOKEN", "").strip()
 
 
 class Checker:
@@ -55,6 +57,8 @@ def http(method: str, path: str, body: Optional[Dict[str, Any]] = None,
     url = f"{BASE}{path}"
     data = None
     headers = {"Accept": "application/json"}
+    if AUTH_TOKEN:
+        headers["Authorization"] = f"Bearer {AUTH_TOKEN}"
     if body is not None:
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -105,8 +109,11 @@ def sse_probe(trigger_after: float = 1.5, total: float = 6.0) -> Tuple[List[str]
     holder: Dict[str, Any] = {"lines": [], "stop": False, "err": None}
 
     def reader() -> None:
+        headers = {"Accept": "text/event-stream"}
+        if AUTH_TOKEN:
+            headers["Authorization"] = f"Bearer {AUTH_TOKEN}"
         req = urllib.request.Request(
-            f"{BASE}/api/alerts/stream", headers={"Accept": "text/event-stream"})
+            f"{BASE}/api/alerts/stream", headers=headers)
         try:
             resp = urllib.request.urlopen(req, timeout=30)
         except Exception as exc:
@@ -181,7 +188,8 @@ def run(args: argparse.Namespace) -> int:
             ids = [str(i["id"]) for i in thr["items"]]
             first = thr["items"][0]
             print(f"[api]   sample rule sensor={first.get('sensor_no')} channel={first.get('channel')} "
-                  f"v={first.get('version')} l3=({first.get('level3_lower')},{first.get('level3_upper')})")
+                  f"create_by={first.get('create_by')} "
+                  f"l3=({first.get('level3_lower')},{first.get('level3_upper')})")
 
         st, wy = http("GET", "/api/thresholds?sensorNo=wy-sj-01")
         tid = args.threshold_id
@@ -192,30 +200,25 @@ def run(args: argparse.Namespace) -> int:
 
         # ---------- PUT threshold ----------
         if tid:
-            st0, before = http("GET", f"/api/thresholds?sensorNo=wy-sj-01")
+            st0, before = http("GET", "/api/thresholds?sensorNo=wy-sj-01")
             rule_before = next((r for r in (before or {}).get("items", [])
                                 if str(r["id"]) == tid), None) if isinstance(before, dict) else None
-            v_before = int(rule_before["version"]) if rule_before else -1
             l3u = rule_before.get("level3_upper") if rule_before else None
-            body: Dict[str, Any] = {"change_reason": "api_validation smoke", "update_by": "codex"}
+            body: Dict[str, Any] = {}
             if l3u is not None:
                 body["level3_upper"] = float(l3u) + 0.01
             st, upd = http("PUT", f"/api/thresholds/{tid}", body)
             rule_after = upd.get("threshold") or upd.get("rule") or upd if isinstance(upd, dict) else {}
-            v_after = int(rule_after["version"]) if isinstance(rule_after, dict) and "version" in rule_after else -1
-            c.check(st == 200 and v_after == v_before + 1,
-                    f"PUT /api/thresholds/{str(tid)[:8]}.. version {v_before}->{v_after}",
+            got_l3u = float(rule_after.get("level3_upper")) if isinstance(rule_after, dict) else None
+            c.check(st == 200 and got_l3u == body.get("level3_upper"),
+                    f"PUT /api/thresholds/{str(tid)[:8]}.. updates threshold",
                     f"{st} {str(upd)[:180]}")
-            hist = rule_after.get("history_log") if isinstance(rule_after, dict) else None
-            c.check(isinstance(hist, list) and len(hist) >= 1,
-                    "PUT threshold appends history_log", str(hist)[:140])
             st_bad, _ = http("PUT", f"/api/thresholds/{tid}",
                              {"level1_upper": 1.0, "level2_upper": 5.0, "level3_upper": 9.0})
             c.check(st_bad == 400, "PUT threshold rejects invalid L1<L2<L3 ordering", f"got {st_bad}")
 
             st, batch = http("POST", "/api/thresholds/batch-update",
-                             {"threshold_ids": [tid], "change_reason": "api_validation batch",
-                              "update_by": "codex"})
+                             {"threshold_ids": [tid], "confirm_points": 3})
             bc = None
             if isinstance(batch, dict):
                 bc = batch.get("updatedCount", batch.get("updated_count"))
@@ -246,20 +249,25 @@ def run(args: argparse.Namespace) -> int:
 
         # ---------- poll ----------
         st, poll = http("GET", "/api/alerts/poll?afterSeq=0&limit=3")
-        c.check(st == 200 and isinstance(poll, dict) and "items" in poll and "maxSeq" in poll,
+        c.check(st == 200 and isinstance(poll, dict) and "items" in poll
+                and "maxSeq" in poll and "latestSeq" in poll,
                 "GET /api/alerts/poll returns cursor page", f"{st} {str(poll)[:120]}")
         if isinstance(poll, dict):
-            print(f"[api]   poll elapsedMs={poll.get('elapsedMs')} maxSeq={poll.get('maxSeq')}")
+            c.check(int(poll.get("latestSeq") or 0) >= int(poll.get("maxSeq") or 0),
+                    "GET /api/alerts/poll latestSeq covers the full table",
+                    f"maxSeq={poll.get('maxSeq')} latestSeq={poll.get('latestSeq')}")
+            print(f"[api]   poll elapsedMs={poll.get('elapsedMs')} maxSeq={poll.get('maxSeq')} "
+                  f"latestSeq={poll.get('latestSeq')}")
 
         # ---------- ack single ----------
         with get_db_cursor() as cur:
             cur.execute("SELECT id FROM public.t_alert_record WHERE alert_status=0 "
-                        "AND is_delete=false ORDER BY seq DESC LIMIT 1")
+                        "ORDER BY seq DESC LIMIT 1")
             row = cur.fetchone()
         ack_id = active_ids[0] if active_ids else (str(row["id"]) if row else None)
         if ack_id:
             st, ackd = http("POST", f"/api/alerts/{ack_id}/ack",
-                            {"alertStatus": 1, "ackBy": "codex", "remark": "api_validation ack"})
+                            {"alertStatus": 1, "ackBy": "codex"})
             got = ackd["alert"].get("alert_status") if isinstance(ackd, dict) and isinstance(ackd.get("alert"), dict) else None
             c.check(st == 200 and got == 1, "POST /api/alerts/{id}/ack sets status=1",
                     f"{st} status={got}")
@@ -268,13 +276,13 @@ def run(args: argparse.Namespace) -> int:
 
         # ---------- ack all ----------
         st, allack = http("POST", "/api/alerts/ack-all",
-                          {"ackBy": "codex", "remark": "api_validation ack-all"})
+                          {"ackBy": "codex"})
         acked = allack.get("ackedCount") if isinstance(allack, dict) else None
         c.check(st == 200 and isinstance(acked, int),
                 "POST /api/alerts/ack-all acks unhandled alerts", f"{st} ackedCount={acked}")
         with get_db_cursor() as cur:
             cur.execute("SELECT COUNT(*) c FROM public.t_alert_record "
-                        "WHERE alert_status=0 AND is_delete=false")
+                        "WHERE alert_status=0")
             remaining = int(cur.fetchone()["c"])
         c.check(remaining == 0, "ack-all leaves 0 unhandled alerts", f"remaining={remaining}")
 
@@ -284,7 +292,7 @@ def run(args: argparse.Namespace) -> int:
         c.check("event: connected" in joined, "SSE emits initial connected event", err or joined[:120])
         c.check("event: alert" in joined, "SSE pushes alert event on test trigger",
                 err or f"lines={len(lines)}")
-        print(f"[api]   SSE events={sum(1 for l in lines if l.startswith('event:'))}")
+        print(f"[api]   SSE events={sum(1 for line in lines if line.startswith('event:'))}")
 
         # ---------- engine replay step/stop ----------
         st, step = http("POST", "/api/engine/replay",

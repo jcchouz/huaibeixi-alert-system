@@ -27,7 +27,7 @@
           <span class="sub-unit">当前活跃 / 累计 {{ kpi.totalLevel1Count }}</span>
         </div>
         <div class="kpi-foot">
-          <span>结构极限超限 / 高频通道断流 · 点击筛选</span>
+          <span>结构极限超限 · 点击筛选</span>
         </div>
       </div>
 
@@ -41,7 +41,7 @@
           <span class="sub-unit">当前活跃 / 累计 {{ kpi.totalLevel2Count }}</span>
         </div>
         <div class="kpi-foot">
-          <span>重要阈值越限 / 超物理量程(OOR) · 点击筛选</span>
+          <span>重要阈值越限 / 超物理量程 · 点击筛选</span>
         </div>
       </div>
 
@@ -55,21 +55,21 @@
           <span class="sub-unit">当前活跃 / 累计 {{ kpi.totalLevel3Count }}</span>
         </div>
         <div class="kpi-foot">
-          <span>注意级波动 / 双源混写冲突 · 点击筛选</span>
+          <span>注意级波动 · 点击筛选</span>
         </div>
       </div>
 
       <div class="shm-card kpi-card kpi-purple" @click="quickFilterOffline">
         <div class="kpi-top">
-          <span class="kpi-label">离线与 >1000ms 断流监测</span>
-          <el-tag size="small" type="info">风暴抑制开启</el-tag>
+          <span class="kpi-label">传感器离线监测</span>
+          <el-tag size="small" type="info">人工处理模式</el-tag>
         </div>
         <div class="kpi-main mono-num">
           <span class="big-num purple-text">{{ kpi.offlineChannels }}</span>
-          <span class="sub-unit">离线 / {{ kpi.suppressedAlertsCount }} 条被采集仪聚合抑制</span>
+          <span class="sub-unit">离线 / {{ kpi.ackedAlertsCount }} 条已处理</span>
         </div>
         <div class="kpi-foot">
-          <span>在线正常 {{ kpi.onlineChannels }} 通道 · ≥1Hz 1000ms断流盯防</span>
+          <span>在线正常 {{ kpi.onlineChannels }} 通道 · 离线状态实时监测</span>
         </div>
       </div>
 
@@ -109,7 +109,7 @@
             value="2026-09-28 13:55:00"
           />
           <el-option
-            label="⚡ 2026-09-30 17:35:00 (采集仪批量掉线 · 1000ms断流风暴抑制)"
+            label="⚡ 2026-09-30 17:35:00 (采集仪批量掉线)"
             value="2026-09-30 17:35:00"
           />
           <el-option
@@ -159,7 +159,6 @@
           <template #dropdown>
             <el-dropdown-menu>
               <el-dropdown-item command="L1_THRESHOLD">🚨 模拟一级红色预警 (主桁架应力超限 stn-12-b)</el-dropdown-item>
-              <el-dropdown-item command="L1_GAP">🔌 模拟 >1000ms 高频采样断流 (100Hz加速度计 accl-01)</el-dropdown-item>
               <el-dropdown-item command="L2_ACCL">🟠 模拟二级橙色预警 (去直流振动幅值超限 accl-02)</el-dropdown-item>
               <el-dropdown-item command="L1_UPGRADE">⚡ 模拟三级黄 ➔ 一级红 动态升级弹窗 (wea-01)</el-dropdown-item>
             </el-dropdown-menu>
@@ -211,12 +210,11 @@
             <el-option label="🔴 一级预警 (红色紧急)" :value="1" />
             <el-option label="🟠 二级预警 (橙色重要)" :value="2" />
             <el-option label="🟡 三级预警 (黄色一般)" :value="3" />
-            <el-option label="⚪ 0级 (1000ms断流标记)" :value="0" />
           </el-select>
 
           <el-select
             v-model="filters.alertType"
-            placeholder="预警类型 (全部9类)"
+            placeholder="预警类型 (全部)"
             clearable
             size="small"
             style="width: 190px"
@@ -238,11 +236,8 @@
             style="width: 175px"
             @change="handleSearch"
           >
-            <el-option label="未处理 (Active)" :value="0" />
-            <el-option label="已确认 (Acked)" :value="1" />
-            <el-option label="已恢复 (Resolved)" :value="2" />
-            <el-option label="已关闭 (Closed)" :value="3" />
-            <el-option label="被采集仪抑制 (Suppressed)" :value="4" />
+            <el-option label="未处理" :value="0" />
+            <el-option label="已处理" :value="1" />
           </el-select>
 
           <el-input
@@ -257,7 +252,7 @@
 
           <el-input
             v-model="filters.keyword"
-            placeholder="搜索备注/物理量/通道关键词..."
+            placeholder="搜索传感器/物理量/通道关键词..."
             clearable
             size="small"
             style="width: 210px"
@@ -280,7 +275,7 @@
             @click="handleBatchAck"
           >
             <el-icon style="margin-right: 4px"><Check /></el-icon>
-            一键批量确认未处理告警 ({{ kpi.unackedAlertsCount }})
+            一键批量处理未处理告警 ({{ kpi.unackedAlertsCount }})
           </el-button>
         </div>
       </div>
@@ -332,23 +327,21 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="触发值 / 历史极值 (Peak)" width="185" align="right">
+        <el-table-column label="触发值" width="150" align="right">
           <template #default="{ row }">
             <div class="mono-num val-col">
-              <div>触发: {{ formatNum(row.trigger_val) }} {{ row.unit || '' }}</div>
-              <div class="peak-line">
-                极值: <strong>{{ formatNum(row.peak_val) }}</strong> {{ row.unit || '' }}
-              </div>
+              <div>{{ formatNum(row.trigger_val) }} {{ row.unit || '' }}</div>
             </div>
           </template>
         </el-table-column>
 
-        <el-table-column label="阈值快照 (rule_version)" width="175" align="center">
+        <el-table-column label="处理人 / 处理时间" width="190" align="center">
           <template #default="{ row }">
-            <div class="snap-cell mono-num">
-              <el-tag size="small" type="info" effect="plain">v{{ row.rule_version || 1 }}</el-tag>
-              <span class="snap-range">{{ formatSnapshotSummary(row) }}</span>
+            <div v-if="row.alert_status === 1" class="mono-num time-col">
+              <div>{{ row.ack_by || '-' }}</div>
+              <div class="muted-time">{{ row.ack_time || '-' }}</div>
             </div>
+            <span v-else>-</span>
           </template>
         </el-table-column>
 
@@ -368,18 +361,15 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="首次触发 / 最新触发时间" width="168" align="center">
+        <el-table-column label="触发时间" width="168" align="center">
           <template #default="{ row }">
             <div class="mono-num time-col">
-              <div>首: {{ row.create_time }}</div>
-              <div class="muted-time">新: {{ row.last_fire_time || row.create_time }}</div>
+              <div>{{ row.create_time }}</div>
             </div>
           </template>
         </el-table-column>
 
-        <el-table-column prop="remark" label="告警诊断摘要" min-width="240" show-overflow-tooltip />
-
-        <el-table-column label="操作" width="165" fixed="right" align="center">
+        <el-table-column label="操作" width="230" fixed="right" align="center">
           <template #default="{ row }">
             <div class="row-actions" @click.stop>
               <el-button
@@ -389,7 +379,7 @@
                 plain
                 @click="handleQuickRowAck(row)"
               >
-                确认
+                处理
               </el-button>
               <el-button
                 type="primary"
@@ -397,7 +387,7 @@
                 link
                 @click="emit('inspect-alert', row)"
               >
-                快照与时间线
+                详情
               </el-button>
             </div>
           </template>
@@ -406,7 +396,7 @@
 
       <div class="pagination-bar">
         <span class="total-hint mono-num">
-          共 {{ pagination.total }} 条预警事件记录 (支持点击任意行查看 JSONB 阈值快照与演进时间线)
+          共 {{ pagination.total }} 条预警事件记录
         </span>
         <el-pagination
           v-model:current-page="pagination.page"
@@ -476,7 +466,7 @@ const kpi = reactive({
   offlineChannels: 23,
   activeAlertsCount: 0,
   unackedAlertsCount: 0,
-  suppressedAlertsCount: 0,
+  resolvedAlertsCount: 0,
   totalAlertsCount: 0,
   level1Count: 0,
   level2Count: 0,
@@ -496,15 +486,11 @@ const engineInfo = reactive({
 })
 
 const allAlertTypes = [
-  { code: 'THRESHOLD', label: '三级阈值超限' },
-  { code: 'OFFLINE', label: '1000ms离线/断流' },
-  { code: 'GAP_1000MS', label: '1000ms采样断流' },
-  { code: 'DAQ_OFFLINE', label: '采集仪批量离线' },
-  { code: 'RATE', label: '变形速率突变' },
-  { code: 'STUCK', label: '传感器死值故障' },
-  { code: 'OOR', label: '超物理量程' },
-  { code: 'SPIKE', label: '毛刺跳变' },
-  { code: 'DATA_CONFLICT', label: '双源时间戳冲突' }
+  { code: '阈值超限', label: '阈值超限' },
+  { code: '传感器离线', label: '传感器离线' },
+  { code: '采集仪离线', label: '采集仪离线' },
+  { code: '传感器死值', label: '传感器死值' },
+  { code: '超物理量程', label: '超物理量程' }
 ]
 
 const filters = reactive({
@@ -600,7 +586,7 @@ function quickFilterLevel(lvl) {
 }
 
 function quickFilterOffline() {
-  filters.alertType = filters.alertType === 'OFFLINE' ? '' : 'OFFLINE'
+  filters.alertType = filters.alertType === '传感器离线' ? '' : '传感器离线'
   pagination.page = 1
   fetchAlerts()
 }
@@ -687,7 +673,7 @@ async function handleSimulateAlert(customPayload = {}) {
     const alertRecord = await simulateRealtimeAlertApi(customPayload)
     if (alertRecord) {
       emit('trigger-popup', alertRecord)
-      lastStepFeedback.value = `已触发实时预警弹窗 [SEQ #${alertRecord.seq}]：${alertRecord.station_name} · ${alertRecord.sensor_name} (${alertRecord.remark})`
+      lastStepFeedback.value = `已触发实时预警弹窗 [SEQ #${alertRecord.seq}]：${alertRecord.station_name} · ${alertRecord.sensor_name}`
     }
     await fetchSummaryAndTable()
     emit('refresh-global')
@@ -698,45 +684,40 @@ async function handleSimulateAlert(customPayload = {}) {
 
 function handleSimulateCommand(cmd) {
   if (cmd === 'L1_THRESHOLD') {
-    handleSimulateAlert({ sensorNo: 'stn-12-b', channel: 'stress', alertLevel: 1, alertType: 'THRESHOLD' })
-  } else if (cmd === 'L1_GAP') {
-    handleSimulateAlert({ sensorNo: 'accl-01', channel: 'x', alertLevel: 1, alertType: 'GAP_1000MS' })
+    handleSimulateAlert({ sensorNo: 'stn-12-b', channel: 'stress', alertLevel: 1, alertType: '阈值超限' })
   } else if (cmd === 'L2_ACCL') {
-    handleSimulateAlert({ sensorNo: 'accl-02', channel: 'y', alertLevel: 2, alertType: 'THRESHOLD' })
+    handleSimulateAlert({ sensorNo: 'accl-02', channel: 'y', alertLevel: 2, alertType: '阈值超限' })
   } else if (cmd === 'L1_UPGRADE') {
-    handleSimulateAlert({ sensorNo: 'wea-01', channel: 'temperature', alertLevel: 1, alertType: 'THRESHOLD' })
+    handleSimulateAlert({ sensorNo: 'wea-01', channel: 'temperature', alertLevel: 1, alertType: '阈值超限' })
   }
 }
 
 async function handleQuickRowAck(row) {
   try {
     await ackAlertApi(row.id, {
-      ack_user: '值班工程师',
-      ack_note: '监控中心列表快速确认处置',
-      new_status: 1
+      ack_user: '值班工程师'
     })
-    ElMessage.success(`已确认预警 #${row.seq}`)
+    ElMessage.success(`已处理预警 #${row.seq}`)
     await fetchSummaryAndTable()
     emit('refresh-global')
   } catch (err) {
-    ElMessage.error(`确认失败: ${err?.message || ''}`)
+    ElMessage.error(`处理失败: ${err?.message || ''}`)
   }
 }
 
 async function handleBatchAck() {
   try {
     await ElMessageBox.confirm(
-      '确定将当前所有未处理 (Active) 预警事件批量标记为“已确认 (Acked)”并写入时间线吗？',
-      '批量确认处置',
-      { type: 'warning', confirmButtonText: '确认批量处置', cancelButtonText: '取消' }
+      '确定将当前所有未处理预警批量标记为“已处理”吗？',
+      '批量处理',
+      { type: 'warning', confirmButtonText: '确认批量处理', cancelButtonText: '取消' }
     )
     batchAcking.value = true
     const res = await ackAllAlertsApi({
-      ackBy: '值班主任 (批量确认)',
-      alertLevel: filters.alertLevel,
-      remark: '监控中心一键批量确认处置'
+      ackBy: '值班主任 (批量处理)',
+      alertLevel: filters.alertLevel
     })
-    ElMessage.success(`批量确认完成，共处理 ${res.ackedCount ?? 0} 条告警`)
+    ElMessage.success(`批量处理完成，共处理 ${res.ackedCount ?? 0} 条告警`)
     await fetchSummaryAndTable()
     emit('refresh-global')
   } catch (_) {
@@ -754,13 +735,12 @@ function formatLevelLabel(lvl) {
   if (n === 1) return '一级预警 (红色紧急)'
   if (n === 2) return '二级预警 (橙色重要)'
   if (n === 3) return '三级预警 (黄色一般)'
-  return '0级断流标记'
+  return '未知等级'
 }
 
 function getAlertTypeTagColor(type) {
-  if (type === 'THRESHOLD' || type === 'DAQ_OFFLINE') return 'danger'
-  if (type === 'OFFLINE' || type === 'GAP_1000MS' || type === 'OOR') return 'warning'
-  if (type === 'DATA_CONFLICT') return 'info'
+  if (type === '阈值超限' || type === '采集仪离线') return 'danger'
+  if (type === '传感器离线' || type === '超物理量程') return 'warning'
   return 'primary'
 }
 
@@ -768,17 +748,13 @@ function getStatusTagType(status) {
   const s = Number(status)
   if (s === 0) return 'danger'
   if (s === 1) return 'warning'
-  if (s === 2) return 'success'
   return 'info'
 }
 
 function formatStatusText(status) {
   const s = Number(status)
-  if (s === 0) return '未处理 (Active)'
-  if (s === 1) return '已确认 (Acked)'
-  if (s === 2) return '已恢复 (Resolved)'
-  if (s === 3) return '已关闭 (Closed)'
-  if (s === 4) return '被采集仪抑制'
+  if (s === 0) return '未处理'
+  if (s === 1) return '已处理'
   return '未知'
 }
 
@@ -794,17 +770,6 @@ function formatMillion(n) {
   if (num >= 100000000) return `${(num / 100000000).toFixed(2)}亿`
   if (num >= 10000) return `${(num / 10000).toFixed(1)}万`
   return String(num)
-}
-
-function formatSnapshotSummary(row) {
-  const snap = row.threshold_snapshot
-  if (!snap || typeof snap !== 'object') return '默认规则'
-  const lvl = Number(row.alert_level || 1)
-  const arr = snap[`level${lvl}`]
-  if (Array.isArray(arr) && (arr[0] !== null || arr[1] !== null)) {
-    return `L${lvl}[${arr[0] ?? '-'}, ${arr[1] ?? '-'}]`
-  }
-  return `规则v${row.rule_version || 1}`
 }
 
 onMounted(() => {
@@ -1010,18 +975,6 @@ onMounted(() => {
   line-height: 1.35;
 }
 
-.peak-line {
-  color: var(--shm-red);
-}
-
-.snap-cell {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  font-size: 11px;
-}
-
 .time-col {
   font-size: 11px;
   line-height: 1.35;
@@ -1048,6 +1001,81 @@ onMounted(() => {
 @media (max-width: 1440px) {
   .kpi-grid-6 {
     grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (max-width: 1100px) {
+  .kpi-grid-6 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .replay-control-bar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .replay-left,
+  .replay-right {
+    width: 100%;
+  }
+}
+
+@media (max-width: 720px) {
+  .alert-center-view {
+    gap: 10px;
+  }
+
+  .kpi-grid-6 {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .kpi-card {
+    min-height: 96px;
+  }
+
+  .kpi-top {
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .kpi-foot {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .replay-left,
+  .replay-right {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .replay-left :deep(.el-select),
+  .replay-right :deep(.el-button),
+  .replay-right :deep(.el-dropdown) {
+    width: 100% !important;
+  }
+
+  .type-strip {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
+
+  .type-chip {
+    flex: none;
+  }
+
+  .filter-toolbar,
+  .filter-inputs {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .filter-inputs :deep(.el-select),
+  .filter-inputs :deep(.el-input) {
+    width: 100% !important;
   }
 }
 </style>

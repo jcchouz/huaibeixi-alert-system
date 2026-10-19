@@ -7,7 +7,7 @@
         当前实时预警弹窗队列 ({{ popupQueue.length }})
       </span>
       <div class="stack-actions">
-        <el-button size="small" type="primary" link @click="ackAllPopups">全部一键确认</el-button>
+        <el-button size="small" type="primary" link @click="ackAllPopups">全部一键处理</el-button>
         <el-button size="small" type="info" link @click="clearAllPopups">全部收起</el-button>
       </div>
     </div>
@@ -39,7 +39,9 @@
           <div class="sensor-headline">
             <span class="station-tag">{{ item.station_name || '玉环站' }}</span>
             <span class="sensor-title">{{ item.sensor_name || item.sensor_no }}</span>
-            <span class="sensor-code mono-num">({{ item.sensor_no }} / {{ item.channel || '主通道' }})</span>
+            <span class="sensor-code mono-num">
+              ({{ item.sensor_no }} / {{ item.channel || '默认通道' }} · {{ item.direction || '无方向' }})
+            </span>
           </div>
 
           <div class="metrics-grid">
@@ -48,30 +50,27 @@
               <span class="m-val">{{ item.physical_quantity || item.channel || '结构响应' }}</span>
             </div>
             <div class="metric-cell">
-              <span class="m-label">触发值 / 极值</span>
+              <span class="m-label">触发值</span>
               <span class="m-val mono-num highlight-val">
-                {{ formatNumber(item.trigger_val) }} / <strong>{{ formatNumber(item.peak_val) }}</strong>
+                {{ formatNumber(item.trigger_val) }}
                 <small>{{ item.unit || '' }}</small>
               </span>
             </div>
             <div class="metric-cell">
-              <span class="m-label">阈值快照 (v{{ item.rule_version || 1 }})</span>
-              <span class="m-val mono-num">{{ formatThresholdSnapshotBrief(item) }}</span>
+              <span class="m-label">触发次数</span>
+              <span class="m-val mono-num">{{ item.trigger_count || 1 }} 次</span>
             </div>
             <div class="metric-cell">
-              <span class="m-label">最新触发时刻</span>
-              <span class="m-val mono-num">{{ item.last_fire_time || item.create_time }}</span>
+              <span class="m-label">触发时间</span>
+              <span class="m-val mono-num">{{ item.create_time }}</span>
             </div>
           </div>
 
-          <div class="remark-box" v-if="item.remark">
-            {{ item.remark }}
-          </div>
         </div>
 
         <!-- Footer Direct Actions -->
         <div class="alarm-toast-footer">
-          <span class="seq-badge mono-num">SEQ #{{ item.seq }} · 去重键 {{ item.dedup_key || item.sensor_no }}</span>
+          <span class="seq-badge mono-num">SEQ #{{ item.seq }}</span>
           <div class="footer-btns">
             <el-button
               size="small"
@@ -88,7 +87,7 @@
               @click="handleQuickAck(item)"
             >
               <el-icon style="margin-right: 4px"><Select /></el-icon>
-              立即确认处置
+              标记已处理
             </el-button>
           </div>
         </div>
@@ -102,7 +101,12 @@ import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { BellFilled, Select } from '@element-plus/icons-vue'
 import { alertAudio } from '../utils/audio'
-import { pollAlertsApi, ackAlertApi, formatAlertTypeLabel } from '../api'
+import {
+  buildAlertStreamUrl,
+  pollAlertsApi,
+  ackAlertApi,
+  formatAlertTypeLabel
+} from '../api'
 
 const props = defineProps({
   muted: {
@@ -119,10 +123,12 @@ const emit = defineEmits([
 ])
 
 const LAST_SEQ_STORAGE_KEY = 'last_notified_seq'
+const BASELINE_STORAGE_KEY = 'alert_baseline_initialized'
 const popupQueue = ref([])
 const sseConnected = ref(false)
 const pollActive = ref(false)
 const lastNotifiedSeq = ref(Number(localStorage.getItem(LAST_SEQ_STORAGE_KEY) || 0))
+const baselineInitialized = ref(localStorage.getItem(BASELINE_STORAGE_KEY) === '1')
 const lastHeartbeat = ref('')
 
 let eventSource = null
@@ -155,7 +161,7 @@ function formatSeverityBadge(level) {
   if (lvl === 1) return '一级预警 (红色紧急)'
   if (lvl === 2) return '二级预警 (橙色重要)'
   if (lvl === 3) return '三级预警 (黄色一般)'
-  return '0级断流标记'
+  return '未知等级'
 }
 
 function formatAlertType(type) {
@@ -169,23 +175,6 @@ function formatNumber(val) {
   return Math.abs(num) >= 100 ? num.toFixed(2) : num.toFixed(4).replace(/\.?0+$/, '')
 }
 
-function formatThresholdSnapshotBrief(item) {
-  const snap = item.threshold_snapshot || {}
-  if (!snap || typeof snap !== 'object') return '默认规则快照'
-  const lvl = Number(item.alert_level || 1)
-  const key = `level${lvl}`
-  if (Array.isArray(snap[key])) {
-    const [low, high] = snap[key]
-    return `L${lvl}: [${low ?? '-'}, ${high ?? '-'}] ${item.unit || ''}`
-  }
-  const uKey = `level${lvl}_upper`
-  const lKey = `level${lvl}_lower`
-  if (snap[uKey] !== undefined || snap[lKey] !== undefined) {
-    return `L${lvl}: [${snap[lKey] ?? '-'}, ${snap[uKey] ?? '-'}] ${item.unit || ''}`
-  }
-  return `规则版本 v${item.rule_version || 1}`
-}
-
 /**
  * Process an incoming alert record from SSE or Poll or manual simulation
  * Deduplicates across browser tabs via localStorage('last_notified_seq')
@@ -194,10 +183,12 @@ function processIncomingAlert(alertObj, options = { forcePopup: false }) {
   if (!alertObj || typeof alertObj !== 'object') return
   const seq = Number(alertObj.seq || 0)
   const level = Number(alertObj.alert_level ?? 3)
+  const alertStatus = Number(alertObj.alert_status ?? 0)
   const storedSeq = getStoredMaxSeq()
 
   if (!options.forcePopup) {
-    if (seq <= storedSeq) {
+    if (seq <= storedSeq || alertStatus !== 0) {
+      if (seq > storedSeq) setStoredMaxSeq(seq)
       return
     }
     if (level < 1) {
@@ -213,9 +204,9 @@ function processIncomingAlert(alertObj, options = { forcePopup: false }) {
   // Play synthesized Web Audio API alarm beep for Level 1/2/3
   alertAudio.playAlertBeep(level, options.forcePopup && !props.muted)
 
-  // Check if same incident id/dedup_key is already in popupQueue -> upgrade in place
+  // Merge repeated events for the same active alert.
   const existingIdx = popupQueue.value.findIndex(
-    (p) => (alertObj.id && p.id === alertObj.id) || (alertObj.dedup_key && p.dedup_key === alertObj.dedup_key)
+    (p) => alertObj.id && p.id === alertObj.id
   )
 
   const enrichedPopup = {
@@ -255,17 +246,13 @@ async function handleQuickAck(item) {
   item.acking = true
   try {
     await ackAlertApi(item.id, {
-      ack_user: '值班监控工程师 (弹窗快处)',
-      ack_note: `通过实时预警弹窗一键确认处置 [SEQ #${item.seq}]`,
-      new_status: 1
+      ack_user: '值班监控工程师 (弹窗处理)'
     })
-    ElMessage.success(`已确认处置预警：${item.sensor_name || item.sensor_no}`)
+    ElMessage.success(`已处理预警：${item.sensor_name || item.sensor_no}`)
     dismissPopup(item.popupKey)
     emit('alert-acked', item)
   } catch (err) {
-    ElMessage.warning(`已本地确认弹窗 (${err?.message || '完成'})`)
-    dismissPopup(item.popupKey)
-    emit('alert-acked', item)
+    ElMessage.error(`处理失败: ${err?.message || '未知错误'}`)
   } finally {
     item.acking = false
   }
@@ -292,7 +279,7 @@ function connectSSE() {
 
   try {
     const afterSeq = getStoredMaxSeq()
-    eventSource = new EventSource(`/api/alerts/stream?afterSeq=${afterSeq}`)
+    eventSource = new EventSource(buildAlertStreamUrl(afterSeq))
 
     eventSource.onopen = () => {
       sseConnected.value = true
@@ -359,11 +346,14 @@ async function runCursorPoll() {
     lastHeartbeat.value = new Date().toLocaleTimeString()
 
     // On initial page load when localStorage has 0, initialize baseline seq so historical alerts don't flood popups
-    const serverMaxSeq = Number(res.maxSeq ?? res.max_seq ?? res.latestSeq ?? 0)
+    const serverMaxSeq = Number(res.latestSeq ?? res.latest_seq ?? res.maxSeq ?? res.max_seq ?? 0)
     const items = Array.isArray(res.alerts) ? res.alerts : Array.isArray(res.items) ? res.items : []
 
-    if (afterSeq === 0 && serverMaxSeq > 0 && items.length > 3) {
+    if (!baselineInitialized.value) {
+      // The first poll establishes the baseline only; history must not open popups.
       setStoredMaxSeq(serverMaxSeq)
+      baselineInitialized.value = true
+      localStorage.setItem(BASELINE_STORAGE_KEY, '1')
     } else if (items.length > 0) {
       // Sort ascending by seq so upgrades play in chronological order
       const sorted = [...items].sort((a, b) => Number(a.seq || 0) - Number(b.seq || 0))
@@ -385,8 +375,14 @@ function handleStorageSync(e) {
   }
 }
 
+function handleTokenChanged() {
+  connectSSE()
+  runCursorPoll()
+}
+
 onMounted(async () => {
   window.addEventListener('storage', handleStorageSync)
+  window.addEventListener('auth:token-changed', handleTokenChanged)
   await runCursorPoll()
   connectSSE()
   pollTimer = setInterval(runCursorPoll, 3000)
@@ -394,6 +390,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('storage', handleStorageSync)
+  window.removeEventListener('auth:token-changed', handleTokenChanged)
   if (eventSource) {
     try {
       eventSource.close()
@@ -622,16 +619,6 @@ defineExpose({
 
 .highlight-val {
   color: #ff6b81;
-}
-
-.remark-box {
-  font-size: 12px;
-  color: #cbd5e1;
-  background: rgba(255, 255, 255, 0.03);
-  border-left: 3px solid #00d4ff;
-  padding: 5px 8px;
-  border-radius: 3px;
-  line-height: 1.4;
 }
 
 .alarm-toast-footer {

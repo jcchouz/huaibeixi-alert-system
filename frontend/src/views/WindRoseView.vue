@@ -630,4 +630,48 @@ onBeforeUnmount(() => {
     grid-template-columns: 1fr;
   }
 }
+
+@media (max-width: 1100px) {
+  .wind-kpi-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .wind-rose-view {
+    gap: 10px;
+  }
+
+  .wind-ctrl-bar,
+  .ctrl-left,
+  .ctrl-item {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .ctrl-left,
+  .ctrl-item,
+  .ctrl-item :deep(.el-radio-group),
+  .ctrl-item :deep(.el-select) {
+    width: 100% !important;
+  }
+
+  .wind-kpi-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .shm-card-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .polar-chart-box {
+    height: 390px;
+  }
+
+  .wind-time-chart-box {
+    height: 250px;
+  }
+}
 </style>
