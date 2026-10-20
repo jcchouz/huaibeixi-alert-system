@@ -38,11 +38,6 @@ except Exception:
 import psycopg2
 
 from app.config import DSN, get_db_cursor
-from app.domain.alert_types import (
-    ALERT_DIRECTION_LOWER,
-    ALERT_DIRECTION_NONE,
-    ALERT_DIRECTION_UPPER,
-)
 from app.engine import AlertAnalyticsEngine
 
 # --------------------------------------------------------------------------- #
@@ -78,12 +73,12 @@ ANOMALIES: Dict[Tuple[str, str], Dict[int, Dict[str, Any]]] = {
 # The device-level DAQ alert key is added dynamically in ``phase_verify`` because
 # the engine keys it on the collect-instrument id, not on the sensor number.
 EXPECTED_ALERTS: List[Tuple[str, int, int]] = [
-    (f"wy-sj-01:x:阈值超限:{ALERT_DIRECTION_UPPER}", 0, 1),
-    (f"wy-sj-01:y:传感器死值:{ALERT_DIRECTION_NONE}", 0, 3),
-    (f"zd-wg-01:x:传感器离线:{ALERT_DIRECTION_NONE}", 0, 3),
-    (f"zd-wg-01:y:传感器离线:{ALERT_DIRECTION_NONE}", 0, 3),
-    (f"wlg-10::阈值超限:{ALERT_DIRECTION_LOWER}", 0, 1),
-    (f"wlg-10::超物理量程:{ALERT_DIRECTION_LOWER}", 0, 3),
+    ("wy-sj-01:x:阈值超限", 0, 1),
+    ("wy-sj-01:y:传感器死值", 0, 1),
+    ("zd-wg-01:x:传感器离线", 0, 1),
+    ("zd-wg-01:y:传感器离线", 0, 1),
+    ("wlg-10::阈值超限", 0, 1),
+    ("wlg-10::超物理量程", 0, 1),
 ]
 
 DAQ_SENSOR = "zd-wg-01"
@@ -234,7 +229,7 @@ def fetch_alert_map() -> Dict[str, Dict[str, Any]]:
         for r in cur.fetchall():
             key = (
                 f"{r['sensor_no'].lower()}:{r.get('channel') or ''}:"
-                f"{r['alert_type']}:{r.get('direction') or ALERT_DIRECTION_NONE}"
+                f"{r['alert_type']}"
             )
             out[key] = dict(r)
         return out
@@ -304,6 +299,23 @@ def phase_seed(args: argparse.Namespace) -> Tuple[bool, Optional[bytes]]:
 
     conn = psycopg2.connect(DSN)
     try:
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM public.t_monitor WHERE time >= %s AND time < %s",
+            (STREAM_START, TEST_END),
+        )
+        deleted_monitor = cur.rowcount
+        cur.execute(
+            "DELETE FROM public.t_stat_record WHERE stat_time >= %s AND stat_time < %s",
+            (STREAM_START, TEST_END),
+        )
+        deleted_stats = cur.rowcount
+        conn.commit()
+        if deleted_monitor or deleted_stats:
+            print(
+                f"[seed] removed stale test data      : "
+                f"monitor={deleted_monitor}, stats={deleted_stats}"
+            )
         snapshot = snapshot_alert_record(conn)
         print(f"[seed] t_alert_record snapshot    : {len(snapshot)} bytes")
     finally:
@@ -342,10 +354,10 @@ def phase_detect(args: argparse.Namespace) -> bool:
         with get_db_cursor() as cur:
             cur.execute(
                 """
-                SELECT sensor_no, channel, alert_type, alert_level, alert_status, direction
+                SELECT sensor_no, channel, alert_type, alert_level, alert_status
                 FROM public.t_alert_record
                 WHERE create_time >= %s AND create_time < %s
-                ORDER BY sensor_no, channel, alert_type, direction
+                ORDER BY sensor_no, channel, alert_type
                 """,
                 (ws, we),
             )
@@ -355,11 +367,11 @@ def phase_detect(args: argparse.Namespace) -> bool:
             for r in rows[:40]:
                 identity = (
                     f"{r['sensor_no'].lower()}:{r.get('channel') or ''}:"
-                    f"{r['alert_type']}:{r.get('direction') or ALERT_DIRECTION_NONE}"
+                    f"{r['alert_type']}"
                 )
                 print(
                     f"          - {identity:<45} type={r['alert_type']:<14} "
-                    f"L{r['alert_level']} status={r['alert_status']} dir={r['direction']}"
+                    f"L{r['alert_level']} status={r['alert_status']}"
                 )
     return True
 
@@ -389,9 +401,9 @@ def phase_verify(args: argparse.Namespace) -> bool:
     if r and r["instrument_id"]:
         expected_list.append(
             (
-                f"{r['instrument_id'].lower()}:__DAQ__:采集仪离线:{ALERT_DIRECTION_NONE}",
+                f"{r['instrument_id'].lower()}:__DAQ__:采集仪离线",
                 0,
-                3,
+                1,
             )
         )
 
@@ -408,22 +420,22 @@ def phase_verify(args: argparse.Namespace) -> bool:
         c.check(int(row["alert_level"]) == level, f"alert {key} level == {level}", f"got {row['alert_level']}")
 
     # escalation / debounce specifics
-    row = alerts.get(f"wy-sj-01:x:阈值超限:{ALERT_DIRECTION_UPPER}")
+    row = alerts.get("wy-sj-01:x:阈值超限")
     if row:
         c.check(int(row["trigger_count"]) >= 3, "wy-sj-01/x 阈值超限 debounced across windows",
                 f"trigger_count={row['trigger_count']}")
 
-    row = alerts.get(f"zd-wg-01:x:传感器离线:{ALERT_DIRECTION_NONE}")
+    row = alerts.get("zd-wg-01:x:传感器离线")
     if row:
         c.check(int(row["alert_status"]) == 0, "zd-wg-01/x 传感器离线 remains active")
-    row = alerts.get(f"zd-wg-01:y:传感器离线:{ALERT_DIRECTION_NONE}")
+    row = alerts.get("zd-wg-01:y:传感器离线")
     if row:
         c.check(int(row["alert_status"]) == 0, "zd-wg-01/y 传感器离线 remains active")
     daq_key = next(
         (
             k
             for k, _, _ in expected_list
-            if k.endswith(f":__DAQ__:采集仪离线:{ALERT_DIRECTION_NONE}")
+            if k.endswith(":__DAQ__:采集仪离线")
         ),
         None,
     )
@@ -493,7 +505,7 @@ def phase_verify(args: argparse.Namespace) -> bool:
     with get_db_cursor() as cur:
         cur.execute(
             """
-            SELECT DISTINCT sensor_no, channel, alert_type, direction
+            SELECT DISTINCT sensor_no, channel, alert_type
             FROM public.t_alert_record
             WHERE create_time >= %s AND create_time < %s
             """,
@@ -501,7 +513,7 @@ def phase_verify(args: argparse.Namespace) -> bool:
         )
         seen = {
             f"{r['sensor_no'].lower()}:{r.get('channel') or ''}:"
-            f"{r['alert_type']}:{r.get('direction') or ALERT_DIRECTION_NONE}"
+            f"{r['alert_type']}"
             for r in cur.fetchall()
         }
     extra = sorted(seen - expected_keys)

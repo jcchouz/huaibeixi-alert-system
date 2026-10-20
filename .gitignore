@@ -1,5 +1,6 @@
 _pw
 _ui_shots
+_snap/
 .venv
 node_modules
 .env

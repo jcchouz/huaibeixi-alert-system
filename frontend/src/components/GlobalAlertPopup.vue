@@ -40,7 +40,7 @@
             <span class="station-tag">{{ item.station_name || '玉环站' }}</span>
             <span class="sensor-title">{{ item.sensor_name || item.sensor_no }}</span>
             <span class="sensor-code mono-num">
-              ({{ item.sensor_no }} / {{ item.channel || '默认通道' }} · {{ item.direction || '无方向' }})
+              ({{ item.sensor_no }} / {{ item.channel || '默认通道' }})
             </span>
           </div>
 
@@ -62,11 +62,13 @@
             </div>
             <div class="metric-cell">
               <span class="m-label">首次触发</span>
-              <span class="m-val mono-num">{{ item.create_time || '-' }}</span>
+              <span class="m-val mono-num">{{ formatDateTimeWithMs(item.create_time) }}</span>
             </div>
             <div class="metric-cell">
               <span class="m-label">最后更新</span>
-              <span class="m-val mono-num">{{ item.update_time || item.create_time }}</span>
+              <span class="m-val mono-num">
+                {{ formatDateTimeWithMs(item.update_time || item.create_time) }}
+              </span>
             </div>
           </div>
 
@@ -105,6 +107,7 @@ import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { BellFilled, Select } from '@element-plus/icons-vue'
 import { alertAudio } from '../utils/audio'
+import { formatDateTimeWithMs } from '../utils/time'
 import {
   pollAlertsApi,
   ackAlertApi,
@@ -310,20 +313,14 @@ function handleStorageSync(e) {
   }
 }
 
-function handleTokenChanged() {
-  runCursorPoll()
-}
-
 onMounted(async () => {
   window.addEventListener('storage', handleStorageSync)
-  window.addEventListener('auth:token-changed', handleTokenChanged)
   await runCursorPoll()
   pollTimer = setInterval(runCursorPoll, POLL_INTERVAL_MS)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('storage', handleStorageSync)
-  window.removeEventListener('auth:token-changed', handleTokenChanged)
   clearInterval(pollTimer)
 })
 

@@ -312,3 +312,10 @@ html.dark .el-descriptions__content.el-descriptions__cell.is-bordered-content {
   border-radius: 5px;
   background: #247ba6;
 }
+
+@media (max-width: 760px) {
+  .responsive-dialog {
+    width: calc(100vw - 24px) !important;
+    max-width: calc(100vw - 24px);
+  }
+}

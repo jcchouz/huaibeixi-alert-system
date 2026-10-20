@@ -5,7 +5,6 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.domain.alert_types import (
-    ALERT_DIRECTION_NONE,
     ALERT_TYPE_DAQ_OFFLINE,
     ALERT_TYPE_OFFLINE,
     alert_category_for_type,
@@ -118,37 +117,59 @@ class AlertRepository:
         keyword: Optional[str],
         page: int,
         page_size: int,
-    ) -> Tuple[List[Dict[str, Any]], int]:
-        where_clauses = ["1 = 1"]
-        params: List[Any] = []
+    ) -> Tuple[List[Dict[str, Any]], int, Dict[str, int]]:
+        base_where_clauses = ["1 = 1"]
+        base_params: List[Any] = []
         if alert_level is not None:
-            where_clauses.append("alert_level = %s")
-            params.append(alert_level)
-        if alert_status is not None:
-            where_clauses.append("alert_status = %s")
-            params.append(alert_status)
+            base_where_clauses.append("alert_level = %s")
+            base_params.append(alert_level)
         if alert_type:
-            where_clauses.append("alert_type = %s")
-            params.append(normalize_alert_type(alert_type) or alert_type.strip())
+            base_where_clauses.append("alert_type = %s")
+            base_params.append(normalize_alert_type(alert_type) or alert_type.strip())
         if alert_category is not None:
-            where_clauses.append("alert_category = %s")
-            params.append(alert_category)
+            base_where_clauses.append("alert_category = %s")
+            base_params.append(alert_category)
         if sensor_no:
-            where_clauses.append("LOWER(sensor_no) LIKE %s")
-            params.append(f"%{sensor_no.strip().lower()}%")
+            base_where_clauses.append("LOWER(sensor_no) LIKE %s")
+            base_params.append(f"%{sensor_no.strip().lower()}%")
         if keyword:
             keyword_like = f"%{keyword.strip()}%"
-            where_clauses.append(
+            base_where_clauses.append(
                 "("
                 "LOWER(sensor_no) LIKE LOWER(%s) "
                 "OR LOWER(COALESCE(channel, '')) LIKE LOWER(%s)"
                 ")"
             )
-            params.extend([keyword_like, keyword_like])
+            base_params.extend([keyword_like, keyword_like])
 
+        where_clauses = list(base_where_clauses)
+        params = list(base_params)
+        if alert_status is not None:
+            where_clauses.append("alert_status = %s")
+            params.append(alert_status)
+
+        base_where_sql = " AND ".join(base_where_clauses)
         where_sql = " AND ".join(where_clauses)
         offset = (page - 1) * page_size
         with get_db_cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE alert_status = 0) AS unhandled,
+                    COUNT(*) FILTER (WHERE alert_status = 1) AS handled
+                FROM public.t_alert_record
+                WHERE {base_where_sql}
+                """,
+                tuple(base_params),
+            )
+            status_row = cur.fetchone()
+            status_counts = {
+                "total": int(status_row["total"] or 0),
+                "unhandled": int(status_row["unhandled"] or 0),
+                "handled": int(status_row["handled"] or 0),
+            }
+
             cur.execute(
                 f"SELECT COUNT(*) AS cnt FROM public.t_alert_record WHERE {where_sql}",
                 tuple(params),
@@ -169,14 +190,16 @@ class AlertRepository:
                 tuple(params + [page_size, offset]),
             )
             rows = [dict(r) for r in cur.fetchall()]
-        return rows, total
+        return rows, total, status_counts
 
     def acknowledge(
         self,
         alert_id: str,
         *,
         target_status: int,
-        actor: str,
+        handler: str,
+        handle_phone: Optional[str],
+        handle_opinion: Optional[str],
     ) -> Optional[Dict[str, Any]]:
         with get_db_cursor(commit=True) as cur:
             cur.execute(
@@ -193,14 +216,16 @@ class AlertRepository:
                 """
                 UPDATE public.t_alert_record
                 SET alert_status = 1,
-                    ack_by = %s,
-                    ack_time = NOW(),
+                    handle_by = %s,
+                    handle_phone = %s,
+                    handle_time = NOW(),
+                    handle_opinion = %s,
                     update_time = NOW(),
                     seq = nextval('public.seq_alert_record')
                 WHERE id = %s
                 RETURNING *
                 """,
-                (actor, alert_id),
+                (handler, handle_phone, handle_opinion, alert_id),
             )
             row = cur.fetchone()
             return dict(row) if row else None
@@ -208,38 +233,35 @@ class AlertRepository:
     def acknowledge_all(
         self,
         *,
-        actor: str,
+        handler: str,
+        handle_phone: Optional[str],
         alert_level: Optional[int],
+        alert_category: Optional[int],
     ) -> List[str]:
         with get_db_cursor(commit=True) as cur:
+            where_clauses = ["alert_status = 0"]
+            params: List[Any] = [handler, handle_phone]
             if alert_level is not None:
-                cur.execute(
-                    """
-                    UPDATE public.t_alert_record
-                    SET alert_status = 1,
-                        ack_by = %s,
-                        ack_time = NOW(),
-                        update_time = NOW(),
-                        seq = nextval('public.seq_alert_record')
-                    WHERE alert_status = 0 AND alert_level = %s
-                    RETURNING id
-                    """,
-                    (actor, alert_level),
-                )
-            else:
-                cur.execute(
-                    """
-                    UPDATE public.t_alert_record
-                    SET alert_status = 1,
-                        ack_by = %s,
-                        ack_time = NOW(),
-                        update_time = NOW(),
-                        seq = nextval('public.seq_alert_record')
-                    WHERE alert_status = 0
-                    RETURNING id
-                    """,
-                    (actor,),
-                )
+                where_clauses.append("alert_level = %s")
+                params.append(alert_level)
+            if alert_category is not None:
+                where_clauses.append("alert_category = %s")
+                params.append(alert_category)
+
+            cur.execute(
+                f"""
+                UPDATE public.t_alert_record
+                SET alert_status = 1,
+                    handle_by = %s,
+                    handle_phone = %s,
+                    handle_time = NOW(),
+                    update_time = NOW(),
+                    seq = nextval('public.seq_alert_record')
+                WHERE {' AND '.join(where_clauses)}
+                RETURNING id
+                """,
+                tuple(params),
+            )
             return [str(row["id"]) for row in cur.fetchall()]
 
     def create(
@@ -252,7 +274,6 @@ class AlertRepository:
         alert_type: str,
         alert_level: int,
         trigger_val: float,
-        direction: str = ALERT_DIRECTION_NONE,
     ) -> Dict[str, Any]:
         alert_category = alert_category_for_type(alert_type)
         with get_db_cursor(commit=True) as cur:
@@ -260,12 +281,12 @@ class AlertRepository:
                 """
                 INSERT INTO public.t_alert_record (
                     id, sensor_no, threshold_id, trigger_val, create_time,
-                    alert_status, remark, channel, seq, alert_type, alert_category,
-                    alert_level, direction, trigger_count, update_time
+                    alert_status, channel, seq, alert_type, alert_category,
+                    alert_level, trigger_count, update_time
                 ) VALUES (
                     %s, %s, %s, %s, NOW(),
-                    0, '', %s, nextval('public.seq_alert_record'), %s, %s,
-                    %s, %s, 1, NOW()
+                    0, %s, nextval('public.seq_alert_record'), %s, %s,
+                    %s, 1, NOW()
                 )
                 RETURNING *
                 """,
@@ -278,7 +299,6 @@ class AlertRepository:
                     alert_type,
                     alert_category,
                     alert_level,
-                    direction,
                 ),
             )
             return dict(cur.fetchone())

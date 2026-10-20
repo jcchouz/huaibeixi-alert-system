@@ -4,8 +4,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Query
 
-from app.api.deps import get_statistics_service, require_roles
-from app.core.security import Principal
+from app.api.deps import get_statistics_service
 from app.schemas.statistics import (
     ExtremesResponse,
     StatSensorListResponse,
@@ -19,7 +18,6 @@ router = APIRouter(prefix="/stats", tags=["Statistics"])
 @router.get("/sensors", response_model=StatSensorListResponse)
 def list_stat_sensors(
     service: StatisticsService = Depends(get_statistics_service),
-    _: Principal = Depends(require_roles("viewer", "operator", "admin")),
 ) -> Dict[str, Any]:
     return service.list_sensors()
 
@@ -37,7 +35,6 @@ def get_stat_extremes(
     end_time: Optional[str] = Query(None),
     limit: int = Query(500, ge=10, le=2000),
     service: StatisticsService = Depends(get_statistics_service),
-    _: Principal = Depends(require_roles("viewer", "operator", "admin")),
 ) -> Dict[str, Any]:
     return service.extremes(
         sensor_no=pick(sensor_no, sensorNo, "stn-12-b"),

@@ -5,16 +5,18 @@ uses FastAPI, PostgreSQL/TimescaleDB and a modular service architecture.
 
 ## Backend Layout
 
+Detailed folder-by-folder and file-by-file documentation is available in
+[后端架构说明.md](后端架构说明.md).
+
 ```text
 backend/
   app/
     api/
       app.py                 # application factory, middleware, lifespan
-      deps.py                # dependency wiring and role guards
-      routers/               # authentication, alerts, thresholds and stats
+      deps.py                # dependency wiring
+      routers/               # alerts, thresholds and stats
     core/
       config.py              # environment-backed settings
-      security.py            # JWT authentication and RBAC
       exceptions.py          # stable API error envelope
       logging.py             # JSON logging
     domain/engine.py         # alert state machine and analytics engine
@@ -48,14 +50,25 @@ backend/
 
 The backend is available at `http://localhost:8090`, Swagger at
 `http://localhost:8090/docs`, and the frontend at
-`http://localhost:5174`. The simulator writes monitoring samples to
-`t_monitor` and runs the same alert detection path used by the demo.
+`http://localhost:5174`. The local simulator only writes monitoring samples to
+`t_monitor`; the backend independently detects alerts and writes
+`t_alert_record` and `t_stat_record`.
 
 To start only the backend and frontend:
 
 ```powershell
 .\start_all.bat --no-simulator
 ```
+
+Production only needs the backend service. It continuously consumes the latest
+completed average window from `t_monitor` (one minute by default), runs all alert
+detection in-process, and survives multiple backend instances through a
+PostgreSQL advisory leader lock. Configure the window with
+`DETECTION_WINDOW_MINUTES`. Sampling interval is derived from
+`t_sensor.frequency`; threshold/out-of-range, stuck and offline detection use
+`DETECTION_CONFIRM_POINTS`, `DETECTION_STUCK_POINTS` and
+`DETECTION_OFFLINE_POINTS`. Set `DETECTION_ENABLED=false` only when detection
+should run in a separate deployment.
 
 ## Alert Categories
 
@@ -69,33 +82,14 @@ To start only the backend and frontend:
 The backend derives the category from `alert_type`; API clients do not need to
 send it when creating alerts.
 
-## Authentication And Roles
+## Access Model
 
-Authentication is disabled only for local development. Production startup
-rejects wildcard CORS and missing JWT configuration.
+The application opens directly without login, user accounts, roles or
+permissions. Every REST endpoint is available anonymously.
 
-Generate a password hash:
-
-```powershell
-cd backend
-.\.venv\Scripts\python.exe tools\hash_password.py "change-me" --username admin --role admin
-```
-
-Put the JSON output in `AUTH_USERS_JSON`, set `AUTH_ENABLED=true`, and provide a
-random `JWT_SECRET` of at least 32 characters.
-
-Roles:
-
-| Role | Access |
-| --- | --- |
-| `viewer` | Read dashboards and alert history |
-| `operator` | Viewer access plus alert acknowledgement and threshold simulation |
-| `admin` | All operations, including threshold changes |
-
-The frontend attaches the bearer token to every REST request. Alert popups and
-the alert management table refresh through the API every 5 seconds. Alert
-acknowledgement is also sent directly through the REST API, and the
-acknowledgement identity is taken from the authenticated principal.
+Alert popups and the alert management table refresh through the API every 5
+seconds. Alert acknowledgement is sent directly through the REST API and is
+recorded with the internal audit actor `web`.
 
 ## Database Migrations
 
@@ -129,13 +123,12 @@ npm ci
 npm run build
 ```
 
-Live database validation tools are in `backend/tools/`. Set `AUTH_TOKEN` when
-authentication is enabled.
+Live database validation tools are in `backend/tools/`.
 
 ## Docker
 
 Create `backend/.env` from `backend/.env.production.example`, fill in the database
-credentials, JWT secret and `AUTH_USERS_JSON`, then run:
+credentials, then run:
 
 ```powershell
 docker compose up --build -d
@@ -151,4 +144,4 @@ The frontend is exposed on `http://localhost:5174`. Nginx proxies `/api` and
 - `GET /metrics` exposes Prometheus metrics.
 - The frontend polls alert APIs every 5 seconds and acknowledges alerts through
   the REST API.
-- Runtime identity, request IDs and latency are included in structured logs.
+- Request IDs and latency are included in structured logs.

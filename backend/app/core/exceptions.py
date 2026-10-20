@@ -48,11 +48,7 @@ def install_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(StarletteHTTPException)
     async def http_error_handler(_: Request, exc: StarletteHTTPException) -> JSONResponse:
         code = "HTTP_ERROR"
-        if exc.status_code == 401:
-            code = "UNAUTHORIZED"
-        elif exc.status_code == 403:
-            code = "FORBIDDEN"
-        elif exc.status_code == 404:
+        if exc.status_code == 404:
             code = "NOT_FOUND"
         return JSONResponse(
             status_code=exc.status_code,

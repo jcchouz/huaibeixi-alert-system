@@ -17,7 +17,7 @@ echo   Huaibeixi SHM Alert System - Local Launcher
 echo ======================================================================
 echo   Frontend : %FRONTEND_URL%
 echo   Backend  : %BACKEND_URL%/docs
-echo   Simulator: continuous monitoring data and alert detection
+echo   Simulator: local t_monitor data only; backend runs detection
 echo ======================================================================
 
 if not exist "%BACKEND_DIR%\run_backend.bat" goto :missing_files
@@ -78,7 +78,7 @@ if "%WITH_SIMULATOR%"=="0" (
 )
 
 echo.
-echo [3/3] Starting continuous simulation and alert detection...
+echo [3/3] Starting local t_monitor data source...
 start "Huaibeixi-Simulator" /D "%BACKEND_DIR%" cmd /k "run_simulator.bat"
 
 :started

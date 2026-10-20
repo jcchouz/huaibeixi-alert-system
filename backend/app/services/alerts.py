@@ -7,7 +7,11 @@ from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
 
-from app.domain.alert_types import ALERT_TYPE_THRESHOLD, normalize_alert_type
+from app.domain.alert_types import (
+    ALERT_TYPE_THRESHOLD,
+    NON_THRESHOLD_ALERT_LEVEL,
+    normalize_alert_type,
+)
 from app.domain.engine import AlertAnalyticsEngine
 from app.repositories.alerts import AlertRepository
 from app.schemas.alerts import AlertAckRequest, AlertCreateRequest, BatchAckRequest
@@ -51,7 +55,7 @@ class AlertService:
         page: int,
         page_size: int,
     ) -> Dict[str, Any]:
-        rows, total = self.repository.list(
+        rows, total, status_counts = self.repository.list(
             alert_level=alert_level,
             alert_status=alert_status,
             alert_type=alert_type,
@@ -67,22 +71,29 @@ class AlertService:
             "page": page,
             "pageSize": page_size,
             "totalPages": self.repository.total_pages(total, page_size),
+            "statusCounts": status_counts,
         }
 
     def acknowledge(
         self,
         alert_id: str,
         body: AlertAckRequest,
-        principal_username: str,
     ) -> Dict[str, Any]:
         target_status = int(pick(body.alertStatus, body.alert_status, 1))
         if target_status != 1:
             raise HTTPException(status_code=400, detail="alertStatus must be 1")
 
+        handler = str(pick(body.handleBy, body.handle_by, "web") or "web").strip()
+        handle_phone = str(
+            pick(body.handlePhone, body.handle_phone, "") or ""
+        ).strip() or None
+        handle_opinion = pick(body.handleOpinion, body.handle_opinion)
         updated = self.repository.acknowledge(
             alert_id,
             target_status=target_status,
-            actor=principal_username,
+            handler=handler,
+            handle_phone=handle_phone,
+            handle_opinion=handle_opinion,
         )
         if updated is None:
             raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
@@ -93,13 +104,21 @@ class AlertService:
     def acknowledge_all(
         self,
         body: Optional[BatchAckRequest],
-        principal_username: str,
     ) -> Dict[str, Any]:
         request = body or BatchAckRequest()
+        handler = str(
+            pick(request.handleBy, request.handle_by, "web") or "web"
+        ).strip()
+        handle_phone = str(
+            pick(request.handlePhone, request.handle_phone, "") or ""
+        ).strip() or None
         alert_level = pick(request.alertLevel, request.alert_level)
+        alert_category = pick(request.alertCategory, request.alert_category)
         updated_ids = self.repository.acknowledge_all(
-            actor=principal_username,
+            handler=handler,
+            handle_phone=handle_phone,
             alert_level=alert_level,
+            alert_category=alert_category,
         )
         return {
             "success": True,
@@ -120,7 +139,7 @@ class AlertService:
         if alert_level not in (1, 2, 3):
             raise HTTPException(status_code=400, detail="alertLevel must be 1, 2 or 3")
         if alert_type != ALERT_TYPE_THRESHOLD:
-            alert_level = 3
+            alert_level = NON_THRESHOLD_ALERT_LEVEL
 
         trigger_val = float(pick(body.triggerVal, body.trigger_val, 0.0))
         key = self.engine.make_key(sensor_no, channel)

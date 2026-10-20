@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-from alembic import op
+from alembic import context, op
 from sqlalchemy import text
 
 revision = "20261019_0011"
@@ -73,7 +73,7 @@ def _select_range_segment(range_text: str, quantity: str, channel: str) -> Optio
             ("m/s", "m/s", "风速", "windspeed"),
             ("°", "°", "风向", "winddirection"),
         )
-        for marker, marker_lower, cn_quantity, en_quantity in unit_checks:
+        for marker, _marker_lower, cn_quantity, en_quantity in unit_checks:
             if marker in segment:
                 matched = (
                     cn_quantity in quantity
@@ -145,47 +145,50 @@ def upgrade() -> None:
         """
     )
 
-    connection = op.get_bind()
-    rows = list(connection.execute(
-        text(
-            """
-            SELECT t.id, t.sensor_no, t.channel, t.physical_quantity,
-                   t.expected_interval_ms, s.range
-            FROM public.t_alert_threshold t
-            LEFT JOIN public.t_sensor s
-              ON LOWER(s.sensor_no) = LOWER(t.sensor_no)
-            """
-        )
-    ).mappings())
+    # Data-dependent backfills cannot be evaluated while Alembic renders
+    # offline SQL. The DDL and column comments still render for CI validation.
+    if not context.is_offline_mode():
+        connection = op.get_bind()
+        rows = list(connection.execute(
+            text(
+                """
+                SELECT t.id, t.sensor_no, t.channel, t.physical_quantity,
+                       t.expected_interval_ms, s.range
+                FROM public.t_alert_threshold t
+                LEFT JOIN public.t_sensor s
+                  ON LOWER(s.sensor_no) = LOWER(t.sensor_no)
+                """
+            )
+        ).mappings())
 
-    update_sql = text(
-        """
-        UPDATE public.t_alert_threshold
-        SET range_min = :range_min,
-            range_max = :range_max,
-            stuck_time_ms = :stuck_time_ms
-        WHERE id = :id
-        """
-    )
-    for row in rows:
-        range_min, range_max = _parse_range(
-            row["range"],
-            row["physical_quantity"] or "",
-            row["channel"] or "",
+        update_sql = text(
+            """
+            UPDATE public.t_alert_threshold
+            SET range_min = :range_min,
+                range_max = :range_max,
+                stuck_time_ms = :stuck_time_ms
+            WHERE id = :id
+            """
         )
-        connection.execute(
-            update_sql,
-            {
-                "id": row["id"],
-                "range_min": range_min,
-                "range_max": range_max,
-                "stuck_time_ms": _stuck_time_ms(
-                    row["expected_interval_ms"],
-                    row["physical_quantity"] or "",
-                    row["channel"] or "",
-                ),
-            },
-        )
+        for row in rows:
+            range_min, range_max = _parse_range(
+                row["range"],
+                row["physical_quantity"] or "",
+                row["channel"] or "",
+            )
+            connection.execute(
+                update_sql,
+                {
+                    "id": row["id"],
+                    "range_min": range_min,
+                    "range_max": range_max,
+                    "stuck_time_ms": _stuck_time_ms(
+                        row["expected_interval_ms"],
+                        row["physical_quantity"] or "",
+                        row["channel"] or "",
+                    ),
+                },
+            )
 
     op.execute(
         """

@@ -78,14 +78,13 @@ class ThresholdService:
         self,
         threshold_id: str,
         body: ThresholdUpdateRequest,
-        principal_username: str,
     ) -> Dict[str, Any]:
         with get_db_cursor(commit=True) as cur:
             row = self.repository.fetch_rule(cur, threshold_id)
             if not row:
                 raise HTTPException(status_code=404, detail=f"Threshold {threshold_id} not found")
 
-            values = self._merged_values(row, body, principal_username)
+            values = self._merged_values(row, body)
             self._validate_thresholds(values)
             updated_row = self.repository.update_rule(cur, threshold_id, values)
 
@@ -97,7 +96,6 @@ class ThresholdService:
     def batch_update(
         self,
         body: ThresholdBatchUpdateRequest,
-        principal_username: str,
     ) -> Dict[str, Any]:
         physical_quantity = pick(body.physical_quantity, body.physicalQuantity)
         threshold_ids = pick(body.threshold_ids, body.thresholdIds)
@@ -114,10 +112,7 @@ class ThresholdService:
             "level2_lower": pick(body.level2_lower, body.level2Lower),
             "level3_upper": pick(body.level3_upper, body.level3Upper),
             "level3_lower": pick(body.level3_lower, body.level3Lower),
-            "offline_timeout_ms": pick(body.offline_timeout_ms, body.offlineTimeoutMs),
             "expected_interval_ms": pick(body.expected_interval_ms, body.expectedIntervalMs),
-            "confirm_points": pick(body.confirm_points, body.confirmPoints),
-            "stuck_time_ms": pick(body.stuck_time_ms, body.stuckTimeMs),
         }
 
         with get_db_cursor(commit=True) as cur:
@@ -130,7 +125,7 @@ class ThresholdService:
                 raise HTTPException(status_code=404, detail="No matching threshold rules found")
 
             for row in rows:
-                values = self._merged_values(row, ThresholdUpdateRequest(**overrides), principal_username)
+                values = self._merged_values(row, ThresholdUpdateRequest(**overrides))
                 self._validate_thresholds(values)
                 self.repository.update_rule(cur, str(row["id"]), values)
 
@@ -385,7 +380,6 @@ class ThresholdService:
         self,
         row: Dict[str, Any],
         body: ThresholdUpdateRequest,
-        principal_username: str,
     ) -> Dict[str, Any]:
         return {
             "level1_upper": pick(
@@ -418,25 +412,10 @@ class ThresholdService:
                 body.level3Lower,
                 row["level3_lower"],
             ),
-            "offline_timeout_ms": pick(
-                body.offline_timeout_ms,
-                body.offlineTimeoutMs,
-                row["offline_timeout_ms"],
-            ),
             "expected_interval_ms": pick(
                 body.expected_interval_ms,
                 body.expectedIntervalMs,
                 row["expected_interval_ms"],
-            ),
-            "confirm_points": pick(
-                body.confirm_points,
-                body.confirmPoints,
-                row["confirm_points"],
-            ),
-            "stuck_time_ms": pick(
-                body.stuck_time_ms,
-                body.stuckTimeMs,
-                row["stuck_time_ms"],
             ),
             "range_min": pick(
                 body.range_min,
@@ -448,7 +427,7 @@ class ThresholdService:
                 body.rangeMax,
                 row["range_max"],
             ),
-            "update_by": principal_username,
+            "update_by": "web",
         }
 
     @staticmethod
@@ -473,12 +452,6 @@ class ThresholdService:
             raise HTTPException(
                 status_code=400,
                 detail=f"下限阈值必须满足 一级下限({l1_lower}) <= 二级下限({l2_lower}) <= 三级下限({l3_lower})",
-            )
-        stuck_time_ms = values.get("stuck_time_ms")
-        if stuck_time_ms is not None and int(stuck_time_ms) <= 0:
-            raise HTTPException(
-                status_code=400,
-                detail="传感器死值判定时间必须大于 0ms",
             )
         range_min = values.get("range_min")
         range_max = values.get("range_max")

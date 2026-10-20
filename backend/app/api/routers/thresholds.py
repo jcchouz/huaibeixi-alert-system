@@ -4,8 +4,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Query
 
-from app.api.deps import get_threshold_service, require_roles
-from app.core.security import Principal
+from app.api.deps import get_threshold_service
 from app.schemas.thresholds import (
     ThresholdBatchUpdateRequest,
     ThresholdBatchUpdateResponse,
@@ -30,7 +29,6 @@ def list_thresholds(
     stationName: Optional[str] = Query(None),
     keyword: Optional[str] = Query(None),
     service: ThresholdService = Depends(get_threshold_service),
-    _: Principal = Depends(require_roles("viewer", "operator", "admin")),
 ) -> Dict[str, Any]:
     return service.list_thresholds(
         sensor_no=pick(sensorNo, sensor_no),
@@ -45,24 +43,21 @@ def update_threshold(
     threshold_id: str,
     body: ThresholdUpdateRequest,
     service: ThresholdService = Depends(get_threshold_service),
-    principal: Principal = Depends(require_roles("admin")),
 ) -> Dict[str, Any]:
-    return service.update_threshold(threshold_id, body, principal.username)
+    return service.update_threshold(threshold_id, body)
 
 
 @router.post("/batch-update", response_model=ThresholdBatchUpdateResponse)
 def batch_update_thresholds(
     body: ThresholdBatchUpdateRequest,
     service: ThresholdService = Depends(get_threshold_service),
-    principal: Principal = Depends(require_roles("admin")),
 ) -> Dict[str, Any]:
-    return service.batch_update(body, principal.username)
+    return service.batch_update(body)
 
 
 @router.post("/simulate", response_model=ThresholdSimulationResponse)
 def simulate_threshold(
     body: ThresholdSimulateRequest,
     service: ThresholdService = Depends(get_threshold_service),
-    _: Principal = Depends(require_roles("operator", "admin")),
 ) -> Dict[str, Any]:
     return service.simulate(body)

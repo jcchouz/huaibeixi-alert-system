@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import json
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, List, Literal, Optional
+from typing import List, Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -42,19 +41,63 @@ class Settings(BaseSettings):
     db_pool_minconn: int = Field(default=2, ge=1, validation_alias="DB_POOL_MINCONN")
     db_pool_maxconn: int = Field(default=20, ge=1, validation_alias="DB_POOL_MAXCONN")
 
+    # 是否随 FastAPI 生命周期启动生产检测线程。
+    detection_enabled: bool = Field(default=True, validation_alias="DETECTION_ENABLED")
+    # 检测线程的扫描间隔，单位为秒。
+    detection_interval_seconds: int = Field(
+        default=5,
+        ge=1,
+        le=60,
+        validation_alias="DETECTION_INTERVAL_SECONDS",
+    )
+    # 等待数据落库的延迟，避免窗口结束瞬间读取到不完整数据。
+    detection_lag_seconds: int = Field(
+        default=5,
+        ge=0,
+        le=300,
+        validation_alias="DETECTION_LAG_SECONDS",
+    )
+    # 统计和检测窗口长度，单位为分钟。
+    detection_window_minutes: int = Field(
+        default=1,
+        ge=1,
+        le=1440,
+        validation_alias="DETECTION_WINDOW_MINUTES",
+    )
+    # 阈值超限或超物理量程需要连续命中的采样组数。
+    detection_confirm_points: int = Field(
+        default=3,
+        ge=1,
+        le=10000,
+        validation_alias="DETECTION_CONFIRM_POINTS",
+    )
+    # 传感器读数连续相同多少组后判定为死值。
+    detection_stuck_points: int = Field(
+        default=100,
+        ge=1,
+        le=10000,
+        validation_alias="DETECTION_STUCK_POINTS",
+    )
+    # 按传感器 frequency 换算后，连续缺失多少组采样判定为离线。
+    detection_offline_points: int = Field(
+        default=5,
+        ge=1,
+        le=10000,
+        validation_alias="DETECTION_OFFLINE_POINTS",
+    )
+    # 服务恢复后单轮最多补处理的检测窗口数，防止长时间停机的追帧压力。
+    detection_max_catchup_windows: int = Field(
+        default=5,
+        ge=1,
+        le=1440,
+        validation_alias="DETECTION_MAX_CATCHUP_WINDOWS",
+    )
+
     cors_origins: str = Field(
         default="http://localhost:5174,http://127.0.0.1:5174",
         validation_alias="CORS_ORIGINS",
     )
     trusted_hosts: str = Field(default="*", validation_alias="TRUSTED_HOSTS")
-
-    auth_enabled: bool = Field(default=False, validation_alias="AUTH_ENABLED")
-    jwt_secret: Optional[str] = Field(default=None, validation_alias="JWT_SECRET")
-    jwt_algorithm: str = Field(default="HS256", validation_alias="JWT_ALGORITHM")
-    jwt_issuer: str = Field(default="huaibeixi-alert-backend", validation_alias="JWT_ISSUER")
-    jwt_audience: str = Field(default="huaibeixi-alert-frontend", validation_alias="JWT_AUDIENCE")
-    jwt_expire_minutes: int = Field(default=480, ge=5, validation_alias="JWT_EXPIRE_MINUTES")
-    auth_users_json: str = Field(default="[]", validation_alias="AUTH_USERS_JSON")
 
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
     log_json: bool = Field(default=True, validation_alias="LOG_JSON")
@@ -75,25 +118,10 @@ class Settings(BaseSettings):
     def allowed_hosts(self) -> List[str]:
         return [item.strip() for item in self.trusted_hosts.split(",") if item.strip()]
 
-    @property
-    def auth_users(self) -> List[dict[str, Any]]:
-        try:
-            payload = json.loads(self.auth_users_json or "[]")
-            return payload if isinstance(payload, list) else []
-        except json.JSONDecodeError as exc:
-            raise ValueError("AUTH_USERS_JSON must be a valid JSON array") from exc
-
     @model_validator(mode="after")
-    def validate_security(self) -> "Settings":
-        if self.environment == "production":
-            if not self.auth_enabled:
-                raise ValueError("AUTH_ENABLED must be true in production")
-            if not self.jwt_secret or len(self.jwt_secret) < 32:
-                raise ValueError("JWT_SECRET must contain at least 32 characters in production")
-            if "*" in self.allowed_origins:
-                raise ValueError("Wildcard CORS origins are not allowed in production")
-        if self.auth_enabled and not self.auth_users:
-            raise ValueError("AUTH_USERS_JSON must define at least one user when authentication is enabled")
+    def validate_production(self) -> "Settings":
+        if self.environment == "production" and "*" in self.allowed_origins:
+            raise ValueError("Wildcard CORS origins are not allowed in production")
         return self
 
 

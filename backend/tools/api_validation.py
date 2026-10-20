@@ -31,7 +31,6 @@ from app.config import DSN, get_db_cursor
 
 BASE = os.getenv("API_BASE_URL", "http://127.0.0.1:8090").rstrip("/")
 SNAP_DIR = Path(__file__).resolve().parent / "_snap"
-AUTH_TOKEN = os.getenv("AUTH_TOKEN", "").strip()
 
 
 class Checker:
@@ -54,8 +53,6 @@ def http(method: str, path: str, body: Optional[Dict[str, Any]] = None,
     url = f"{BASE}{path}"
     data = None
     headers = {"Accept": "application/json"}
-    if AUTH_TOKEN:
-        headers["Authorization"] = f"Bearer {AUTH_TOKEN}"
     if body is not None:
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -170,7 +167,7 @@ def run(args: argparse.Namespace) -> int:
             c.check(st_bad == 400, "PUT threshold rejects invalid L1<L2<L3 ordering", f"got {st_bad}")
 
             st, batch = http("POST", "/api/thresholds/batch-update",
-                             {"threshold_ids": [tid], "confirm_points": 3})
+    {"threshold_ids": [tid]})
             bc = None
             if isinstance(batch, dict):
                 bc = batch.get("updatedCount", batch.get("updated_count"))

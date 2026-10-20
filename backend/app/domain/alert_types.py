@@ -8,6 +8,8 @@ ALERT_TYPE_DAQ_OFFLINE = "采集仪离线"
 ALERT_TYPE_STUCK = "传感器死值"
 ALERT_TYPE_OOR = "超物理量程"
 
+NON_THRESHOLD_ALERT_LEVEL = 1
+
 ALERT_DIRECTION_UPPER = "上限超限"
 ALERT_DIRECTION_LOWER = "下限超限"
 ALERT_DIRECTION_NONE = "无方向"
@@ -25,12 +27,6 @@ DEVICE_ALERT_TYPES = {
     ALERT_TYPE_DAQ_OFFLINE,
 }
 
-ALERT_DIRECTION_VALUES = (
-    ALERT_DIRECTION_UPPER,
-    ALERT_DIRECTION_LOWER,
-    ALERT_DIRECTION_NONE,
-)
-
 ALERT_TYPE_VALUES = (
     ALERT_TYPE_THRESHOLD,
     ALERT_TYPE_OFFLINE,
@@ -45,17 +41,6 @@ ALERT_TYPE_ALIASES = {
     "DAQ_OFFLINE": ALERT_TYPE_DAQ_OFFLINE,
     "STUCK": ALERT_TYPE_STUCK,
     "OOR": ALERT_TYPE_OOR,
-}
-
-ALERT_DIRECTION_ALIASES = {
-    "UPPER": ALERT_DIRECTION_UPPER,
-    "LOWER": ALERT_DIRECTION_LOWER,
-    "NONE": ALERT_DIRECTION_NONE,
-    "上限超限": ALERT_DIRECTION_UPPER,
-    "下限超限": ALERT_DIRECTION_LOWER,
-    "上限": ALERT_DIRECTION_UPPER,
-    "下限": ALERT_DIRECTION_LOWER,
-    "无方向": ALERT_DIRECTION_NONE,
 }
 
 
@@ -73,10 +58,3 @@ def alert_category_for_type(value: Optional[str]) -> int:
     if normalized in DEVICE_ALERT_TYPES:
         return ALERT_CATEGORY_DEVICE
     return ALERT_CATEGORY_DATA
-
-
-def normalize_alert_direction(value: Optional[str]) -> str:
-    text = str(value).strip() if value is not None else ""
-    if not text:
-        return ALERT_DIRECTION_NONE
-    return ALERT_DIRECTION_ALIASES.get(text.upper(), text)

@@ -17,3 +17,4 @@ class HealthResponse(BaseModel):
     status: str
     service: str
     engine: dict[str, Any]
+    detection: Optional[dict[str, Any]] = None

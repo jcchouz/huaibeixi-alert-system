@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from fastapi import Depends, Request
 
-from app.core.security import get_current_principal, require_roles
 from app.domain.engine import AlertAnalyticsEngine
 from app.repositories.alerts import AlertRepository
 from app.repositories.statistics import StatisticsRepository
@@ -42,11 +41,9 @@ def get_overview_service(
 
 
 __all__ = [
-    "get_alert_service",
-    "get_current_principal",
-    "get_engine",
-    "get_overview_service",
-    "get_statistics_service",
-    "get_threshold_service",
-    "require_roles",
+    "get_alert_service", # 创建告警业务服务
+    "get_engine", # 从 request.app.state.engine 获取全局共享的 AlertAnalyticsEngine 实例
+    "get_overview_service", # 创建总览业务服务
+    "get_statistics_service", # 创建统计业务服务
+    "get_threshold_service", # 创建阈值业务服务
 ]

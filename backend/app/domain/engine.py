@@ -19,8 +19,8 @@ from app.domain.alert_types import (
     ALERT_TYPE_OOR,
     ALERT_TYPE_STUCK,
     ALERT_TYPE_THRESHOLD,
+    NON_THRESHOLD_ALERT_LEVEL,
     alert_category_for_type,
-    normalize_alert_direction,
     normalize_alert_type,
 )
 from app.infrastructure.database import get_db_cursor
@@ -31,9 +31,22 @@ logger = logging.getLogger("huaibeixi.engine")
 #   s_no / ch            -> grouping key (sensor_no normalized to lower-case)
 #   max_time / min_time  -> true timestamp of the extreme sample (not a window boundary)
 WINDOW_AGG_SQL = """
+WITH ordered_samples AS (
+    SELECT
+        LOWER(sensor_no) AS s_no,
+        COALESCE(channel, '') AS ch,
+        time,
+        value,
+        time - LAG(time) OVER (
+            PARTITION BY LOWER(sensor_no), COALESCE(channel, '')
+            ORDER BY time
+        ) AS sample_gap
+    FROM public.t_monitor
+    WHERE time >= %s AND time < %s
+)
 SELECT
-    LOWER(sensor_no) AS s_no,
-    COALESCE(channel, '') AS ch,
+    s_no,
+    ch,
     COUNT(*) AS sample_cnt,
     MAX(value) AS val_max,
     MIN(value) AS val_min,
@@ -41,11 +54,11 @@ SELECT
     COALESCE(STDDEV_POP(value), 0) AS value_std,
     MIN(time) AS first_ts,
     MAX(time) AS last_ts,
+    COALESCE(MAX(EXTRACT(EPOCH FROM sample_gap) * 1000.0), 0) AS max_gap_ms,
     (ARRAY_AGG(time ORDER BY value ASC, time ASC))[1] AS min_time,
     (ARRAY_AGG(time ORDER BY value DESC, time ASC))[1] AS max_time
-FROM public.t_monitor
-WHERE time >= %s AND time < %s
-GROUP BY LOWER(sensor_no), COALESCE(channel, '')
+FROM ordered_samples
+GROUP BY s_no, ch
 """
 
 STAT_UPSERT_SQL = """
@@ -55,7 +68,7 @@ INSERT INTO public.t_stat_record (
     max_time, min_time, sample_count,
     create_by, create_time
 ) VALUES (
-    %s, %s, '1m', %s,
+    %s, %s, %s, %s,
     %s, %s, %s,
     %s, %s, %s,
     'system', NOW()
@@ -102,8 +115,17 @@ class ConcurrentDict:
                         "last_ts",
                         "last_val",
                         "online_status",
-                        "exceed_streak",
-                        "active_level",
+                        "threshold_streak_count",
+                        "threshold_streak_direction",
+                        "threshold_last_level",
+                        "threshold_last_value",
+                        "threshold_last_limit",
+                        "oor_streak_count",
+                        "oor_streak_direction",
+                        "oor_last_value",
+                        "stuck_streak_count",
+                        "stuck_last_value",
+                        "stuck_since",
                     ):
                         if rt_field in old and rt_field not in v:
                             v[rt_field] = old[rt_field]
@@ -129,18 +151,27 @@ class AlertAnalyticsEngine:
     - Maintains in-memory ConcurrentDict of all 208 sensor channel threshold rules & metadata.
     - Supports zero-downtime hot reload (`reload_thresholds()`).
     - Evaluates explicit time windows over `t_monitor`.
-    - Evaluates Req 1 (1000ms offline & gap + DAQ storm suppression),
-      Req 2 (3-level thresholds + debounce + dynamic incident upgrade + manual handling),
-      Req 3 (传感器死值、超物理量程),
-      Req 4 (1m extremes).
+    - Persists window statistics while evaluating threshold, out-of-range, stuck
+      and offline conditions as configurable consecutive sample groups.
+    - Derives each sample period from ``t_sensor.frequency``.
+    - Supports dynamic incident upgrade and manual handling.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        confirm_points: int = 3,
+        stuck_points: int = 100,
+        offline_points: int = 5,
+    ) -> None:
         self.channel_states = ConcurrentDict()
         self.sensor_meta: Dict[str, Dict[str, Any]] = {}
         self.instrument_meta: Dict[str, Dict[str, Any]] = {}
         self.total_monitor_rows: int = 398059510
         self.last_reload_time: Optional[datetime] = None
+        self.confirm_points = max(1, int(confirm_points))
+        self.stuck_points = max(1, int(stuck_points))
+        self.offline_points = max(1, int(offline_points))
         self._step_lock = threading.Lock()
 
     @staticmethod
@@ -150,7 +181,53 @@ class AlertAnalyticsEngine:
     def initialize(self) -> None:
         """Load sensor metadata, instrument metadata, and 208 threshold rules into memory."""
         self.reload_thresholds()
+        self.bootstrap_last_seen()
         self.refresh_monitor_row_count()
+
+    def bootstrap_last_seen(self) -> None:
+        """Load each configured channel's latest t_monitor timestamp."""
+        rules = self.channel_states.values()
+        if not rules:
+            return
+
+        with get_db_cursor() as cur:
+            cur.execute("SELECT LOCALTIMESTAMP AS now")
+            now = cur.fetchone()["now"]
+        max_timeout_seconds = max(
+            self._offline_timeout_ms(rule) / 1000.0 for rule in rules
+        )
+        lookback_seconds = max(60.0, max_timeout_seconds)
+        with get_db_cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                  LOWER(sensor_no) AS sensor_no,
+                  COALESCE(channel, '') AS channel,
+                  MAX(time) AS last_ts
+                FROM public.t_monitor
+                WHERE time >= %s
+                GROUP BY LOWER(sensor_no), COALESCE(channel, '')
+                """,
+                (now - timedelta(seconds=lookback_seconds),),
+            )
+            latest_by_target = {
+                self.make_key(row["sensor_no"], row["channel"]): row["last_ts"]
+                for row in cur.fetchall()
+            }
+
+        for rule in rules:
+            key = rule["key"]
+            last_seen = self._parse_maybe_dt(latest_by_target.get(key))
+            offline_timeout_ms = self._offline_timeout_ms(rule)
+            timeout = timedelta(milliseconds=offline_timeout_ms)
+            if last_seen is None:
+                last_seen = now - timeout - timedelta(minutes=2)
+            online_status = "ONLINE" if now - last_seen <= timeout else "OFFLINE"
+            self.channel_states.update_field(
+                key,
+                last_ts=serialize_val(last_seen),
+                online_status=online_status,
+            )
 
     def refresh_monitor_row_count(self) -> int:
         """Refresh ``total_monitor_rows`` from TimescaleDB metadata (cheap, no full scan)."""
@@ -288,6 +365,15 @@ class AlertAnalyticsEngine:
                         physical_quantity,
                         ch,
                     )
+                frequency_text = (
+                    sm.get("frequency")
+                    or self._hz_from_interval(d.get("expected_interval_ms"))
+                )
+                frequency_hz = self._parse_frequency_hz(frequency_text)
+                sample_interval_ms = 1000.0 / frequency_hz
+                confirm_points = self.confirm_points
+                stuck_points = self.stuck_points
+                offline_points = self.offline_points
 
                 d.update(
                     {
@@ -299,24 +385,25 @@ class AlertAnalyticsEngine:
                         "instrument_id": sm.get("instrument_id"),
                         "instrument_name": sm.get("instrument_name") or "-",
                         "range": sm.get("range") or "-",
-                        "frequency": sm.get("frequency")
-                        or self._hz_from_interval(d.get("expected_interval_ms")),
+                        "frequency": str(frequency_text),
+                        "frequency_hz": frequency_hz,
+                        "sample_interval_ms": sample_interval_ms,
+                        "expected_interval_ms": max(1, int(round(sample_interval_ms))),
                         "position": sm.get("position") or "-",
                         "physical_quantity": physical_quantity,
                         "unit": unit,
                         "remove_dc_offset": remove_dc_offset,
                         "physical_min": range_min,
                         "physical_max": range_max,
-                        "stuck_time_ms": int(
-                            d.get("stuck_time_ms")
-                            or self._default_stuck_time_ms(
-                                d.get("expected_interval_ms"),
-                                remove_dc_offset,
-                                physical_quantity,
-                            )
-                        ),
+                        "confirm_points": confirm_points,
+                        "stuck_points": stuck_points,
+                        "offline_points": offline_points,
                         "online_status": "ONLINE",
-                        "exceed_streak": 0,
+                        "threshold_streak_count": 0,
+                        "threshold_streak_direction": ALERT_DIRECTION_NONE,
+                        "oor_streak_count": 0,
+                        "oor_streak_direction": ALERT_DIRECTION_NONE,
+                        "stuck_streak_count": 0,
                     }
                 )
                 new_states[key] = d
@@ -337,6 +424,30 @@ class AlertAnalyticsEngine:
         return str(int(1000 / interval_ms))
 
     @staticmethod
+    def _parse_frequency_hz(value: Any) -> float:
+        """Parse ``t_sensor.frequency`` values such as ``100`` or ``1/60``."""
+        text = str(value or "").strip().lower().removesuffix("hz").strip()
+        if not text:
+            return 1.0
+        try:
+            if "/" in text:
+                numerator, denominator = text.split("/", 1)
+                parsed = float(numerator) / float(denominator)
+            else:
+                parsed = float(text)
+        except (TypeError, ValueError, ZeroDivisionError):
+            return 1.0
+        return parsed if parsed > 0 else 1.0
+
+    @classmethod
+    def _offline_timeout_ms(cls, rule: Dict[str, Any]) -> float:
+        interval_ms = float(
+            rule.get("sample_interval_ms")
+            or 1000.0 / cls._parse_frequency_hz(rule.get("frequency"))
+        )
+        return max(1, int(rule.get("offline_points") or 5)) * interval_ms
+
+    @staticmethod
     def _infer_remove_dc_offset(sensor_no: str, sensor_name: str, channel: str) -> bool:
         channel_name = (channel or "").strip().lower()
         sensor_text = f"{sensor_no} {sensor_name}".lower()
@@ -345,53 +456,191 @@ class AlertAnalyticsEngine:
             and ("accl" in sensor_text or "加速度" in sensor_text or "振动" in sensor_text)
         )
 
-    @staticmethod
-    def _default_stuck_time_ms(
-        expected_interval_ms: Optional[int],
-        remove_dc_offset: bool,
-        physical_quantity: str,
-    ) -> int:
-        interval_ms = max(10, int(expected_interval_ms or 1000))
-        if remove_dc_offset:
-            return interval_ms * 50
-        quantity = (physical_quantity or "").lower()
-        if "温度" in quantity or "temperature" in quantity:
-            return interval_ms * 60
-        if "风向" in quantity or "winddirection" in quantity:
-            return interval_ms * 120
-        return interval_ms * 30
-
-    def _evaluate_stuck(
+    def _evaluate_threshold_streak(
         self,
-        *,
-        previous_last_val: Any,
-        previous_stuck_since: Any,
-        sample_cnt: int,
-        val_std: float,
-        val_avg: float,
-        first_ts: datetime,
-        last_ts: datetime,
-        stuck_time_ms: int,
-    ) -> Tuple[bool, Optional[datetime], float]:
-        if sample_cnt <= 0 or val_std > 1e-9:
-            return False, None, 0.0
+        samples: List[Tuple[datetime, float]],
+        rule: Dict[str, Any],
+        dc_offset: float,
+        previous_direction: Any,
+        previous_count: Any,
+        target_points: int,
+        previous_sample_time: Any = None,
+        max_gap_ms: Optional[float] = None,
+    ) -> Tuple[str, int, bool, Optional[Tuple[int, float, float, datetime]]]:
+        direction = (
+            str(previous_direction)
+            if previous_direction in (ALERT_DIRECTION_UPPER, ALERT_DIRECTION_LOWER)
+            else ALERT_DIRECTION_NONE
+        )
+        count = max(0, int(previous_count or 0))
+        active = False
+        snapshot: Optional[Tuple[int, float, float, datetime]] = None
+        run_best_level: Optional[int] = None
+        run_best_value: Optional[float] = None
+        run_best_limit: Optional[float] = None
+        run_best_time: Optional[datetime] = None
+        last_sample_time = self._parse_maybe_dt(previous_sample_time)
 
-        previous_value = (
-            float(previous_last_val)
-            if previous_last_val is not None
-            else None
+        for sample_time, value in samples:
+            if (
+                max_gap_ms is not None
+                and last_sample_time is not None
+                and (sample_time - last_sample_time).total_seconds() * 1000.0
+                > max_gap_ms
+            ):
+                direction = ALERT_DIRECTION_NONE
+                count = 0
+                run_best_level = None
+                run_best_value = None
+                run_best_limit = None
+                run_best_time = None
+            last_sample_time = sample_time
+            level, sample_direction, eval_value, limit = self._sample_level(
+                rule,
+                value,
+                dc_offset,
+            )
+            if level is None or sample_direction == ALERT_DIRECTION_NONE:
+                direction = ALERT_DIRECTION_NONE
+                count = 0
+                run_best_level = None
+                run_best_value = None
+                run_best_limit = None
+                run_best_time = None
+                continue
+            if sample_direction == direction:
+                count += 1
+            else:
+                direction = sample_direction
+                count = 1
+                run_best_level = None
+                run_best_value = None
+                run_best_limit = None
+                run_best_time = None
+            if run_best_level is None or level < run_best_level:
+                run_best_level = level
+                run_best_value = eval_value
+                run_best_limit = float(limit or eval_value)
+                run_best_time = sample_time
+            if count >= target_points:
+                active = True
+                snapshot = (
+                    run_best_level or level,
+                    run_best_value if run_best_value is not None else eval_value,
+                    run_best_limit if run_best_limit is not None else eval_value,
+                    run_best_time or sample_time,
+                )
+
+        return direction, count, active, snapshot
+
+    @staticmethod
+    def _out_of_range_direction(
+        rule: Dict[str, Any],
+        value: float,
+    ) -> str:
+        physical_max = rule.get("physical_max")
+        physical_min = rule.get("physical_min")
+        upper_exceeded = physical_max is not None and value > float(physical_max)
+        lower_exceeded = physical_min is not None and value < float(physical_min)
+        if upper_exceeded and lower_exceeded:
+            return (
+                ALERT_DIRECTION_LOWER
+                if float(physical_min) - value > value - float(physical_max)
+                else ALERT_DIRECTION_UPPER
+            )
+        if lower_exceeded:
+            return ALERT_DIRECTION_LOWER
+        if upper_exceeded:
+            return ALERT_DIRECTION_UPPER
+        return ALERT_DIRECTION_NONE
+
+    def _evaluate_out_of_range_streak(
+        self,
+        samples: List[Tuple[datetime, float]],
+        rule: Dict[str, Any],
+        previous_direction: Any,
+        previous_count: Any,
+        target_points: int,
+        previous_sample_time: Any = None,
+        max_gap_ms: Optional[float] = None,
+    ) -> Tuple[str, int, bool, Optional[Tuple[float, datetime]]]:
+        direction = (
+            str(previous_direction)
+            if previous_direction in (ALERT_DIRECTION_UPPER, ALERT_DIRECTION_LOWER)
+            else ALERT_DIRECTION_NONE
         )
-        continues_previous = (
-            previous_value is not None
-            and abs(val_avg - previous_value) <= 1e-9
+        count = max(0, int(previous_count or 0))
+        active = False
+        snapshot: Optional[Tuple[float, datetime]] = None
+        last_sample_time = self._parse_maybe_dt(previous_sample_time)
+
+        for sample_time, value in samples:
+            if (
+                max_gap_ms is not None
+                and last_sample_time is not None
+                and (sample_time - last_sample_time).total_seconds() * 1000.0
+                > max_gap_ms
+            ):
+                direction = ALERT_DIRECTION_NONE
+                count = 0
+            last_sample_time = sample_time
+            sample_direction = self._out_of_range_direction(rule, value)
+            if sample_direction == ALERT_DIRECTION_NONE:
+                direction = ALERT_DIRECTION_NONE
+                count = 0
+                continue
+            if sample_direction == direction:
+                count += 1
+            else:
+                direction = sample_direction
+                count = 1
+            if count >= target_points:
+                active = True
+                snapshot = (value, sample_time)
+
+        return direction, count, active, snapshot
+
+    @staticmethod
+    def _evaluate_stuck_streak(
+        samples: List[Tuple[datetime, float]],
+        previous_value: Any,
+        previous_count: Any,
+        previous_since: Any,
+        target_points: int,
+        previous_sample_time: Any = None,
+        max_gap_ms: Optional[float] = None,
+    ) -> Tuple[int, Optional[float], Optional[datetime], bool, Optional[Tuple[float, datetime]]]:
+        count = max(0, int(previous_count or 0))
+        last_value = (
+            float(previous_value) if previous_value is not None else None
         )
-        stuck_since = self._parse_maybe_dt(previous_stuck_since) if continues_previous else None
-        stuck_since = stuck_since or first_ts
-        stuck_duration_ms = max(
-            0.0,
-            (last_ts - stuck_since).total_seconds() * 1000.0,
-        )
-        return stuck_duration_ms >= stuck_time_ms, stuck_since, stuck_duration_ms
+        since = AlertAnalyticsEngine._parse_maybe_dt(previous_since)
+        active = False
+        snapshot: Optional[Tuple[float, datetime]] = None
+        last_sample_time = AlertAnalyticsEngine._parse_maybe_dt(previous_sample_time)
+
+        for sample_time, value in samples:
+            if (
+                max_gap_ms is not None
+                and last_sample_time is not None
+                and (sample_time - last_sample_time).total_seconds() * 1000.0
+                > max_gap_ms
+            ):
+                count = 0
+                last_value = None
+                since = None
+            last_sample_time = sample_time
+            if last_value is not None and abs(value - last_value) <= 1e-9:
+                count += 1
+            else:
+                count = 1
+                since = sample_time
+            last_value = value
+            if count >= target_points:
+                active = True
+                snapshot = (value, sample_time)
+
+        return count, last_value, since, active, snapshot
 
     @classmethod
     def _parse_physical_range(
@@ -585,14 +834,11 @@ class AlertAnalyticsEngine:
         threshold_id: Optional[str],
         alert_type: str,
         alert_level: int,
-        direction: str,
         trigger_val: Optional[float],
         fire_time: datetime,
-        remark: str,
     ) -> Dict[str, Any]:
         """Insert or refresh an unhandled alert."""
         alert_type = normalize_alert_type(alert_type) or alert_type
-        direction = normalize_alert_direction(direction)
         alert_category = alert_category_for_type(alert_type)
         alert_id = uuid.uuid4().hex
         cur.execute(
@@ -602,13 +848,12 @@ class AlertAnalyticsEngine:
             WHERE LOWER(sensor_no) = %s
               AND COALESCE(channel, '') = %s
               AND alert_type = %s
-              AND COALESCE(direction, '无方向') = %s
-              AND alert_status IN (0, 1)
+              AND alert_status = 0
             ORDER BY seq DESC
             LIMIT 1
             FOR UPDATE
             """,
-            (sensor_no.lower(), channel or "", alert_type, direction),
+            (sensor_no.lower(), channel or "", alert_type),
         )
         existing = cur.fetchone()
         if existing:
@@ -632,12 +877,12 @@ class AlertAnalyticsEngine:
                 """
                 INSERT INTO public.t_alert_record (
                     id, seq, sensor_no, channel, threshold_id,
-                    alert_type, alert_category, alert_level, direction,
+                    alert_type, alert_category, alert_level,
                     trigger_val, create_time, trigger_count,
                     alert_status, update_time
                 ) VALUES (
                     %s, nextval('public.seq_alert_record'), %s, %s, %s,
-                    %s, %s, %s, %s,
+                    %s, %s, %s,
                     %s, %s, 1,
                     0, NOW()
                 )
@@ -651,7 +896,6 @@ class AlertAnalyticsEngine:
                     alert_type,
                     alert_category,
                     alert_level,
-                    direction,
                     trigger_val,
                     fire_time,
                 ),
@@ -686,13 +930,11 @@ class AlertAnalyticsEngine:
         sensor_no: str,
         channel: Optional[str],
         alert_type: str,
-        direction: Optional[str] = ALERT_DIRECTION_NONE,
-    ) -> Tuple[str, str, str, str]:
+    ) -> Tuple[str, str, str]:
         return (
             (sensor_no or "").strip().lower(),
             (channel or "").strip(),
             normalize_alert_type(alert_type) or (alert_type or "").strip(),
-            normalize_alert_direction(direction),
         )
 
     def _level_for(
@@ -725,28 +967,6 @@ class AlertAnalyticsEngine:
             return self._level_for(rule, amplitude, -amplitude, remove_dc=True)
         return self._level_for(rule, value, value, remove_dc=False)
 
-    def _count_exceed_run(
-        self,
-        samples: List[Tuple[datetime, float]],
-        rule: Dict[str, Any],
-        dc_offset: float,
-        direction: str,
-    ) -> Tuple[int, Optional[int], Optional[float], Optional[float]]:
-        count = 0
-        hit_level: Optional[int] = None
-        hit_value: Optional[float] = None
-        hit_limit: Optional[float] = None
-        for _, value in reversed(samples):
-            level, sample_direction, eval_value, limit = self._sample_level(rule, value, dc_offset)
-            if level is None or sample_direction != direction:
-                break
-            count += 1
-            if hit_level is None:
-                hit_level = level
-                hit_value = eval_value
-                hit_limit = limit
-        return count, hit_level, hit_value, hit_limit
-
     @staticmethod
     def _fetch_samples(
         cur: Any,
@@ -771,32 +991,30 @@ class AlertAnalyticsEngine:
         rows = list(reversed(cur.fetchall()))
         return [(r["time"], float(r["value"])) for r in rows if r["value"] is not None]
 
-    def _load_active_alerts(self, cur: Any) -> Dict[Tuple[str, str, str, str], Dict[str, Any]]:
+    def _load_active_alerts(self, cur: Any) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
         cur.execute(
             """
             SELECT *
             FROM public.t_alert_record
-            WHERE alert_status IN (0, 1)
+            WHERE alert_status = 0
             """
         )
-        active: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
+        active: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
         for row in cur.fetchall():
             d = dict(row)
-            if int(d.get("alert_status") or 0) == 0:
-                active[
-                    self._alert_key(
-                        d["sensor_no"],
-                        d.get("channel"),
-                        d["alert_type"],
-                        d.get("direction"),
-                    )
-                ] = d
+            active[
+                self._alert_key(
+                    d["sensor_no"],
+                    d.get("channel"),
+                    d["alert_type"],
+                )
+            ] = d
         return active
 
     def _apply_condition(
         self,
         cur: Any,
-        active_map: Dict[Tuple[str, str, str, str], Dict[str, Any]],
+        active_map: Dict[Tuple[str, str, str], Dict[str, Any]],
         triggered: List[Dict[str, Any]],
         *,
         rule: Dict[str, Any],
@@ -805,14 +1023,12 @@ class AlertAnalyticsEngine:
         alert_type: str,
         active: bool,
         alert_level: int,
-        direction: str,
         trigger_val: Optional[float],
         fire_time: datetime,
-        remark: str,
     ) -> Optional[Dict[str, Any]]:
         if not active:
             return None
-        key = self._alert_key(sensor_no, channel, alert_type, direction)
+        key = self._alert_key(sensor_no, channel, alert_type)
         alert = self._upsert_alert_incident(
             cur,
             sensor_no=sensor_no,
@@ -820,16 +1036,19 @@ class AlertAnalyticsEngine:
             threshold_id=rule.get("id"),
             alert_type=alert_type,
             alert_level=alert_level,
-            direction=direction,
             trigger_val=trigger_val,
             fire_time=fire_time,
-            remark=remark,
         )
         active_map[key] = alert
         triggered.append(alert)
         return alert
 
-    def _run_detection_window(self, window_start: datetime, window_end: datetime) -> Dict[str, Any]:
+    def _run_detection_window(
+        self,
+        window_start: datetime,
+        window_end: datetime,
+        period_type: str,
+    ) -> Dict[str, Any]:
         triggered_alerts: List[Dict[str, Any]] = []
         upserted_stats = 0
         raw_points_processed = 0
@@ -857,20 +1076,14 @@ class AlertAnalyticsEngine:
                 sensor_no = rule["sensor_no_lower"]
                 channel = rule.get("channel") or ""
                 obs = observed_map.get(key)
+                offline_timeout_ms = self._offline_timeout_ms(rule)
                 if obs is None or int(obs["sample_cnt"] or 0) <= 0:
                     last_seen = self._parse_maybe_dt(rule.get("last_ts"))
                     if last_seen is None:
-                        self.channel_states.update_field(
-                            key,
-                            last_ts=serialize_val(window_end),
-                            online_status="OFFLINE",
-                            stuck_since=None,
-                        )
-                        continue
-
-                    silence_ms = (window_end - last_seen).total_seconds() * 1000.0
-                    offline_timeout_ms = int(rule.get("offline_timeout_ms") or 10000)
-                    if silence_ms <= offline_timeout_ms:
+                        silence_ms = float("inf")
+                    else:
+                        silence_ms = (window_end - last_seen).total_seconds() * 1000.0
+                    if silence_ms < offline_timeout_ms:
                         continue
 
                     instrument_id = (rule.get("instrument_id") or "").strip()
@@ -886,19 +1099,17 @@ class AlertAnalyticsEngine:
                         channel=channel,
                         alert_type=ALERT_TYPE_OFFLINE,
                         active=True,
-                        alert_level=3,
-                        direction=ALERT_DIRECTION_NONE,
-                        trigger_val=round(silence_ms, 3),
+                        alert_level=NON_THRESHOLD_ALERT_LEVEL,
+                        trigger_val=0.0,
                         fire_time=window_end,
-                        remark=(
-                            f"[传感器离线] {rule.get('sensor_name')} "
-                            f"{channel} 已连续 {silence_ms:.0f}ms 无数据，超过离线阈值 {offline_timeout_ms}ms"
-                        ),
                     )
                     self.channel_states.update_field(
                         key,
                         online_status="OFFLINE",
                         stuck_since=None,
+                        stuck_streak_count=0,
+                        threshold_streak_count=0,
+                        oor_streak_count=0,
                     )
                     continue
 
@@ -908,16 +1119,14 @@ class AlertAnalyticsEngine:
                 val_max = float(obs["val_max"])
                 val_min = float(obs["val_min"])
                 val_avg = float(obs["val_avg"])
-                value_std = float(obs["value_std"] or 0.0)
                 max_time = obs.get("max_time") or last_ts
                 min_time = obs.get("min_time") or first_ts
-                previous_last_val = rule.get("last_val")
-                previous_stuck_since = rule.get("stuck_since")
                 cur.execute(
                     STAT_UPSERT_SQL,
                     (
                         sensor_no,
                         channel,
+                        period_type,
                         window_start,
                         val_max,
                         val_min,
@@ -929,184 +1138,229 @@ class AlertAnalyticsEngine:
                 )
                 upserted_stats += 1
 
-                self.channel_states.update_field(
-                    key,
-                    last_ts=serialize_val(last_ts),
-                    last_val=round(val_max, 5),
-                    online_status="ONLINE",
+                confirm_points = max(1, int(rule.get("confirm_points") or 3))
+                stuck_points = max(1, int(rule.get("stuck_points") or 100))
+                remove_dc = bool(rule.get("remove_dc_offset", False))
+                upper_limits = [
+                    float(rule[f"level{level}_upper"])
+                    for level in (1, 2, 3)
+                    if rule.get(f"level{level}_upper") is not None
+                ]
+                lower_limits = [
+                    float(rule[f"level{level}_lower"])
+                    for level in (1, 2, 3)
+                    if rule.get(f"level{level}_lower") is not None
+                ]
+                upper_extreme = (
+                    max(abs(val_max - val_avg), abs(val_min - val_avg))
+                    if remove_dc
+                    else val_max
                 )
-
-                stuck_time_ms = int(rule.get("stuck_time_ms") or 30000)
-                stuck_active, stuck_since, stuck_duration_ms = self._evaluate_stuck(
-                    previous_last_val=previous_last_val,
-                    previous_stuck_since=previous_stuck_since,
-                    sample_cnt=sample_cnt,
-                    val_std=value_std,
-                    val_avg=val_avg,
-                    first_ts=first_ts,
-                    last_ts=last_ts,
-                    stuck_time_ms=stuck_time_ms,
+                threshold_possible = (
+                    bool(upper_limits) and upper_extreme > min(upper_limits)
+                ) or (
+                    not remove_dc
+                    and bool(lower_limits)
+                    and val_min < max(lower_limits)
                 )
-                self.channel_states.update_field(
-                    key,
-                    stuck_since=serialize_val(stuck_since) if stuck_since else None,
-                )
-                self._apply_condition(
-                    cur,
-                    active_map,
-                    triggered_alerts,
-                    rule=rule,
-                    sensor_no=sensor_no,
-                    channel=channel,
-                    alert_type=ALERT_TYPE_STUCK,
-                    active=stuck_active,
-                    alert_level=3,
-                    direction=ALERT_DIRECTION_NONE,
-                    trigger_val=val_avg,
-                    fire_time=last_ts,
-                    remark=(
-                        f"[传感器死值] {rule.get('sensor_name')} {channel} "
-                        f"连续 {stuck_duration_ms:.0f}ms 读数恒为 {val_avg:.5f}，"
-                        f"标准差为 0，超过判定时间 {stuck_time_ms}ms"
-                    ),
-                )
-
                 physical_max = rule.get("physical_max")
                 physical_min = rule.get("physical_min")
-                upper_exceeded = (
-                    physical_max is not None
-                    and val_max > float(physical_max)
+                oor_possible = (
+                    physical_max is not None and val_max > float(physical_max)
+                ) or (
+                    physical_min is not None and val_min < float(physical_min)
                 )
-                lower_exceeded = (
-                    physical_min is not None
-                    and val_min < float(physical_min)
+                stuck_possible = (
+                    sample_cnt >= stuck_points
+                    and abs(val_max - val_min) <= 1e-9
+                ) or int(rule.get("stuck_streak_count") or 0) > 0
+                fetch_limit = (
+                    20000
+                    if threshold_possible or oor_possible or stuck_possible
+                    else max(confirm_points, stuck_points)
                 )
-                oor_active = upper_exceeded or lower_exceeded
-                oor_direction = ALERT_DIRECTION_NONE
-                oor_value = val_max
-                if upper_exceeded and lower_exceeded:
-                    upper_excess = val_max - float(physical_max)
-                    lower_excess = float(physical_min) - val_min
-                    if lower_excess > upper_excess:
-                        oor_direction = ALERT_DIRECTION_LOWER
-                        oor_value = val_min
-                    else:
-                        oor_direction = ALERT_DIRECTION_UPPER
-                        oor_value = val_max
-                elif lower_exceeded:
-                    oor_direction = ALERT_DIRECTION_LOWER
-                    oor_value = val_min
-                elif upper_exceeded:
-                    oor_direction = ALERT_DIRECTION_UPPER
-                    oor_value = val_max
-                self._apply_condition(
+                samples = self._fetch_samples(
                     cur,
-                    active_map,
-                    triggered_alerts,
-                    rule=rule,
-                    sensor_no=sensor_no,
-                    channel=channel,
-                    alert_type=ALERT_TYPE_OOR,
-                    active=oor_active,
-                    alert_level=3,
-                    direction=oor_direction,
-                    trigger_val=oor_value,
-                    fire_time=last_ts,
-                    remark=(
-                        f"[超物理量程] {rule.get('sensor_name')} {channel} "
-                        f"读数范围 [{val_min:.5f}, {val_max:.5f}] 超出 [{physical_min}, {physical_max}]"
-                    ),
+                    sensor_no,
+                    channel,
+                    window_start,
+                    window_end,
+                    limit=fetch_limit,
                 )
+                if not samples:
+                    samples = [(last_ts, val_avg)]
 
-                remove_dc = bool(rule.get("remove_dc_offset", False))
-                if remove_dc:
-                    aggregate_upper = max(abs(val_max - val_avg), abs(val_min - val_avg))
-                    aggregate_lower = -aggregate_upper
-                else:
-                    aggregate_upper = val_max
-                    aggregate_lower = val_min
-                aggregate_level, _, _, _ = self._level_for(
+                (
+                    threshold_direction,
+                    threshold_count,
+                    threshold_active,
+                    threshold_snapshot,
+                ) = self._evaluate_threshold_streak(
+                    samples,
                     rule,
-                    aggregate_upper,
-                    aggregate_lower,
-                    remove_dc=remove_dc,
+                    val_avg,
+                    rule.get("threshold_streak_direction"),
+                    rule.get("threshold_streak_count"),
+                    confirm_points,
+                    previous_sample_time=rule.get("last_ts"),
+                    max_gap_ms=float(rule.get("sample_interval_ms") or 1000) * 1.5,
                 )
-                active_thresholds = [
-                    (alert_key, active_row)
-                    for alert_key, active_row in active_map.items()
-                    if alert_key[0] == sensor_no
-                    and alert_key[1] == channel
-                    and alert_key[2] == ALERT_TYPE_THRESHOLD
-                ]
-                if aggregate_level is not None or active_thresholds:
-                    samples = self._fetch_samples(cur, sensor_no, channel, window_start, window_end)
-                    directions = (
-                        [ALERT_DIRECTION_UPPER]
-                        if remove_dc
-                        else [ALERT_DIRECTION_UPPER, ALERT_DIRECTION_LOWER]
+                state_updates: Dict[str, Any] = {
+                    "last_ts": serialize_val(last_ts),
+                    "last_val": round(samples[-1][1], 5),
+                    "online_status": "ONLINE",
+                    "threshold_streak_direction": threshold_direction,
+                    "threshold_streak_count": threshold_count,
+                }
+                if threshold_snapshot is not None:
+                    level, value, limit, fire_time = threshold_snapshot
+                    state_updates.update(
+                        {
+                            "threshold_last_level": level,
+                            "threshold_last_value": value,
+                            "threshold_last_limit": limit,
+                        }
                     )
-                    for direction in directions:
-                        threshold_key = self._alert_key(sensor_no, channel, ALERT_TYPE_THRESHOLD, direction)
-                        existing = active_map.get(threshold_key)
-                        exceeded, hit_level, hit_value, hit_limit = self._count_exceed_run(
-                            samples,
-                            rule,
-                            val_avg,
-                            direction,
-                        )
-                        if existing:
-                            if exceeded > 0 and hit_level is not None:
-                                level_names = {1: "一级红色报警", 2: "二级橙色报警", 3: "三级黄色预警"}
-                                direction_cn = "去直流幅值超限" if remove_dc else (
-                                    "上限超限" if direction == ALERT_DIRECTION_UPPER else "下限超限"
-                                )
-                                self._apply_condition(
-                                    cur,
-                                    active_map,
-                                    triggered_alerts,
-                                    rule=rule,
-                                    sensor_no=sensor_no,
-                                    channel=channel,
-                                    alert_type=ALERT_TYPE_THRESHOLD,
-                                    active=True,
-                                    alert_level=hit_level,
-                                    direction=direction,
-                                    trigger_val=hit_value,
-                                    fire_time=last_ts,
-                                    remark=(
-                                        f"[{level_names[hit_level]}] {rule.get('sensor_name')} "
-                                        f"{rule.get('physical_quantity')}{direction_cn}: "
-                                        f"峰值 {hit_value:.4f} {rule.get('unit') or ''} "
-                                        f"(阈值 {hit_limit:.4f} {rule.get('unit') or ''})"
-                                    ),
-                                )
-                        elif exceeded > 0 and hit_level is not None:
-                            confirm_points = max(1, int(rule.get("confirm_points") or 3))
-                            if exceeded >= confirm_points:
-                                level_names = {1: "一级红色报警", 2: "二级橙色报警", 3: "三级黄色预警"}
-                                direction_cn = "去直流幅值超限" if remove_dc else (
-                                    "上限超限" if direction == ALERT_DIRECTION_UPPER else "下限超限"
-                                )
-                                self._apply_condition(
-                                    cur,
-                                    active_map,
-                                    triggered_alerts,
-                                    rule=rule,
-                                    sensor_no=sensor_no,
-                                    channel=channel,
-                                    alert_type=ALERT_TYPE_THRESHOLD,
-                                    active=True,
-                                    alert_level=hit_level,
-                                    direction=direction,
-                                    trigger_val=hit_value,
-                                    fire_time=last_ts,
-                                    remark=(
-                                        f"[{level_names[hit_level]}] {rule.get('sensor_name')} "
-                                        f"{rule.get('physical_quantity')}{direction_cn}: "
-                                        f"连续 {exceeded} 点超限，峰值 {hit_value:.4f} "
-                                        f"{rule.get('unit') or ''} (阈值 {hit_limit:.4f} {rule.get('unit') or ''})"
-                                    ),
-                                )
+                    self._apply_condition(
+                        cur,
+                        active_map,
+                        triggered_alerts,
+                        rule=rule,
+                        sensor_no=sensor_no,
+                        channel=channel,
+                        alert_type=ALERT_TYPE_THRESHOLD,
+                        active=threshold_active,
+                        alert_level=level,
+                        trigger_val=value,
+                        fire_time=fire_time,
+                    )
+
+                (
+                    oor_direction,
+                    oor_count,
+                    oor_active,
+                    oor_snapshot,
+                ) = self._evaluate_out_of_range_streak(
+                    samples,
+                    rule,
+                    rule.get("oor_streak_direction"),
+                    rule.get("oor_streak_count"),
+                    confirm_points,
+                    previous_sample_time=rule.get("last_ts"),
+                    max_gap_ms=float(rule.get("sample_interval_ms") or 1000) * 1.5,
+                )
+                state_updates.update(
+                    {
+                        "oor_streak_direction": oor_direction,
+                        "oor_streak_count": oor_count,
+                    }
+                )
+                if oor_snapshot is not None:
+                    oor_value, fire_time = oor_snapshot
+                    state_updates["oor_last_value"] = oor_value
+                    self._apply_condition(
+                        cur,
+                        active_map,
+                        triggered_alerts,
+                        rule=rule,
+                        sensor_no=sensor_no,
+                        channel=channel,
+                        alert_type=ALERT_TYPE_OOR,
+                        active=oor_active,
+                        alert_level=NON_THRESHOLD_ALERT_LEVEL,
+                        trigger_val=oor_value,
+                        fire_time=fire_time,
+                    )
+
+                (
+                    stuck_count,
+                    stuck_last_value,
+                    stuck_since,
+                    stuck_active,
+                    stuck_snapshot,
+                ) = self._evaluate_stuck_streak(
+                    samples,
+                    rule.get("stuck_last_value"),
+                    rule.get("stuck_streak_count"),
+                    rule.get("stuck_since"),
+                    stuck_points,
+                    previous_sample_time=rule.get("last_ts"),
+                    max_gap_ms=float(rule.get("sample_interval_ms") or 1000) * 1.5,
+                )
+                state_updates.update(
+                    {
+                        "stuck_streak_count": stuck_count,
+                        "stuck_last_value": stuck_last_value,
+                        "stuck_since": serialize_val(stuck_since) if stuck_since else None,
+                    }
+                )
+                if stuck_snapshot is not None:
+                    stuck_value, fire_time = stuck_snapshot
+                    self._apply_condition(
+                        cur,
+                        active_map,
+                        triggered_alerts,
+                        rule=rule,
+                        sensor_no=sensor_no,
+                        channel=channel,
+                        alert_type=ALERT_TYPE_STUCK,
+                        active=stuck_active,
+                        alert_level=NON_THRESHOLD_ALERT_LEVEL,
+                        trigger_val=stuck_value,
+                        fire_time=fire_time,
+                    )
+
+                last_sample_time = samples[-1][0]
+                silence_ms = (window_end - last_sample_time).total_seconds() * 1000.0
+                previous_last_seen = self._parse_maybe_dt(rule.get("last_ts"))
+                boundary_gap_ms = (
+                    (samples[0][0] - previous_last_seen).total_seconds() * 1000.0
+                    if previous_last_seen is not None
+                    else 0.0
+                )
+                largest_gap_ms = max(
+                    boundary_gap_ms,
+                    float(obs.get("max_gap_ms") or 0.0),
+                )
+                currently_offline = silence_ms >= offline_timeout_ms
+                if currently_offline or largest_gap_ms >= offline_timeout_ms:
+                    if currently_offline:
+                        instrument_id = (rule.get("instrument_id") or "").strip()
+                        if instrument_id:
+                            offline_by_instrument.setdefault(
+                                instrument_id,
+                                [],
+                            ).append(rule)
+                    self._apply_condition(
+                        cur,
+                        active_map,
+                        triggered_alerts,
+                        rule=rule,
+                        sensor_no=sensor_no,
+                        channel=channel,
+                        alert_type=ALERT_TYPE_OFFLINE,
+                        active=True,
+                        alert_level=NON_THRESHOLD_ALERT_LEVEL,
+                        trigger_val=0.0,
+                        fire_time=window_end,
+                    )
+                if currently_offline:
+                    state_updates.update(
+                        {
+                            "online_status": "OFFLINE",
+                            "stuck_since": None,
+                            "stuck_streak_count": 0,
+                            "threshold_streak_count": 0,
+                            "threshold_streak_direction": ALERT_DIRECTION_NONE,
+                            "oor_streak_count": 0,
+                            "oor_streak_direction": ALERT_DIRECTION_NONE,
+                        }
+                    )
+
+                self.channel_states.update_field(
+                    key,
+                    **state_updates,
+                )
 
             active_daq_instruments = {
                 key[0]
@@ -1126,22 +1380,15 @@ class AlertAnalyticsEngine:
                     channel="__DAQ__",
                     threshold_id=None,
                     alert_type=ALERT_TYPE_DAQ_OFFLINE,
-                    alert_level=3,
-                    direction=ALERT_DIRECTION_NONE,
-                    trigger_val=float(len(offline_rules)),
+                    alert_level=NON_THRESHOLD_ALERT_LEVEL,
+                    trigger_val=0.0,
                     fire_time=window_end,
-                    remark=(
-                        f"[采集仪离线] 采集仪 {instrument_id} 下 "
-                        f"{len(offline_rules)}/{total_channels} 个通道离线，达到聚合阈值 {required_offline}，"
-                        f"已生成设备级主告警，子通道告警保留并等待人工处理"
-                    ),
                 )
                 active_map[
                     self._alert_key(
                         instrument_id,
                         "__DAQ__",
                         ALERT_TYPE_DAQ_OFFLINE,
-                        ALERT_DIRECTION_NONE,
                     )
                 ] = daq_alert
                 triggered_alerts.append(daq_alert)
@@ -1149,6 +1396,7 @@ class AlertAnalyticsEngine:
         return {
             "windowStart": serialize_val(window_start),
             "windowEnd": serialize_val(window_end),
+            "periodType": period_type,
             "rawPointsProcessed": raw_points_processed,
             "upsertedStatsCount": upserted_stats,
             "triggeredAlertsCount": len(triggered_alerts),
@@ -1159,39 +1407,29 @@ class AlertAnalyticsEngine:
         self,
         window_start: datetime,
         window_end: datetime,
+        period_type: str = "1m",
     ) -> Dict[str, Any]:
-        """Execute detection in one-minute sub-windows."""
+        """Persist one average window and evaluate frequency-based sample streaks."""
         with self._step_lock:
             t0 = time.perf_counter()
             if window_end <= window_start:
                 raise ValueError("window_end must be later than window_start")
 
-            total_raw_points = 0
-            total_stats = 0
-            total_alerts = 0
-            first_alerts: List[Dict[str, Any]] = []
-            sub_window_count = 0
-            cursor = window_start
-            while cursor < window_end:
-                sub_end = min(cursor + timedelta(minutes=1), window_end)
-                result = self._run_detection_window(cursor, sub_end)
-                total_raw_points += int(result["rawPointsProcessed"])
-                total_stats += int(result["upsertedStatsCount"])
-                total_alerts += int(result["triggeredAlertsCount"])
-                if len(first_alerts) < 10:
-                    first_alerts.extend(result["triggeredAlerts"][: 10 - len(first_alerts)])
-                sub_window_count += 1
-                cursor = sub_end
-
+            result = self._run_detection_window(
+                window_start,
+                window_end,
+                period_type,
+            )
             elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
             return {
                 "windowStart": serialize_val(window_start),
                 "windowEnd": serialize_val(window_end),
-                "subWindowCount": sub_window_count,
-                "rawPointsProcessed": total_raw_points,
-                "upsertedStatsCount": total_stats,
-                "triggeredAlertsCount": total_alerts,
-                "triggeredAlerts": first_alerts,
+                "periodType": period_type,
+                "subWindowCount": 1,
+                "rawPointsProcessed": result["rawPointsProcessed"],
+                "upsertedStatsCount": result["upsertedStatsCount"],
+                "triggeredAlertsCount": result["triggeredAlertsCount"],
+                "triggeredAlerts": result["triggeredAlerts"],
                 "elapsedMs": elapsed_ms,
             }
 
@@ -1205,5 +1443,9 @@ class AlertAnalyticsEngine:
             "offlineChannels": offline_cnt,
             "totalMonitorRows": self.total_monitor_rows,
             "lastReloadTime": serialize_val(self.last_reload_time),
+            "detectionMode": "frequency_sample_groups",
+            "confirmPoints": self.confirm_points,
+            "stuckPoints": self.stuck_points,
+            "offlinePoints": self.offline_points,
         }
 

@@ -16,7 +16,7 @@
 
       <div class="header-status">
         <span class="status-dot" :class="{ online: commState.pollActive }"></span>
-        <span>{{ commState.pollActive ? '5秒轮询正常' : '等待轮询' }}</span>
+        <span class="poll-label">{{ commState.pollActive ? '5秒轮询正常' : '等待轮询' }}</span>
         <el-button
           text
           :icon="isMuted ? MuteNotification : BellFilled"
@@ -202,7 +202,17 @@ onMounted(() => {
   }
 
   .header-status {
+    min-width: 0;
     margin-left: 0;
+    gap: 4px;
+  }
+
+  .poll-label {
+    display: none;
+  }
+
+  .header-status :deep(.el-button) {
+    padding: 4px 6px;
   }
 
   .app-content {

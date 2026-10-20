@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from app.domain.alert_types import ALERT_DIRECTION_NONE, ALERT_DIRECTION_UPPER
 from app.domain.engine import AlertAnalyticsEngine
 
 
@@ -40,43 +41,110 @@ def test_multirange_sensor_matches_physical_quantity(
     ) == expected
 
 
-def test_stuck_duration_accumulates_across_windows() -> None:
-    engine = AlertAnalyticsEngine.__new__(AlertAnalyticsEngine)
-    first_ts = datetime(2026, 10, 19, 10, 0, 0)
-    last_ts = first_ts + timedelta(seconds=60)
+def test_frequency_fraction_controls_offline_group_duration() -> None:
+    engine = AlertAnalyticsEngine()
+    assert engine._parse_frequency_hz("1/60") == pytest.approx(1 / 60)
+    assert engine._offline_timeout_ms(
+        {"frequency": "1/60", "offline_points": 5}
+    ) == pytest.approx(300_000)
+    assert engine._offline_timeout_ms(
+        {"frequency": "100", "offline_points": 5}
+    ) == pytest.approx(50)
 
-    active, since, duration_ms = engine._evaluate_stuck(
-        previous_last_val=12.5,
-        previous_stuck_since=first_ts - timedelta(seconds=60),
-        sample_cnt=60,
-        val_std=0.0,
-        val_avg=12.5,
-        first_ts=first_ts,
-        last_ts=last_ts,
-        stuck_time_ms=120000,
+
+def test_threshold_streak_continues_across_windows() -> None:
+    engine = AlertAnalyticsEngine()
+    rule = {
+        "level1_upper": 10.0,
+        "level2_upper": 8.0,
+        "level3_upper": 6.0,
+        "remove_dc_offset": False,
+    }
+    first_ts = datetime(2026, 10, 19, 10, 0, 0)
+    samples = [
+        (first_ts, 5.0),
+        (first_ts + timedelta(seconds=1), 5.0),
+        (first_ts + timedelta(seconds=2), 7.0),
+    ]
+
+    direction, count, active, snapshot = engine._evaluate_threshold_streak(
+        samples,
+        rule,
+        dc_offset=0.0,
+        previous_direction=ALERT_DIRECTION_NONE,
+        previous_count=0,
+        target_points=3,
     )
 
-    assert active is True
-    assert since == first_ts - timedelta(seconds=60)
-    assert duration_ms == 120000.0
+    assert direction == ALERT_DIRECTION_UPPER
+    assert count == 1
+    assert active is False
+    assert snapshot is None
 
-
-def test_changed_value_resets_stuck_duration() -> None:
-    engine = AlertAnalyticsEngine.__new__(AlertAnalyticsEngine)
-    first_ts = datetime(2026, 10, 19, 10, 0, 0)
-    last_ts = first_ts + timedelta(seconds=60)
-
-    active, since, duration_ms = engine._evaluate_stuck(
-        previous_last_val=11.0,
-        previous_stuck_since=first_ts - timedelta(seconds=60),
-        sample_cnt=60,
-        val_std=0.0,
-        val_avg=12.5,
-        first_ts=first_ts,
-        last_ts=last_ts,
-        stuck_time_ms=30000,
+    direction, count, active, snapshot = engine._evaluate_threshold_streak(
+        [
+            (first_ts + timedelta(seconds=3), 7.1),
+            (first_ts + timedelta(seconds=4), 7.2),
+        ],
+        rule,
+        dc_offset=0.0,
+        previous_direction=direction,
+        previous_count=count,
+        target_points=3,
     )
 
+    assert direction == ALERT_DIRECTION_UPPER
+    assert count == 3
     assert active is True
+    assert snapshot is not None
+    assert snapshot[0] == 3
+
+
+def test_stuck_streak_requires_configured_equal_samples() -> None:
+    engine = AlertAnalyticsEngine()
+    first_ts = datetime(2026, 10, 19, 10, 0, 0)
+    samples = [
+        (first_ts + timedelta(seconds=index), 12.5)
+        for index in range(100)
+    ]
+
+    count, value, since, active, snapshot = engine._evaluate_stuck_streak(
+        samples,
+        previous_value=None,
+        previous_count=0,
+        previous_since=None,
+        target_points=100,
+    )
+
+    assert count == 100
+    assert value == 12.5
     assert since == first_ts
-    assert duration_ms == 60000.0
+    assert active is True
+    assert snapshot == (12.5, samples[-1][0])
+
+
+def test_missing_sample_groups_break_threshold_streak() -> None:
+    engine = AlertAnalyticsEngine()
+    rule = {
+        "level1_upper": 10.0,
+        "level2_upper": 8.0,
+        "level3_upper": 6.0,
+        "remove_dc_offset": False,
+    }
+    previous_ts = datetime(2026, 10, 19, 10, 0, 0)
+
+    direction, count, active, snapshot = engine._evaluate_threshold_streak(
+        [(previous_ts + timedelta(seconds=2), 7.0)],
+        rule,
+        dc_offset=0.0,
+        previous_direction=ALERT_DIRECTION_UPPER,
+        previous_count=2,
+        target_points=3,
+        previous_sample_time=previous_ts,
+        max_gap_ms=1500,
+    )
+
+    assert direction == ALERT_DIRECTION_UPPER
+    assert count == 1
+    assert active is False
+    assert snapshot is None

@@ -1,9 +1,7 @@
 #!/usr/bin/env python
-"""Continuously generate bridge monitoring data and run alert detection.
+"""Continuously write synthetic bridge monitoring data to t_monitor.
 
-Default sample rates:
-  * acceleration channels: 100 Hz
-  * all other channels: 50 Hz
+Sample rates are loaded from ``t_sensor.frequency``.
 
 Alert scenarios included:
   * threshold exceedance: stn-12-b/stress
@@ -17,10 +15,8 @@ from __future__ import annotations
 
 import argparse
 import math
-import queue
 import signal
 import sys
-import threading
 import time
 import zlib
 from dataclasses import dataclass
@@ -36,7 +32,6 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app.config import DSN
-from app.domain.engine import AlertAnalyticsEngine
 
 ACCELERATION_SENSOR_PREFIXES = ("accl-", "zd-wg-", "zd-cg-")
 OFFLINE_CHANNELS = {("zd-wg-01", "x")}
@@ -50,7 +45,7 @@ OOR_CHANNELS = {("wprs-01", "")}
 class ChannelPlan:
     sensor_no: str
     channel: str
-    sample_rate: int
+    sample_rate: float
     is_acceleration: bool
     scenario: str
     base_value: float
@@ -63,7 +58,7 @@ def load_channel_plans() -> list[ChannelPlan]:
     query = """
         SELECT t.sensor_no, COALESCE(t.channel, '') AS channel,
                t.physical_quantity, t.level3_lower, t.level3_upper,
-               t.range_min, t.range_max, s.name AS sensor_name
+               t.range_min, t.range_max, s.name AS sensor_name, s.frequency
         FROM public.t_alert_threshold t
         LEFT JOIN public.t_sensor s
           ON LOWER(s.sensor_no) = LOWER(t.sensor_no)
@@ -75,7 +70,7 @@ def load_channel_plans() -> list[ChannelPlan]:
             rows = cur.fetchall()
 
     plans: list[ChannelPlan] = []
-    for sensor_no, channel, quantity, level3_lower, level3_upper, range_min, range_max, sensor_name in rows:
+    for sensor_no, channel, quantity, level3_lower, level3_upper, range_min, range_max, sensor_name, frequency in rows:
         sensor_key = str(sensor_no).strip().lower()
         channel_key = str(channel or "").strip()
         key = (sensor_key, channel_key)
@@ -85,7 +80,16 @@ def load_channel_plans() -> list[ChannelPlan]:
             or sensor_key.startswith(ACCELERATION_SENSOR_PREFIXES)
             or "加速度" in sensor_text
         )
-        sample_rate = 100 if is_acceleration else 50
+        try:
+            if "/" in str(frequency or ""):
+                numerator, denominator = str(frequency).split("/", 1)
+                sample_rate = float(numerator) / float(denominator)
+            else:
+                sample_rate = float(frequency)
+        except (TypeError, ValueError, ZeroDivisionError):
+            sample_rate = 100.0 if is_acceleration else 1.0
+        if sample_rate <= 0:
+            sample_rate = 1.0
 
         lower = float(level3_lower) if level3_lower is not None else None
         upper = float(level3_upper) if level3_upper is not None else None
@@ -148,10 +152,10 @@ def should_skip(plan: ChannelPlan) -> bool:
     return plan.sensor_no.lower() in DAQ_OFFLINE_SENSORS
 
 
-def channel_value(plan: ChannelPlan, second_index: int, sample_index: int) -> float:
+def channel_value(plan: ChannelPlan, elapsed_seconds: float) -> float:
     if plan.scenario == "stuck":
         return plan.base_value
-    t = second_index + sample_index / plan.sample_rate
+    t = elapsed_seconds
     wave = (
         math.sin(plan.phase + t * 2.0 * math.pi * 0.8)
         + 0.35 * math.sin(plan.phase * 0.7 + t * 2.0 * math.pi * 3.2)
@@ -175,46 +179,21 @@ def insert_rows(rows: list[tuple[str, str, float, datetime]]) -> None:
             )
 
 
-def detection_worker(
-    windows: queue.Queue[tuple[datetime, datetime]],
-    stop_event: threading.Event,
-) -> None:
-    engine = AlertAnalyticsEngine()
-    engine.initialize()
-    total_alerts = 0
-    while not stop_event.is_set() or not windows.empty():
-        try:
-            window_start, window_end = windows.get(timeout=0.5)
-        except queue.Empty:
-            continue
-        try:
-            result = engine.step_detection(window_start, window_end)
-            count = int(result.get("triggeredAlertsCount") or 0)
-            total_alerts += count
-            print(
-                f"[detect] {window_start:%H:%M:%S} -> {window_end:%H:%M:%S} "
-                f"stats={result.get('upsertedStatsCount', 0)} "
-                f"alerts={count} total_alerts={total_alerts}",
-                flush=True,
-            )
-        except Exception as exc:
-            print(f"[detect] failed for {window_start} -> {window_end}: {exc}", flush=True)
-        finally:
-            windows.task_done()
+def database_now() -> datetime:
+    with psycopg2.connect(DSN) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT LOCALTIMESTAMP")
+            return cur.fetchone()[0]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--window-seconds", type=int, default=60, help="detection window size")
     parser.add_argument("--max-seconds", type=int, default=0, help="0 means run forever")
-    parser.add_argument("--no-detect", action="store_true", help="only insert raw monitor data")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    if args.window_seconds < 1:
-        raise SystemExit("--window-seconds must be >= 1")
 
     plans = load_channel_plans()
     if not plans:
@@ -229,7 +208,7 @@ def main() -> int:
     print(
         f"[simulator] channels={len(plans)} acceleration={accel_channels} "
         f"other={other_channels} skipped={len(skipped_plans)} "
-        f"rows_per_second={rows_per_second}",
+        f"rows_per_second={rows_per_second:.3f}",
         flush=True,
     )
     print(
@@ -243,36 +222,23 @@ def main() -> int:
             flush=True,
         )
 
-    stop_event = threading.Event()
-    windows: queue.Queue[tuple[datetime, datetime]] = queue.Queue(maxsize=2)
-    detector: threading.Thread | None = None
-    if not args.no_detect:
-        detector = threading.Thread(
-            target=detection_worker,
-            args=(windows, stop_event),
-            daemon=True,
-            name="alert-detector",
-        )
-        detector.start()
+    stop_requested = [False]
 
     def request_stop(_signum: int, _frame: Any) -> None:
-        stop_event.set()
+        stop_requested[0] = True
 
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
 
-    simulation_start = datetime.now().replace(microsecond=0)
+    simulation_start = database_now().replace(microsecond=0)
     next_tick = time.monotonic()
     second_index = 0
     total_rows = 0
-    window_start = simulation_start
-    next_detection = simulation_start + timedelta(seconds=args.window_seconds)
     last_report = time.monotonic()
-    skipped_detection_windows = 0
 
     print(f"[simulator] started at {simulation_start:%Y-%m-%d %H:%M:%S}", flush=True)
     try:
-        while not stop_event.is_set():
+        while not stop_requested[0]:
             if args.max_seconds and second_index >= args.max_seconds:
                 break
 
@@ -280,34 +246,22 @@ def main() -> int:
             second_start = simulation_start + timedelta(seconds=second_index)
             rows: list[tuple[str, str, float, datetime]] = []
             for plan in active_plans:
-                interval = 1.0 / plan.sample_rate
-                for sample_index in range(plan.sample_rate):
+                first_index = math.ceil(second_index * plan.sample_rate)
+                last_index = math.ceil((second_index + 1) * plan.sample_rate)
+                for sample_index in range(first_index, last_index):
+                    elapsed_seconds = sample_index / plan.sample_rate
                     rows.append(
                         (
                             plan.sensor_no,
                             plan.channel,
-                            channel_value(plan, second_index, sample_index),
-                            second_start + timedelta(seconds=sample_index * interval),
+                            channel_value(plan, elapsed_seconds),
+                            simulation_start + timedelta(seconds=elapsed_seconds),
                         )
                     )
 
             insert_rows(rows)
             total_rows += len(rows)
             second_index += 1
-
-            if not args.no_detect and second_start + timedelta(seconds=1) >= next_detection:
-                try:
-                    windows.put_nowait((window_start, next_detection))
-                except queue.Full:
-                    skipped_detection_windows += 1
-                    if skipped_detection_windows == 1 or skipped_detection_windows % 10 == 0:
-                        print(
-                            f"[simulator] detector backlog full; "
-                            f"skipped_detection_windows={skipped_detection_windows}",
-                            flush=True,
-                        )
-                window_start = next_detection
-                next_detection += timedelta(seconds=args.window_seconds)
 
             now_monotonic = time.monotonic()
             if now_monotonic - last_report >= 10:
@@ -325,18 +279,9 @@ def main() -> int:
             if sleep_seconds > 0:
                 time.sleep(sleep_seconds)
     except KeyboardInterrupt:
-        stop_event.set()
+        stop_requested[0] = True
     finally:
-        stop_event.set()
-        while not args.no_detect and not windows.empty():
-            time.sleep(0.2)
-        if detector:
-            detector.join(timeout=30)
-        print(
-            f"[simulator] stopped total_rows={total_rows} "
-            f"skipped_detection_windows={skipped_detection_windows}",
-            flush=True,
-        )
+        print(f"[simulator] stopped total_rows={total_rows}", flush=True)
 
     return 0
 

@@ -35,23 +35,53 @@
         </el-button-group>
         <el-input
           v-model="filters.sensorNo"
+          class="sensor-filter"
           clearable
           placeholder="传感器编号"
           style="width: 180px"
           @keyup.enter="search"
           @clear="search"
         />
-        <el-select v-model="filters.alertType" clearable placeholder="预警类型" style="width: 160px">
+        <el-select
+          v-model="filters.alertType"
+          class="filter-select"
+          clearable
+          placeholder="预警类型"
+          style="width: 160px"
+        >
           <el-option v-for="item in alertTypes" :key="item" :label="item" :value="item" />
         </el-select>
-        <el-select v-model="filters.alertStatus" clearable placeholder="处理状态" style="width: 140px">
+        <el-select
+          v-model="filters.alertStatus"
+          class="filter-select"
+          clearable
+          placeholder="处理状态"
+          style="width: 140px"
+        >
           <el-option label="未处理" :value="0" />
           <el-option label="已处理" :value="1" />
         </el-select>
-        <el-button :icon="Search" @click="search">查询</el-button>
-        <el-button :icon="Refresh" @click="reset">重置</el-button>
+        <el-button class="query-button" :icon="Search" @click="search">查询</el-button>
+        <el-button class="reset-button" :icon="Refresh" @click="reset">重置</el-button>
         <span class="toolbar-spacer"></span>
-        <el-button type="primary" :icon="Plus" @click="createVisible = true">新增预警</el-button>
+        <el-button
+          class="ack-all-button"
+          type="success"
+          plain
+          :icon="Finished"
+          :loading="ackAllLoading"
+          @click="handleAllAlerts"
+        >
+          一键处理{{ currentCategoryLabel }}
+        </el-button>
+        <el-button
+          class="create-alert-button"
+          type="primary"
+          :icon="Plus"
+          @click="createVisible = true"
+        >
+          新增预警
+        </el-button>
       </div>
 
       <el-table v-loading="loading" :data="rows" border size="small">
@@ -75,7 +105,6 @@
             <span>{{ row.channel || '默认通道' }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="direction" label="越限方向" width="95" align="center" />
         <el-table-column prop="trigger_val" label="触发值" width="90" align="right" />
         <el-table-column label="状态" width="80" align="center">
           <template #default="{ row }">
@@ -96,6 +125,35 @@
               <span>{{ datePart(row.update_time) }}</span>
               <span class="time-sub">{{ timePart(row.update_time) }}</span>
             </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="处理人" width="100" align="center">
+          <template #default="{ row }">
+            {{ row.handle_by || '-' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="处理人电话" width="130" align="center">
+          <template #default="{ row }">
+            {{ row.handle_phone || '-' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="处理时间" width="150" align="center">
+          <template #default="{ row }">
+            <div v-if="row.handle_time" class="time-stack mono-num">
+              <span>{{ datePart(row.handle_time) }}</span>
+              <span class="time-sub">{{ timePart(row.handle_time) }}</span>
+            </div>
+            <span v-else>-</span>
+          </template>
+        </el-table-column>
+        <el-table-column
+          prop="handle_opinion"
+          label="处理意见"
+          min-width="160"
+          show-overflow-tooltip
+        >
+          <template #default="{ row }">
+            {{ row.handle_opinion || '-' }}
           </template>
         </el-table-column>
         <el-table-column label="操作" width="140" align="center">
@@ -130,7 +188,7 @@
       </div>
     </section>
 
-    <el-dialog v-model="createVisible" title="新增预警" width="480px">
+    <el-dialog v-model="createVisible" class="responsive-dialog" title="新增预警" width="480px">
       <el-form :model="createForm" label-width="90px">
         <el-form-item label="传感器编号">
           <el-input v-model="createForm.sensor_no" placeholder="例如 stn-12-b" />
@@ -159,16 +217,47 @@
         <el-button type="primary" :loading="submitting" @click="submitCreate">创建</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="handleDialogVisible"
+      class="responsive-dialog"
+      title="处理预警"
+      width="520px"
+    >
+      <el-form :model="handleForm" label-width="100px">
+        <el-form-item label="处理人">
+          <el-input v-model="handleForm.handle_by" placeholder="请输入处理人" />
+        </el-form-item>
+        <el-form-item label="处理人电话">
+          <el-input v-model="handleForm.handle_phone" placeholder="请输入联系电话" />
+        </el-form-item>
+        <el-form-item label="处理意见">
+          <el-input
+            v-model="handleForm.handle_opinion"
+            type="textarea"
+            :rows="4"
+            placeholder="可留空"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="handleDialogVisible = false">取消</el-button>
+        <el-button type="warning" :loading="handleSubmitting" @click="submitHandle">
+          确认处理
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Check,
   DataAnalysis,
   Delete,
+  Finished,
   Monitor,
   Plus,
   Refresh,
@@ -176,10 +265,12 @@ import {
 } from '@element-plus/icons-vue'
 import {
   ackAlertApi,
+  ackAllAlertsApi,
   createAlertApi,
   deleteAlertApi,
   listAlertsApi
 } from '../api'
+import { formatDateTimeWithMs } from '../utils/time'
 
 const props = defineProps({
   lastAlertEvent: {
@@ -193,8 +284,12 @@ const emit = defineEmits(['alert-created'])
 const POLL_INTERVAL_MS = 5000
 const alertTypes = ['阈值超限', '传感器离线', '采集仪离线', '传感器死值', '超物理量程']
 const loading = ref(false)
+const ackAllLoading = ref(false)
 const submitting = ref(false)
+const handleSubmitting = ref(false)
 const createVisible = ref(false)
+const handleDialogVisible = ref(false)
+const handleTarget = ref(null)
 const rows = ref([])
 const total = ref(0)
 const page = ref(1)
@@ -217,6 +312,14 @@ const createForm = reactive({
   alert_level: 1,
   trigger_val: -11.2
 })
+const handleForm = reactive({
+  handle_by: 'web',
+  handle_phone: '',
+  handle_opinion: ''
+})
+const currentCategoryLabel = computed(() =>
+  filters.alertCategory === 0 ? '数据预警' : '设备预警'
+)
 let pollTimer = null
 let requestInFlight = false
 
@@ -238,7 +341,10 @@ async function loadAlerts(silent = false) {
     const data = await listAlertsApi(params)
     rows.value = Array.isArray(data.items) ? data.items : []
     total.value = Number(data.total || 0)
-    updateSummary()
+    const counts = data.statusCounts || {}
+    summary.total = Number(counts.total || 0)
+    summary.unhandled = Number(counts.unhandled || 0)
+    summary.handled = Number(counts.handled || 0)
   } catch (err) {
     if (silent !== true) {
       ElMessage.error(err?.message || '加载预警失败')
@@ -247,12 +353,6 @@ async function loadAlerts(silent = false) {
     loading.value = false
     requestInFlight = false
   }
-}
-
-function updateSummary() {
-  summary.total = total.value
-  summary.unhandled = rows.value.filter((item) => item.alert_status === 0).length
-  summary.handled = rows.value.filter((item) => item.alert_status === 1).length
 }
 
 function search() {
@@ -292,13 +392,88 @@ async function submitCreate() {
   }
 }
 
-async function handleAlert(row) {
+function handleAlert(row) {
+  handleTarget.value = row
+  handleForm.handle_by = 'web'
+  handleForm.handle_phone = ''
+  handleForm.handle_opinion = ''
+  handleDialogVisible.value = true
+}
+
+async function submitHandle() {
+  if (!handleTarget.value?.id) return
+  if (!handleForm.handle_by.trim()) {
+    ElMessage.warning('请输入处理人')
+    return
+  }
+  handleSubmitting.value = true
   try {
-    await ackAlertApi(row.id)
+    await ackAlertApi(handleTarget.value.id, {
+      handleBy: handleForm.handle_by.trim(),
+      handlePhone: handleForm.handle_phone.trim(),
+      handleOpinion: handleForm.handle_opinion.trim()
+    })
     ElMessage.success('已处理')
+    handleDialogVisible.value = false
+    handleTarget.value = null
     await loadAlerts()
   } catch (err) {
     ElMessage.error(err?.message || '更新失败')
+  } finally {
+    handleSubmitting.value = false
+  }
+}
+
+async function handleAllAlerts() {
+  ackAllLoading.value = true
+  let unhandledCount = 0
+  try {
+    const overview = await listAlertsApi({
+      page: 1,
+      pageSize: 1,
+      alertCategory: filters.alertCategory
+    })
+    unhandledCount = Number(overview.statusCounts?.unhandled || 0)
+  } catch (err) {
+    ackAllLoading.value = false
+    ElMessage.error(err?.message || '获取未处理预警数量失败')
+    return
+  }
+
+  if (unhandledCount === 0) {
+    ackAllLoading.value = false
+    ElMessage.info('当前没有未处理预警')
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `确定一键处理全部 ${unhandledCount} 条${currentCategoryLabel.value}吗？`,
+      `一键处理${currentCategoryLabel.value}`,
+      {
+        type: 'warning',
+        confirmButtonText: '全部处理',
+        cancelButtonText: '取消'
+      }
+    )
+  } catch (err) {
+    ackAllLoading.value = false
+    if (err === 'cancel' || err === 'close') return
+    ElMessage.error(err?.message || '处理失败')
+    return
+  }
+
+  try {
+    const result = await ackAllAlertsApi({
+      alertCategory: filters.alertCategory
+    })
+    const count = Number(result.ackedCount || 0)
+    ElMessage.success(`已一键处理 ${count} 条${currentCategoryLabel.value}`)
+    await loadAlerts()
+  } catch (err) {
+    ElMessage.error(err?.message || '一键处理失败')
+  } finally {
+    ackAllLoading.value = false
   }
 }
 
@@ -326,11 +501,13 @@ function statusType(status) {
 }
 
 function datePart(value) {
-  return value ? String(value).split(' ')[0] : '-'
+  const formatted = formatDateTimeWithMs(value)
+  return formatted === '-' ? '-' : formatted.split(' ')[0]
 }
 
 function timePart(value) {
-  const parts = value ? String(value).split(' ') : []
+  const formatted = formatDateTimeWithMs(value)
+  const parts = formatted === '-' ? [] : formatted.split(' ')
   return parts.length > 1 ? parts.slice(1).join(' ') : ''
 }
 
@@ -398,6 +575,7 @@ onBeforeUnmount(() => {
 }
 
 .panel {
+  min-width: 0;
   padding: 16px;
 }
 
@@ -448,6 +626,89 @@ onBeforeUnmount(() => {
 @media (max-width: 900px) {
   .metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .alert-management-view {
+    gap: 12px;
+  }
+
+  .metric-grid {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .metric-item {
+    padding: 12px 14px;
+  }
+
+  .panel {
+    padding: 12px;
+  }
+
+  .toolbar {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .toolbar > * {
+    min-width: 0;
+  }
+
+  .toolbar-spacer {
+    display: none;
+  }
+
+  .category-buttons {
+    grid-column: 1 / -1;
+    display: flex;
+    width: 100%;
+    margin-right: 0;
+  }
+
+  .category-buttons :deep(.el-button) {
+    flex: 1;
+    min-width: 0;
+    margin-left: 0;
+  }
+
+  .sensor-filter {
+    grid-column: 1 / -1;
+  }
+
+  .sensor-filter,
+  .filter-select,
+  .query-button,
+  .reset-button {
+    width: 100% !important;
+  }
+
+  .query-button,
+  .reset-button,
+  .ack-all-button,
+  .create-alert-button {
+    margin-left: 0 !important;
+  }
+
+  .ack-all-button,
+  .create-alert-button {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+
+  .pagination {
+    justify-content: center;
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
+
+  .pagination :deep(.el-pagination) {
+    flex-wrap: wrap;
+    justify-content: center;
+    row-gap: 8px;
   }
 }
 </style>

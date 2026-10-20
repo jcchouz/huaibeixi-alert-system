@@ -4,11 +4,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Query
 
-from app.api.deps import (
-    get_alert_service,
-    require_roles,
-)
-from app.core.security import Principal
+from app.api.deps import get_alert_service
 from app.schemas.alerts import (
     AlertAckRequest,
     AlertActionResponse,
@@ -31,7 +27,6 @@ def poll_alerts(
     after_seq: Optional[int] = Query(None),
     limit: int = Query(50, ge=1, le=200),
     service: AlertService = Depends(get_alert_service),
-    _: Principal = Depends(require_roles("viewer", "operator", "admin")),
 ) -> Dict[str, Any]:
     cursor_seq = after_seq if after_seq is not None else afterSeq
     return service.poll(cursor_seq, limit)
@@ -54,7 +49,6 @@ def list_alerts(
     pageSize: int = Query(20, ge=1, le=200),
     page_size: Optional[int] = Query(None),
     service: AlertService = Depends(get_alert_service),
-    _: Principal = Depends(require_roles("viewer", "operator", "admin")),
 ) -> Dict[str, Any]:
     return service.list_alerts(
         alert_level=pick(alertLevel, alert_level),
@@ -72,7 +66,6 @@ def list_alerts(
 def create_alert(
     body: AlertCreateRequest,
     service: AlertService = Depends(get_alert_service),
-    _: Principal = Depends(require_roles("operator", "admin")),
 ) -> Dict[str, Any]:
     return service.create_alert(body)
 
@@ -82,16 +75,14 @@ def ack_alert(
     alert_id: str,
     body: AlertAckRequest,
     service: AlertService = Depends(get_alert_service),
-    principal: Principal = Depends(require_roles("operator", "admin")),
 ) -> Dict[str, Any]:
-    return service.acknowledge(alert_id, body, principal.username)
+    return service.acknowledge(alert_id, body)
 
 
 @router.delete("/{alert_id}", response_model=AlertDeleteResponse)
 def delete_alert(
     alert_id: str,
     service: AlertService = Depends(get_alert_service),
-    _: Principal = Depends(require_roles("operator", "admin")),
 ) -> Dict[str, Any]:
     return service.delete_alert(alert_id)
 
@@ -100,6 +91,5 @@ def delete_alert(
 def ack_all_alerts(
     body: Optional[BatchAckRequest] = None,
     service: AlertService = Depends(get_alert_service),
-    principal: Principal = Depends(require_roles("operator", "admin")),
 ) -> Dict[str, Any]:
-    return service.acknowledge_all(body, principal.username)
+    return service.acknowledge_all(body)

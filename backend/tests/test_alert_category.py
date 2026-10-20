@@ -54,9 +54,9 @@ class RecordingAlertRepository:
     def __init__(self) -> None:
         self.list_kwargs: dict = {}
 
-    def list(self, **kwargs: object) -> tuple[list, int]:
+    def list(self, **kwargs: object) -> tuple[list, int, dict[str, int]]:
         self.list_kwargs = kwargs
-        return [], 0
+        return [], 0, {"total": 0, "unhandled": 0, "handled": 0}
 
     @staticmethod
     def total_pages(total: int, page_size: int) -> int:

@@ -5,29 +5,6 @@ const http = axios.create({
   timeout: 25000
 })
 
-export const AUTH_TOKEN_KEY = 'huaibeixi_auth_token'
-
-export function getAuthToken() {
-  return localStorage.getItem(AUTH_TOKEN_KEY) || ''
-}
-
-export function setAuthToken(token) {
-  if (token) {
-    localStorage.setItem(AUTH_TOKEN_KEY, token)
-  } else {
-    localStorage.removeItem(AUTH_TOKEN_KEY)
-  }
-  window.dispatchEvent(new CustomEvent('auth:token-changed'))
-}
-
-http.interceptors.request.use((config) => {
-  const token = getAuthToken()
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`
-  }
-  return config
-})
-
 http.interceptors.response.use(
   (response) => response.data,
   (error) => {
@@ -37,10 +14,6 @@ http.interceptors.response.use(
       payload?.detail ||
       error?.message ||
       '网络请求异常'
-    if (error?.response?.status === 401) {
-      localStorage.removeItem(AUTH_TOKEN_KEY)
-      window.dispatchEvent(new CustomEvent('auth:unauthorized'))
-    }
     return Promise.reject(new Error(detail))
   }
 )
@@ -56,20 +29,6 @@ export const ALERT_TYPE_MAP = {
 export function formatAlertTypeLabel(type) {
   if (!type) return '未知类型'
   return ALERT_TYPE_MAP[type] || type
-}
-
-export async function loginApi(username, password) {
-  const response = await http.post('/auth/login', { username, password })
-  setAuthToken(response.access_token)
-  return response
-}
-
-export async function getCurrentUserApi() {
-  return await http.get('/auth/me')
-}
-
-export function logoutApi() {
-  setAuthToken('')
 }
 
 // 1. Overview & KPI Summary
@@ -101,15 +60,23 @@ export async function createAlertApi(payload = {}) {
 }
 
 // 4. Acknowledge Single Alert
-export async function ackAlertApi(alertId) {
-  const res = await http.post(`/alerts/${alertId}/ack`, { alertStatus: 1 })
+export async function ackAlertApi(alertId, payload = {}) {
+  const res = await http.post(`/alerts/${alertId}/ack`, {
+    alertStatus: 1,
+    handleBy: payload.handleBy ?? payload.handle_by ?? 'web',
+    handlePhone: payload.handlePhone ?? payload.handle_phone ?? '',
+    handleOpinion: payload.handleOpinion ?? ''
+  })
   return res.alert || res
 }
 
 // 5. Batch Acknowledge Alerts
 export async function ackAllAlertsApi(payload = {}) {
   return await http.post('/alerts/ack-all', {
-    alertLevel: payload.alertLevel ?? null
+    handleBy: payload.handleBy ?? payload.handle_by ?? 'web',
+    handlePhone: payload.handlePhone ?? payload.handle_phone ?? '',
+    alertLevel: payload.alertLevel ?? null,
+    alertCategory: payload.alertCategory ?? null
   })
 }
 

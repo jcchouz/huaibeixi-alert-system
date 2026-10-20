@@ -139,13 +139,11 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="采样间隔 / 离线超时" width="145" align="center">
+        <el-table-column label="采样频率 / 离线组数（全局）" width="190" align="center">
           <template #default="{ row }">
             <div class="mono-num" style="font-size: 11px">
-              <div>采样: {{ row.expected_interval_ms }}ms</div>
-              <div :style="{ color: row.offline_timeout_ms <= 1000 ? '#ff8f1f' : '#94a9c9' }">
-                超时: {{ row.offline_timeout_ms }}ms
-              </div>
+              <div>频率: {{ row.frequency || '-' }} Hz</div>
+              <div>离线: {{ row.offline_points || 5 }} 组</div>
             </div>
           </template>
         </el-table-column>
@@ -158,18 +156,18 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="死值判定时间" width="125" align="center">
+        <el-table-column label="死值连续组数（全局）" width="160" align="center">
           <template #default="{ row }">
             <div class="mono-num" style="font-size: 11px">
-              {{ row.stuck_time_ms || '-' }}ms
+              {{ row.stuck_points || 100 }} 组
             </div>
           </template>
         </el-table-column>
 
-        <el-table-column label="连续超限确认点数" width="135" align="center">
+        <el-table-column label="阈值连续组数（全局）" width="160" align="center">
           <template #default="{ row }">
             <div class="mono-num" style="font-size: 11px">
-              <div>{{ row.confirm_points || 1 }} 点</div>
+              <div>{{ row.confirm_points || 3 }} 组</div>
             </div>
           </template>
         </el-table-column>
@@ -259,13 +257,8 @@
           </el-col>
 
           <el-col :span="12">
-            <el-form-item label="离线超时阈值 (ms)">
-              <el-input-number v-model="editForm.offline_timeout_ms" :min="200" :step="500" style="width: 100%" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="期望采样周期 (ms)">
-              <el-input-number v-model="editForm.expected_interval_ms" :min="10" :step="100" style="width: 100%" />
+            <el-form-item label="采样频率 (Hz)">
+              <el-input v-model="editForm.frequency" disabled />
             </el-form-item>
           </el-col>
 
@@ -280,16 +273,6 @@
             </el-form-item>
           </el-col>
 
-          <el-col :span="12">
-            <el-form-item label="死值判定时间 (ms)">
-              <el-input-number v-model="editForm.stuck_time_ms" :min="1" :step="1000" style="width: 100%" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="连续防抖点数 (N)">
-              <el-input-number v-model="editForm.confirm_points" :min="1" :max="30" style="width: 100%" />
-            </el-form-item>
-          </el-col>
           <el-col :span="12">
             <el-form-item label="去直流处理">
               <el-tag :type="editForm.remove_dc_offset ? 'warning' : 'info'" effect="plain">
@@ -372,21 +355,6 @@
             </el-form-item>
           </el-col>
 
-          <el-col :span="12">
-            <el-form-item label="离线超时 (ms)">
-              <el-input-number v-model="batchForm.offline_timeout_ms" :min="200" :step="500" style="width: 100%" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="死值判定时间 (ms)">
-              <el-input-number v-model="batchForm.stuck_time_ms" :min="1" :step="1000" style="width: 100%" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="连续防抖点数">
-              <el-input-number v-model="batchForm.confirm_points" :min="1" :max="20" style="width: 100%" />
-            </el-form-item>
-          </el-col>
         </el-row>
       </el-form>
 
@@ -531,7 +499,7 @@ const pageSize = ref(25)
 // Stats
 const allRulesCount = computed(() => rules.value.length || 208)
 const dcOffsetRulesCount = computed(() => rules.value.filter((r) => r.remove_dc_offset).length)
-const highFreqRulesCount = computed(() => rules.value.filter((r) => Number(r.expected_interval_ms || 1000) <= 1000).length)
+const highFreqRulesCount = computed(() => rules.value.filter((r) => Number(r.frequency_hz || 1) >= 1).length)
 
 const filteredRules = computed(() => {
   return rules.value.filter((r) => {
@@ -590,12 +558,9 @@ const editForm = reactive({
   level2_lower: 0,
   level3_upper: 0,
   level3_lower: 0,
-  offline_timeout_ms: 1000,
-  expected_interval_ms: 1000,
-  confirm_points: 3,
+  frequency: '',
   range_min: null,
   range_max: null,
-  stuck_time_ms: 30000,
   remove_dc_offset: false
 })
 
@@ -612,12 +577,9 @@ function openEditModal(row) {
     level2_lower: Number(row.level2_lower ?? -8),
     level3_upper: Number(row.level3_upper ?? 6),
     level3_lower: Number(row.level3_lower ?? -6),
-    offline_timeout_ms: Number(row.offline_timeout_ms ?? 1000),
-    expected_interval_ms: Number(row.expected_interval_ms ?? 1000),
-    confirm_points: Number(row.confirm_points ?? 3),
+    frequency: String(row.frequency ?? ''),
     range_min: row.range_min === null || row.range_min === undefined ? null : Number(row.range_min),
     range_max: row.range_max === null || row.range_max === undefined ? null : Number(row.range_max),
-    stuck_time_ms: Number(row.stuck_time_ms ?? 30000),
     remove_dc_offset: Boolean(row.remove_dc_offset)
   })
   editDialogVisible.value = true
@@ -642,12 +604,8 @@ async function submitSingleEdit() {
       level2_lower: editForm.level2_lower,
       level3_upper: editForm.level3_upper,
       level3_lower: editForm.level3_lower,
-      offline_timeout_ms: editForm.offline_timeout_ms,
-      expected_interval_ms: editForm.expected_interval_ms,
-      confirm_points: editForm.confirm_points,
       range_min: editForm.range_min,
-      range_max: editForm.range_max,
-      stuck_time_ms: editForm.stuck_time_ms
+      range_max: editForm.range_max
     })
     ElMessage.success('阈值规则已保存并完成零停机热更新')
     editDialogVisible.value = false
@@ -670,10 +628,7 @@ const batchForm = reactive({
   level2_upper: 9.5,
   level2_lower: -9.0,
   level3_upper: 7.5,
-  level3_lower: -7.0,
-  offline_timeout_ms: 1000,
-  confirm_points: 3,
-  stuck_time_ms: 30000
+  level3_lower: -7.0
 })
 
 function openBatchDialog() {
@@ -693,9 +648,6 @@ function onBatchPqChange(pq) {
     batchForm.level2_lower = Number(sample.level2_lower ?? -9)
     batchForm.level3_upper = Number(sample.level3_upper ?? 7)
     batchForm.level3_lower = Number(sample.level3_lower ?? -7)
-    batchForm.offline_timeout_ms = Number(sample.offline_timeout_ms ?? 1000)
-    batchForm.confirm_points = Number(sample.confirm_points ?? 3)
-    batchForm.stuck_time_ms = Number(sample.stuck_time_ms ?? 30000)
   }
 }
 
@@ -911,9 +863,7 @@ async function applySimulatedThresholds() {
       level2_upper: simForm.level2_upper,
       level2_lower: simForm.level2_lower,
       level3_upper: simForm.level3_upper,
-      level3_lower: simForm.level3_lower,
-      expected_interval_ms: row.expected_interval_ms,
-      confirm_points: row.confirm_points
+      level3_lower: simForm.level3_lower
     })
     ElMessage.success('已将试算阈值正式保存并热更新至实时检测引擎！')
     simDialogVisible.value = false

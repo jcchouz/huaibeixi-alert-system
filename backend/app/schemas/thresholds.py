@@ -18,20 +18,12 @@ class ThresholdUpdateRequest(BaseModel):
     level2Lower: Optional[float] = None
     level3Upper: Optional[float] = None
     level3Lower: Optional[float] = None
-    offline_timeout_ms: Optional[int] = None
-    offlineTimeoutMs: Optional[int] = None
     expected_interval_ms: Optional[int] = None
     expectedIntervalMs: Optional[int] = None
-    confirm_points: Optional[int] = None
-    confirmPoints: Optional[int] = None
-    stuck_time_ms: Optional[int] = None
-    stuckTimeMs: Optional[int] = None
     range_min: Optional[float] = None
     rangeMin: Optional[float] = None
     range_max: Optional[float] = None
     rangeMax: Optional[float] = None
-    update_by: Optional[str] = None
-    updateBy: Optional[str] = None
 
 
 class ThresholdBatchUpdateRequest(ThresholdUpdateRequest):
@@ -72,7 +64,6 @@ class ThresholdRule(BaseModel):
     create_by: Optional[str] = None
     range_min: Optional[float] = None
     range_max: Optional[float] = None
-    stuck_time_ms: Optional[int] = None
 
 
 class ThresholdListResponse(BaseModel):

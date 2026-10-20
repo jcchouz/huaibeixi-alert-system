@@ -8,15 +8,23 @@ from pydantic import BaseModel, ConfigDict, Field
 class AlertAckRequest(BaseModel):
     alertStatus: Optional[int] = Field(None, description="1=已处理")
     alert_status: Optional[int] = None
-    ackBy: Optional[str] = "admin"
-    ack_by: Optional[str] = None
+    handleBy: Optional[str] = None
+    handle_by: Optional[str] = None
+    handlePhone: Optional[str] = None
+    handle_phone: Optional[str] = None
+    handleOpinion: Optional[str] = None
+    handle_opinion: Optional[str] = None
 
 
 class BatchAckRequest(BaseModel):
-    ackBy: Optional[str] = "admin"
-    ack_by: Optional[str] = None
+    handleBy: Optional[str] = None
+    handle_by: Optional[str] = None
+    handlePhone: Optional[str] = None
+    handle_phone: Optional[str] = None
     alertLevel: Optional[int] = None
     alert_level: Optional[int] = None
+    alertCategory: Optional[int] = None
+    alert_category: Optional[int] = None
 
 
 class AlertCreateRequest(BaseModel):
@@ -44,6 +52,16 @@ class AlertRecord(BaseModel):
     alert_status: Optional[int] = None
     create_time: Optional[str] = None
     update_time: Optional[str] = None
+    handle_by: Optional[str] = None
+    handle_phone: Optional[str] = None
+    handle_time: Optional[str] = None
+    handle_opinion: Optional[str] = None
+
+
+class AlertStatusCounts(BaseModel):
+    total: int
+    unhandled: int
+    handled: int
 
 
 class AlertListResponse(BaseModel):
@@ -52,6 +70,7 @@ class AlertListResponse(BaseModel):
     page: int
     pageSize: int
     totalPages: int
+    statusCounts: AlertStatusCounts
 
 
 class AlertPollResponse(BaseModel):

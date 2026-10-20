@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.api.deps import get_engine
 from app.domain.engine import AlertAnalyticsEngine
@@ -10,17 +10,23 @@ router = APIRouter(tags=["Health"])
 
 @router.get("/health", response_model=HealthResponse)
 def health_check(
+    request: Request,
     engine: AlertAnalyticsEngine = Depends(get_engine),
 ) -> dict:
-    return {
+    response = {
         "status": "ok",
         "service": "huaibeixi-alert-backend",
         "engine": engine.get_status(),
     }
+    worker = getattr(request.app.state, "detection_worker", None)
+    if worker is not None:
+        response["detection"] = worker.get_status()
+    return response
 
 
 @router.get("/ready", response_model=HealthResponse)
 def readiness_check(
+    request: Request,
     engine: AlertAnalyticsEngine = Depends(get_engine),
 ) -> dict:
     try:
@@ -29,8 +35,12 @@ def readiness_check(
             cur.fetchone()
     except Exception as exc:
         raise HTTPException(status_code=503, detail="数据库尚未就绪") from exc
-    return {
+    response = {
         "status": "ready",
         "service": "huaibeixi-alert-backend",
         "engine": engine.get_status(),
     }
+    worker = getattr(request.app.state, "detection_worker", None)
+    if worker is not None:
+        response["detection"] = worker.get_status()
+    return response
