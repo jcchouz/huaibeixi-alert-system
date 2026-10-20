@@ -9,7 +9,6 @@ from fastapi import HTTPException
 
 from app.domain.alert_types import ALERT_TYPE_THRESHOLD, normalize_alert_type
 from app.domain.engine import AlertAnalyticsEngine
-from app.infrastructure.sse import SSEHub
 from app.repositories.alerts import AlertRepository
 from app.schemas.alerts import AlertAckRequest, AlertCreateRequest, BatchAckRequest
 from app.services.common import pick
@@ -20,11 +19,9 @@ class AlertService:
         self,
         repository: AlertRepository,
         engine: AlertAnalyticsEngine,
-        sse: SSEHub,
     ):
         self.repository = repository
         self.engine = engine
-        self.sse = sse
 
     def poll(self, after_seq: int, limit: int) -> Dict[str, Any]:
         started = time.perf_counter()
@@ -48,6 +45,7 @@ class AlertService:
         alert_level: Optional[int],
         alert_status: Optional[int],
         alert_type: Optional[str],
+        alert_category: Optional[int],
         sensor_no: Optional[str],
         keyword: Optional[str],
         page: int,
@@ -57,6 +55,7 @@ class AlertService:
             alert_level=alert_level,
             alert_status=alert_status,
             alert_type=alert_type,
+            alert_category=alert_category,
             sensor_no=sensor_no,
             keyword=keyword,
             page=page,
@@ -89,7 +88,6 @@ class AlertService:
             raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
 
         enriched = self.engine.enrich_alert_row(updated)
-        self.sse.publish_threadsafe({"type": "ALERT_UPSERT", "alert": enriched})
         return {"success": True, "alert": enriched}
 
     def acknowledge_all(
@@ -137,7 +135,6 @@ class AlertService:
             trigger_val=trigger_val,
         )
         enriched = self.engine.enrich_alert_row(created)
-        self.sse.publish_threadsafe({"type": "ALERT_UPSERT", "alert": enriched})
         return {"success": True, "alert": enriched}
 
     def delete_alert(self, alert_id: str) -> Dict[str, Any]:

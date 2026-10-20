@@ -6,11 +6,11 @@ import time
 import uuid
 from collections import Counter
 from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from app.core.config import get_settings
-from app.core.serialization import json_dumps, serialize_row, serialize_val
+from app.core.serialization import serialize_row, serialize_val
 from app.domain.alert_types import (
+    ALERT_CATEGORY_LABELS,
     ALERT_DIRECTION_LOWER,
     ALERT_DIRECTION_NONE,
     ALERT_DIRECTION_UPPER,
@@ -19,29 +19,13 @@ from app.domain.alert_types import (
     ALERT_TYPE_OOR,
     ALERT_TYPE_STUCK,
     ALERT_TYPE_THRESHOLD,
+    alert_category_for_type,
     normalize_alert_direction,
     normalize_alert_type,
 )
 from app.infrastructure.database import get_db_cursor
 
 logger = logging.getLogger("huaibeixi.engine")
-
-DIRECTION_SECTORS_16 = [
-    "N", "NNE", "NE", "ENE",
-    "E", "ESE", "SE", "SSE",
-    "S", "SSW", "SW", "WSW",
-    "W", "WNW", "NW", "NNW",
-]
-
-SPEED_BINS_7 = [
-    {"index": 0, "label": "0.2~1.5 m/s (1级软风)", "min": 0.2, "max": 1.5},
-    {"index": 1, "label": "1.6~3.3 m/s (2级轻风)", "min": 1.5, "max": 3.3},
-    {"index": 2, "label": "3.4~5.4 m/s (3级微风)", "min": 3.3, "max": 5.4},
-    {"index": 3, "label": "5.5~7.9 m/s (4级和风)", "min": 5.4, "max": 7.9},
-    {"index": 4, "label": "8.0~10.7 m/s (5级清劲风)", "min": 7.9, "max": 10.7},
-    {"index": 5, "label": "10.8~13.8 m/s (6级强风)", "min": 10.7, "max": 13.8},
-    {"index": 6, "label": "≥13.9 m/s (7级及以上疾风/台风)", "min": 13.8, "max": 999.0},
-]
 
 # Single-pass push-down aggregation over one t_monitor window.
 #   s_no / ch            -> grouping key (sensor_no normalized to lower-case)
@@ -54,7 +38,7 @@ SELECT
     MAX(value) AS val_max,
     MIN(value) AS val_min,
     AVG(value) AS val_avg,
-    COALESCE(STDDEV_POP(value), 0) AS val_std,
+    COALESCE(STDDEV_POP(value), 0) AS value_std,
     MIN(time) AS first_ts,
     MAX(time) AS last_ts,
     (ARRAY_AGG(time ORDER BY value ASC, time ASC))[1] AS min_time,
@@ -67,12 +51,12 @@ GROUP BY LOWER(sensor_no), COALESCE(channel, '')
 STAT_UPSERT_SQL = """
 INSERT INTO public.t_stat_record (
     sensor_no, channel, period_type, stat_time,
-    val_max, val_min, val_avg, val_std,
+    val_max, val_min, val_avg,
     max_time, min_time, sample_count,
     create_by, create_time
 ) VALUES (
     %s, %s, '1m', %s,
-    %s, %s, %s, %s,
+    %s, %s, %s,
     %s, %s, %s,
     'system', NOW()
 )
@@ -81,37 +65,10 @@ DO UPDATE SET
     val_max = EXCLUDED.val_max,
     val_min = EXCLUDED.val_min,
     val_avg = EXCLUDED.val_avg,
-    val_std = EXCLUDED.val_std,
     max_time = EXCLUDED.max_time,
     min_time = EXCLUDED.min_time,
     sample_count = EXCLUDED.sample_count
 """
-
-WIND_AGG_SQL = """
-SELECT
-    COUNT(*) AS pair_cnt,
-    COALESCE(SUM(v * SIN(RADIANS(d))), 0) AS sum_sin,
-    COALESCE(SUM(v * COS(RADIANS(d))), 0) AS sum_cos,
-    COALESCE(AVG(v), 0) AS scalar_avg,
-    COALESCE(MIN(v), 0) AS scalar_min,
-    COALESCE(MAX(v), 0) AS scalar_max,
-    COALESCE(STDDEV_POP(v), 0) AS scalar_std,
-    (ARRAY_AGG(bucket ORDER BY v ASC, bucket ASC))[1] AS min_time,
-    (ARRAY_AGG(bucket ORDER BY v DESC, bucket ASC))[1] AS max_time
-FROM (
-    SELECT
-        date_trunc('second', time) AS bucket,
-        MAX(CASE WHEN channel = 'windSpeed' THEN value END) AS v,
-        MAX(CASE WHEN channel = 'windDirection' THEN value END) AS d
-    FROM public.t_monitor
-    WHERE LOWER(sensor_no) = %s
-      AND channel IN ('windSpeed', 'windDirection')
-      AND time >= %s AND time < %s
-    GROUP BY date_trunc('second', time)
-) q
-WHERE v IS NOT NULL AND d IS NOT NULL
-"""
-
 
 class ConcurrentDict:
     """Thread-safe in-memory dictionary for channel rules and runtime state."""
@@ -171,46 +128,20 @@ class AlertAnalyticsEngine:
     Core Alert & Scheduled Analytics Engine:
     - Maintains in-memory ConcurrentDict of all 208 sensor channel threshold rules & metadata.
     - Supports zero-downtime hot reload (`reload_thresholds()`).
-    - Supports Dual-Mode Clock (LIVE vs REPLAY) and push-down SQL evaluation over `t_monitor`.
+    - Evaluates explicit time windows over `t_monitor`.
     - Evaluates Req 1 (1000ms offline & gap + DAQ storm suppression),
       Req 2 (3-level thresholds + debounce + dynamic incident upgrade + manual handling),
       Req 3 (传感器死值、超物理量程),
-      Req 4 (1m extremes & 10m vector wind rose synthesis).
+      Req 4 (1m extremes).
     """
 
     def __init__(self) -> None:
         self.channel_states = ConcurrentDict()
         self.sensor_meta: Dict[str, Dict[str, Any]] = {}
         self.instrument_meta: Dict[str, Dict[str, Any]] = {}
-        self.mode: str = "REPLAY"
-        settings = get_settings()
-        self.current_watermark: datetime = datetime.strptime(
-            settings.replay_start_watermark,
-            "%Y-%m-%d %H:%M:%S",
-        )
-        self.latest_data_ts: datetime = datetime.strptime(
-            settings.replay_fallback_end,
-            "%Y-%m-%d %H:%M:%S",
-        )
-        self.speed_multiplier: int = 1
-        self.is_running: bool = False
-        self.step_count: int = 0
-        self.last_step_ms: float = 0.0
         self.total_monitor_rows: int = 398059510
         self.last_reload_time: Optional[datetime] = None
-        self._sse_callbacks: List[Callable[[Dict[str, Any]], None]] = []
-        self._demo_counter: int = 0
         self._step_lock = threading.Lock()
-
-    def register_sse_callback(self, cb: Callable[[Dict[str, Any]], None]) -> None:
-        self._sse_callbacks.append(cb)
-
-    def _notify_sse(self, event_payload: Dict[str, Any]) -> None:
-        for cb in list(self._sse_callbacks):
-            try:
-                cb(event_payload)
-            except Exception as exc:
-                logger.warning("SSE callback error: %s", exc)
 
     @staticmethod
     def make_key(sensor_no: str, channel: Optional[str]) -> str:
@@ -219,14 +150,6 @@ class AlertAnalyticsEngine:
     def initialize(self) -> None:
         """Load sensor metadata, instrument metadata, and 208 threshold rules into memory."""
         self.reload_thresholds()
-        try:
-            with get_db_cursor() as cur:
-                cur.execute("SELECT MAX(stat_time) AS max_st FROM t_stat_record WHERE period_type = '1m'")
-                row = cur.fetchone()
-                if row and row["max_st"]:
-                    self.latest_data_ts = row["max_st"] + timedelta(seconds=20)
-        except Exception as exc:
-            logger.warning("Could not query latest_data_ts: %s", exc)
         self.refresh_monitor_row_count()
 
     def refresh_monitor_row_count(self) -> int:
@@ -630,6 +553,10 @@ class AlertAnalyticsEngine:
             0: "未处理",
             1: "已处理",
         }
+        category = d.get("alert_category")
+        if category is None:
+            category = alert_category_for_type(d.get("alert_type"))
+        category = int(category)
 
         d.update(
             {
@@ -643,6 +570,8 @@ class AlertAnalyticsEngine:
                 "level_color": lvl_info["color"],
                 "severity": lvl_info["severity"],
                 "status_label": status_map.get(status_code, "未知"),
+                "alert_category": category,
+                "alert_category_label": ALERT_CATEGORY_LABELS.get(category, "未知"),
             }
         )
         return d
@@ -664,6 +593,7 @@ class AlertAnalyticsEngine:
         """Insert or refresh an unhandled alert."""
         alert_type = normalize_alert_type(alert_type) or alert_type
         direction = normalize_alert_direction(direction)
+        alert_category = alert_category_for_type(alert_type)
         alert_id = uuid.uuid4().hex
         cur.execute(
             """
@@ -686,28 +616,30 @@ class AlertAnalyticsEngine:
                 """
                 UPDATE public.t_alert_record
                 SET seq = nextval('public.seq_alert_record'),
+                    alert_category = %s,
                     threshold_id = COALESCE(%s, threshold_id),
                     alert_level = LEAST(alert_level, %s),
                     trigger_val = %s,
-                    trigger_count = trigger_count + 1
+                    trigger_count = trigger_count + 1,
+                    update_time = NOW()
                 WHERE id = %s
                 RETURNING *
                 """,
-                (threshold_id, alert_level, trigger_val, existing["id"]),
+                (alert_category, threshold_id, alert_level, trigger_val, existing["id"]),
             )
         else:
             cur.execute(
                 """
                 INSERT INTO public.t_alert_record (
                     id, seq, sensor_no, channel, threshold_id,
-                    alert_type, alert_level, direction,
+                    alert_type, alert_category, alert_level, direction,
                     trigger_val, create_time, trigger_count,
-                    alert_status
+                    alert_status, update_time
                 ) VALUES (
                     %s, nextval('public.seq_alert_record'), %s, %s, %s,
-                    %s, %s, %s,
+                    %s, %s, %s, %s,
                     %s, %s, 1,
-                    0
+                    0, NOW()
                 )
                 RETURNING *
                 """,
@@ -717,6 +649,7 @@ class AlertAnalyticsEngine:
                     channel,
                     threshold_id,
                     alert_type,
+                    alert_category,
                     alert_level,
                     direction,
                     trigger_val,
@@ -725,7 +658,6 @@ class AlertAnalyticsEngine:
             )
         row = cur.fetchone()
         enriched = self.enrich_alert_row(row)
-        self._notify_sse({"type": "ALERT_UPSERT", "alert": enriched})
         return enriched
 
     @staticmethod
@@ -897,86 +829,6 @@ class AlertAnalyticsEngine:
         triggered.append(alert)
         return alert
 
-    def _upsert_wind_rose(
-        self,
-        cur: Any,
-        sensor_no: str,
-        window_start: datetime,
-        window_end: datetime,
-    ) -> bool:
-        cur.execute(WIND_AGG_SQL, (sensor_no.lower(), window_start, window_end))
-        row = cur.fetchone()
-        if not row or int(row["pair_cnt"] or 0) <= 0:
-            return False
-
-        pair_cnt = int(row["pair_cnt"])
-        sum_sin = float(row["sum_sin"] or 0.0)
-        sum_cos = float(row["sum_cos"] or 0.0)
-        vector_speed = math.sqrt(sum_sin * sum_sin + sum_cos * sum_cos) / max(1, pair_cnt)
-        vector_direction = math.degrees(math.atan2(sum_sin, sum_cos)) % 360.0
-        scalar_speed = float(row["scalar_avg"] or 0.0)
-        sector = 0
-        if vector_speed > 0.2:
-            sector = int(math.floor(((vector_direction + 11.25) % 360.0) / 22.5)) % 16 + 1
-
-        beaufort_level = 0
-        for idx, speed_bin in enumerate(SPEED_BINS_7):
-            if float(speed_bin["min"]) <= vector_speed < float(speed_bin["max"]):
-                beaufort_level = idx + 1
-                break
-        if vector_speed >= float(SPEED_BINS_7[-1]["min"]):
-            beaufort_level = 7
-
-        ext_json = {
-            "vector_speed": round(vector_speed, 5),
-            "vector_direction": round(vector_direction, 5),
-            "scalar_speed": round(scalar_speed, 5),
-            "sector": sector,
-            "direction_label": DIRECTION_SECTORS_16[(sector - 1) % 16] if sector else "CALM",
-            "beaufort_level": beaufort_level,
-            "calm": vector_speed <= 0.2,
-            "small_wind": vector_speed <= 0.5,
-            "pair_count": pair_cnt,
-        }
-        cur.execute(
-            """
-            INSERT INTO public.t_stat_record (
-                sensor_no, channel, period_type, stat_time,
-                val_max, val_min, val_avg, val_std,
-                max_time, min_time, sample_count,
-                ext_json, create_by, create_time
-            ) VALUES (
-                %s, 'wind_rose', '10m', %s,
-                %s, %s, %s, %s,
-                %s, %s, %s,
-                %s::jsonb, 'system', NOW()
-            )
-            ON CONFLICT (stat_time, sensor_no, channel, period_type)
-            DO UPDATE SET
-                val_max = EXCLUDED.val_max,
-                val_min = EXCLUDED.val_min,
-                val_avg = EXCLUDED.val_avg,
-                val_std = EXCLUDED.val_std,
-                max_time = EXCLUDED.max_time,
-                min_time = EXCLUDED.min_time,
-                sample_count = EXCLUDED.sample_count,
-                ext_json = EXCLUDED.ext_json
-            """,
-            (
-                sensor_no.lower(),
-                window_start,
-                float(row["scalar_max"] or 0.0),
-                float(row["scalar_min"] or 0.0),
-                scalar_speed,
-                float(row["scalar_std"] or 0.0),
-                row["max_time"],
-                row["min_time"],
-                pair_cnt,
-                json_dumps(ext_json),
-            ),
-        )
-        return True
-
     def _run_detection_window(self, window_start: datetime, window_end: datetime) -> Dict[str, Any]:
         triggered_alerts: List[Dict[str, Any]] = []
         upserted_stats = 0
@@ -1056,7 +908,7 @@ class AlertAnalyticsEngine:
                 val_max = float(obs["val_max"])
                 val_min = float(obs["val_min"])
                 val_avg = float(obs["val_avg"])
-                val_std = float(obs["val_std"] or 0.0)
+                value_std = float(obs["value_std"] or 0.0)
                 max_time = obs.get("max_time") or last_ts
                 min_time = obs.get("min_time") or first_ts
                 previous_last_val = rule.get("last_val")
@@ -1070,7 +922,6 @@ class AlertAnalyticsEngine:
                         val_max,
                         val_min,
                         val_avg,
-                        val_std,
                         max_time,
                         min_time,
                         sample_cnt,
@@ -1090,7 +941,7 @@ class AlertAnalyticsEngine:
                     previous_last_val=previous_last_val,
                     previous_stuck_since=previous_stuck_since,
                     sample_cnt=sample_cnt,
-                    val_std=val_std,
+                    val_std=value_std,
                     val_avg=val_avg,
                     first_ts=first_ts,
                     last_ts=last_ts,
@@ -1295,13 +1146,6 @@ class AlertAnalyticsEngine:
                 ] = daq_alert
                 triggered_alerts.append(daq_alert)
 
-            if window_start.minute % 10 == 0:
-                wind_start = window_start - timedelta(minutes=10)
-                for wind_sensor in ("wea-01", "fhj-01"):
-                    if self._upsert_wind_rose(cur, wind_sensor, wind_start, window_start):
-                        upserted_stats += 1
-
-        self.current_watermark = window_end
         return {
             "windowStart": serialize_val(window_start),
             "windowEnd": serialize_val(window_end),
@@ -1313,19 +1157,12 @@ class AlertAnalyticsEngine:
 
     def step_detection(
         self,
-        window_start: Optional[datetime] = None,
-        window_end: Optional[datetime] = None,
+        window_start: datetime,
+        window_end: datetime,
     ) -> Dict[str, Any]:
-        """
-        Execute detection in one-minute sub-windows so 1m statistics and debounce
-        semantics remain correct even when replay speed is above 1x.
-        """
+        """Execute detection in one-minute sub-windows."""
         with self._step_lock:
             t0 = time.perf_counter()
-            if window_start is None:
-                window_start = self.current_watermark
-            if window_end is None:
-                window_end = window_start + timedelta(minutes=1)
             if window_end <= window_start:
                 raise ValueError("window_end must be later than window_start")
 
@@ -1347,13 +1184,9 @@ class AlertAnalyticsEngine:
                 cursor = sub_end
 
             elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
-            self.current_watermark = window_end
-            self.step_count += 1
-            self.last_step_ms = elapsed_ms
             return {
                 "windowStart": serialize_val(window_start),
                 "windowEnd": serialize_val(window_end),
-                "currentWatermark": serialize_val(self.current_watermark),
                 "subWindowCount": sub_window_count,
                 "rawPointsProcessed": total_raw_points,
                 "upsertedStatsCount": total_stats,
@@ -1362,104 +1195,15 @@ class AlertAnalyticsEngine:
                 "elapsedMs": elapsed_ms,
             }
 
-    def trigger_demo_alert(
-        self,
-        sensor_no: Optional[str] = None,
-        channel: Optional[str] = None,
-        alert_level: Optional[int] = None,
-        alert_type: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Trigger or upgrade a realistic live alert in `t_alert_record` (incrementing `seq`
-        and broadcasting over SSE) so the frontend popup alarm & sound can be demonstrated
-        immediately on demand.
-        """
-        self._demo_counter += 1
-        scenarios = [
-            {
-                "sensor_no": "stn-12-b",
-                "channel": "stress",
-                "alert_type": ALERT_TYPE_THRESHOLD,
-                "alert_level": 1,
-                "direction": ALERT_DIRECTION_LOWER,
-                "trigger_val": -11.32,
-                "remark": "[一级红色报警] 光纤光栅应变计_25_YH (玉环站主桁架) 应力下限超限: 实时峰值 -11.5840 MPa < 一级下限 -11.20 MPa",
-            },
-            {
-                "sensor_no": "accl-02",
-                "channel": "y",
-                "alert_type": ALERT_TYPE_THRESHOLD,
-                "alert_level": 2,
-                "direction": ALERT_DIRECTION_UPPER,
-                "trigger_val": 1.542,
-                "remark": "[二级橙色报警] 三向加速度计_2_YH y轴去直流振动幅值超限: 1.6850 m/s² > 二级上限 1.52 m/s² (DC offset=20.0014)",
-            },
-            {
-                "sensor_no": "wprs-03",
-                "channel": "",
-                "alert_type": ALERT_TYPE_THRESHOLD,
-                "alert_level": 1,
-                "direction": ALERT_DIRECTION_UPPER,
-                "trigger_val": 392.5,
-                "remark": "[一级红色报警] 风压计_3_YH 屋面风压超限: 实时极值 402.80 kPa > 一级上限 390.00 kPa",
-            },
-            {
-                "sensor_no": "wea-01",
-                "channel": "temperature",
-                "alert_type": ALERT_TYPE_THRESHOLD,
-                "alert_level": 1,
-                "direction": ALERT_DIRECTION_UPPER,
-                "trigger_val": 55.6,
-                "remark": "[一级红色报警] 小型气象站_YH 温度动态升级告警: 峰值 58.40 ℃ > 一级上限 55.00 ℃ (三级->二级->一级)",
-            },
-        ]
-        chosen = dict(scenarios[(self._demo_counter - 1) % len(scenarios)])
-        if sensor_no:
-            chosen["sensor_no"] = sensor_no.strip().lower()
-        if channel is not None:
-            chosen["channel"] = channel.strip()
-        if alert_level in (1, 2, 3):
-            chosen["alert_level"] = alert_level
-        if alert_type:
-            chosen["alert_type"] = normalize_alert_type(alert_type) or alert_type
-        if chosen["alert_type"] != ALERT_TYPE_THRESHOLD:
-            chosen["alert_level"] = 3
-
-        key = self.make_key(chosen["sensor_no"], chosen["channel"])
-        rule = self.channel_states.get(key) or {}
-        now_ts = datetime.now()
-
-        # Make sure each demo trigger creates a fresh or upgraded top-of-stream seq event
-        with get_db_cursor(commit=True) as cur:
-            alert = self._upsert_alert_incident(
-                cur,
-                sensor_no=chosen["sensor_no"],
-                channel=chosen["channel"],
-                threshold_id=rule.get("id"),
-                alert_type=chosen["alert_type"],
-                alert_level=int(chosen["alert_level"]),
-                direction=chosen["direction"],
-                trigger_val=float(chosen["trigger_val"]),
-                fire_time=now_ts,
-                remark=chosen["remark"],
-            )
-        return alert
-
     def get_status(self) -> Dict[str, Any]:
         rules = self.channel_states.values()
         online_cnt = sum(1 for r in rules if r.get("online_status") == "ONLINE")
         offline_cnt = len(rules) - online_cnt
         return {
-            "mode": self.mode,
-            "isRunning": self.is_running,
-            "currentWatermark": serialize_val(self.current_watermark),
-            "latestDataTimestamp": serialize_val(self.latest_data_ts),
-            "speedMultiplier": self.speed_multiplier,
-            "stepCount": self.step_count,
-            "lastStepMs": self.last_step_ms,
             "loadedRulesCount": len(rules),
             "onlineChannels": online_cnt,
             "offlineChannels": offline_cnt,
+            "totalMonitorRows": self.total_monitor_rows,
             "lastReloadTime": serialize_val(self.last_reload_time),
         }
 

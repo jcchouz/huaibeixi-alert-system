@@ -111,15 +111,15 @@
 
       <div class="shm-card ext-kpi-card std-card">
         <div class="ext-kpi-head">
-          <span>📊 最新脉动标准差 (val_std)</span>
-          <el-tag size="small" type="warning" effect="plain">动态离散度</el-tag>
+          <span>↕ 窗口极差 (Max-Min)</span>
+          <el-tag size="small" type="warning" effect="plain">波动范围</el-tag>
         </div>
         <div class="ext-kpi-val mono-num orange-val">
-          {{ formatNum(latestBucketStd) }}
+          {{ formatNum(windowSpan) }}
           <small>{{ activeMeta.unit }}</small>
         </div>
         <div class="ext-kpi-sub mono-num">
-          极差跨度 (Max-Min): {{ formatNum(windowSpan) }} {{ activeMeta.unit }}
+          统计桶数: {{ extremeSummary.bucketCount || 0 }} · 样本 {{ extremeSummary.totalSamples || 0 }}
         </div>
       </div>
 
@@ -208,12 +208,6 @@
         <el-table-column label="均值 (val_avg)" width="130" align="right">
           <template #default="{ row }">
             <span class="mono-num">{{ formatNum(row.valAvg) }} {{ row.unit }}</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="标准差 (val_std)" width="125" align="right">
-          <template #default="{ row }">
-            <span class="mono-num">{{ formatNum(row.valStd) }}</span>
           </template>
         </el-table-column>
 
@@ -309,11 +303,6 @@ const displayedSensorTable = computed(() => {
       (r.physicalQuantity || '').toLowerCase().includes(kw) ||
       (r.channel || '').toLowerCase().includes(kw)
   )
-})
-
-const latestBucketStd = computed(() => {
-  if (!seriesData.value.length) return 0
-  return seriesData.value[seriesData.value.length - 1].valStd ?? 0
 })
 
 const windowSpan = computed(() => {
@@ -502,7 +491,7 @@ function renderEnvelopeChart() {
             ↳ 极值时刻 min_time: ${item.minTime}
           </div>
           <div style="border-top:1px solid #264378;margin-top:4px;padding-top:4px;font-size:11px;color:#cbd5e1;">
-            标准差(val_std): ${item.valStd} | 样本数: ${item.sampleCount}
+            样本数: ${item.sampleCount}
           </div>
         `
       }

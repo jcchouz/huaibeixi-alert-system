@@ -11,7 +11,7 @@ backend/
     api/
       app.py                 # application factory, middleware, lifespan
       deps.py                # dependency wiring and role guards
-      routers/               # authentication, alerts, thresholds, stats, engine
+      routers/               # authentication, alerts, thresholds and stats
     core/
       config.py              # environment-backed settings
       security.py            # JWT authentication and RBAC
@@ -20,8 +20,6 @@ backend/
     domain/engine.py         # alert state machine and analytics engine
     infrastructure/
       database.py            # connection pool and transactions
-      sse.py                 # local + Redis cross-instance SSE fan-out
-      workers.py             # replay worker with leader lock
       middleware.py          # request IDs, latency, Prometheus metrics
     repositories/            # SQL and persistence boundaries
     schemas/                 # Pydantic request/response contracts
@@ -42,7 +40,7 @@ backend/
 2. Copy `backend/.env.example` to `backend/.env` and configure the database.
    `backend/.env` is ignored by Git.
 
-3. Run the backend and frontend:
+3. Start the backend, frontend and continuous data simulator:
 
    ```powershell
    .\start_all.bat
@@ -50,7 +48,26 @@ backend/
 
 The backend is available at `http://localhost:8090`, Swagger at
 `http://localhost:8090/docs`, and the frontend at
-`http://localhost:5174`.
+`http://localhost:5174`. The simulator writes monitoring samples to
+`t_monitor` and runs the same alert detection path used by the demo.
+
+To start only the backend and frontend:
+
+```powershell
+.\start_all.bat --no-simulator
+```
+
+## Alert Categories
+
+`t_alert_record.alert_category` classifies every alert:
+
+| Value | Category | Alert types |
+| --- | --- | --- |
+| `0` | 数据预警 | 阈值超限、传感器死值、超物理量程 |
+| `1` | 设备预警 | 传感器离线、采集仪离线 |
+
+The backend derives the category from `alert_type`; API clients do not need to
+send it when creating alerts.
 
 ## Authentication And Roles
 
@@ -73,11 +90,12 @@ Roles:
 | --- | --- |
 | `viewer` | Read dashboards and alert history |
 | `operator` | Viewer access plus alert acknowledgement and threshold simulation |
-| `admin` | All operations, including threshold changes and replay control |
+| `admin` | All operations, including threshold changes |
 
-The frontend attaches the bearer token to REST calls and passes the token to the
-SSE connection. Acknowledgement identity is always taken from the authenticated
-principal, not from request body text.
+The frontend attaches the bearer token to every REST request. Alert popups and
+the alert management table refresh through the API every 5 seconds. Alert
+acknowledgement is also sent directly through the REST API, and the
+acknowledgement identity is taken from the authenticated principal.
 
 ## Database Migrations
 
@@ -124,15 +142,13 @@ docker compose up --build -d
 ```
 
 The frontend is exposed on `http://localhost:5174`. Nginx proxies `/api` and
-`/metrics` to the backend and disables response buffering for SSE.
+`/metrics` to the backend.
 
 ## Operations
 
 - `GET /api/health` is a liveness endpoint.
 - `GET /api/ready` checks database connectivity.
 - `GET /metrics` exposes Prometheus metrics.
-- Replay workers use a PostgreSQL advisory lock, preventing duplicate execution
-  when the backend is scaled horizontally.
-- Set `REDIS_URL` when running multiple backend workers or containers so SSE
-  events reach clients connected to every instance.
+- The frontend polls alert APIs every 5 seconds and acknowledges alerts through
+  the REST API.
 - Runtime identity, request IDs and latency are included in structured logs.

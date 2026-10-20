@@ -17,6 +17,22 @@
 
     <section class="panel">
       <div class="toolbar">
+        <el-button-group class="category-buttons" aria-label="预警分类">
+          <el-button
+            :type="filters.alertCategory === 0 ? 'primary' : ''"
+            :icon="DataAnalysis"
+            @click="selectAlertCategory(0)"
+          >
+            数据预警
+          </el-button>
+          <el-button
+            :type="filters.alertCategory === 1 ? 'warning' : ''"
+            :icon="Monitor"
+            @click="selectAlertCategory(1)"
+          >
+            设备预警
+          </el-button>
+        </el-button-group>
         <el-input
           v-model="filters.sensorNo"
           clearable
@@ -39,35 +55,50 @@
       </div>
 
       <el-table v-loading="loading" :data="rows" border size="small">
-        <el-table-column prop="seq" label="序号" width="80" align="center" />
-        <el-table-column label="等级" width="90" align="center">
+        <el-table-column prop="seq" label="序号" width="70" align="center" />
+        <el-table-column label="等级" width="80" align="center">
           <template #default="{ row }">
             <el-tag :type="row.alert_level === 1 ? 'danger' : row.alert_level === 2 ? 'warning' : 'info'">
               L{{ row.alert_level }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="alert_type" label="预警类型" width="130" />
-        <el-table-column label="传感器" min-width="170">
+        <el-table-column prop="alert_type" label="预警类型" width="120" />
+        <el-table-column label="传感器" min-width="160">
           <template #default="{ row }">
             <div>{{ row.sensor_name || row.sensor_no }}</div>
             <span class="muted">{{ row.sensor_no }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="通道" width="110" align="center">
+        <el-table-column label="通道" width="90" align="center">
           <template #default="{ row }">
             <span>{{ row.channel || '默认通道' }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="direction" label="越限方向" width="110" align="center" />
-        <el-table-column prop="trigger_val" label="触发值" width="110" align="right" />
-        <el-table-column label="状态" width="100" align="center">
+        <el-table-column prop="direction" label="越限方向" width="95" align="center" />
+        <el-table-column prop="trigger_val" label="触发值" width="90" align="right" />
+        <el-table-column label="状态" width="80" align="center">
           <template #default="{ row }">
             <el-tag :type="statusType(row.alert_status)">{{ statusText(row.alert_status) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="create_time" label="触发时间" min-width="170" />
-        <el-table-column label="操作" width="250" fixed="right" align="center">
+        <el-table-column label="首次触发" width="150" align="center">
+          <template #default="{ row }">
+            <div class="time-stack mono-num">
+              <span>{{ datePart(row.create_time) }}</span>
+              <span class="time-sub">{{ timePart(row.create_time) }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="最后更新" width="150" align="center">
+          <template #default="{ row }">
+            <div class="time-stack mono-num">
+              <span>{{ datePart(row.update_time) }}</span>
+              <span class="time-sub">{{ timePart(row.update_time) }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="140" align="center">
           <template #default="{ row }">
             <el-button
               v-if="row.alert_status === 0"
@@ -132,9 +163,17 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Check, Delete, Plus, Refresh, Search } from '@element-plus/icons-vue'
+import {
+  Check,
+  DataAnalysis,
+  Delete,
+  Monitor,
+  Plus,
+  Refresh,
+  Search
+} from '@element-plus/icons-vue'
 import {
   ackAlertApi,
   createAlertApi,
@@ -151,6 +190,7 @@ const props = defineProps({
 
 const emit = defineEmits(['alert-created'])
 
+const POLL_INTERVAL_MS = 5000
 const alertTypes = ['阈值超限', '传感器离线', '采集仪离线', '传感器死值', '超物理量程']
 const loading = ref(false)
 const submitting = ref(false)
@@ -162,7 +202,8 @@ const pageSize = ref(20)
 const filters = reactive({
   sensorNo: '',
   alertType: '',
-  alertStatus: null
+  alertStatus: null,
+  alertCategory: 0
 })
 const summary = reactive({
   total: 0,
@@ -176,11 +217,19 @@ const createForm = reactive({
   alert_level: 1,
   trigger_val: -11.2
 })
+let pollTimer = null
+let requestInFlight = false
 
-async function loadAlerts() {
+async function loadAlerts(silent = false) {
+  if (requestInFlight) return
+  requestInFlight = true
   loading.value = true
   try {
-    const params = { page: page.value, pageSize: pageSize.value }
+    const params = {
+      page: page.value,
+      pageSize: pageSize.value,
+      alertCategory: filters.alertCategory
+    }
     if (filters.sensorNo) params.sensorNo = filters.sensorNo
     if (filters.alertType) params.alertType = filters.alertType
     if (filters.alertStatus !== null && filters.alertStatus !== '') {
@@ -191,9 +240,12 @@ async function loadAlerts() {
     total.value = Number(data.total || 0)
     updateSummary()
   } catch (err) {
-    ElMessage.error(err?.message || '加载预警失败')
+    if (silent !== true) {
+      ElMessage.error(err?.message || '加载预警失败')
+    }
   } finally {
     loading.value = false
+    requestInFlight = false
   }
 }
 
@@ -206,6 +258,12 @@ function updateSummary() {
 function search() {
   page.value = 1
   loadAlerts()
+}
+
+function selectAlertCategory(category) {
+  if (filters.alertCategory === category) return
+  filters.alertCategory = category
+  search()
 }
 
 function reset() {
@@ -236,7 +294,7 @@ async function submitCreate() {
 
 async function handleAlert(row) {
   try {
-    await ackAlertApi(row.id, { ack_user: 'local-admin' })
+    await ackAlertApi(row.id)
     ElMessage.success('已处理')
     await loadAlerts()
   } catch (err) {
@@ -267,12 +325,28 @@ function statusType(status) {
   return 'info'
 }
 
+function datePart(value) {
+  return value ? String(value).split(' ')[0] : '-'
+}
+
+function timePart(value) {
+  const parts = value ? String(value).split(' ') : []
+  return parts.length > 1 ? parts.slice(1).join(' ') : ''
+}
+
 watch(
   () => props.lastAlertEvent,
   () => loadAlerts()
 )
 
-onMounted(loadAlerts)
+onMounted(() => {
+  loadAlerts()
+  pollTimer = setInterval(() => loadAlerts(true), POLL_INTERVAL_MS)
+})
+
+onBeforeUnmount(() => {
+  clearInterval(pollTimer)
+})
 </script>
 
 <style scoped>
@@ -339,9 +413,30 @@ onMounted(loadAlerts)
   flex: 1;
 }
 
+.category-buttons {
+  margin-right: 4px;
+}
+
+.category-buttons :deep(.el-button) {
+  min-width: 92px;
+}
+
 .muted {
   color: var(--shm-text-secondary);
   font-size: 12px;
+}
+
+.time-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+
+.time-sub {
+  color: var(--shm-text-secondary);
+  font-size: 11px;
 }
 
 .pagination {

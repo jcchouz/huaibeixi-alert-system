@@ -39,8 +39,11 @@ class AlertRecord(BaseModel):
     sensor_no: Optional[str] = None
     channel: Optional[str] = None
     alert_type: Optional[str] = None
+    alert_category: Optional[int] = None
     alert_level: Optional[int] = None
     alert_status: Optional[int] = None
+    create_time: Optional[str] = None
+    update_time: Optional[str] = None
 
 
 class AlertListResponse(BaseModel):

@@ -47,11 +47,6 @@ class Settings(BaseSettings):
         validation_alias="CORS_ORIGINS",
     )
     trusted_hosts: str = Field(default="*", validation_alias="TRUSTED_HOSTS")
-    redis_url: Optional[str] = Field(default=None, validation_alias="REDIS_URL")
-    redis_channel: str = Field(
-        default="huaibeixi:alerts:events",
-        validation_alias="REDIS_CHANNEL",
-    )
 
     auth_enabled: bool = Field(default=False, validation_alias="AUTH_ENABLED")
     jwt_secret: Optional[str] = Field(default=None, validation_alias="JWT_SECRET")
@@ -63,28 +58,6 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
     log_json: bool = Field(default=True, validation_alias="LOG_JSON")
-
-    replay_worker_enabled: bool = Field(default=True, validation_alias="REPLAY_WORKER_ENABLED")
-    replay_leader_lock_enabled: bool = Field(
-        default=True,
-        validation_alias="REPLAY_LEADER_LOCK_ENABLED",
-    )
-    replay_leader_lock_key: int = Field(
-        default=809_090_028,
-        validation_alias="REPLAY_LEADER_LOCK_KEY",
-    )
-    replay_start_watermark: str = Field(
-        default="2026-09-28 13:55:00",
-        validation_alias="REPLAY_START_WATERMARK",
-    )
-    replay_fallback_end: str = Field(
-        default="2026-09-30 17:55:20",
-        validation_alias="REPLAY_FALLBACK_END",
-    )
-    demo_endpoints_enabled: bool = Field(
-        default=True,
-        validation_alias="DEMO_ENDPOINTS_ENABLED",
-    )
 
     @property
     def dsn(self) -> str:

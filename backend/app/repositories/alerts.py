@@ -8,6 +8,7 @@ from app.domain.alert_types import (
     ALERT_DIRECTION_NONE,
     ALERT_TYPE_DAQ_OFFLINE,
     ALERT_TYPE_OFFLINE,
+    alert_category_for_type,
     normalize_alert_type,
 )
 from app.infrastructure.database import get_db_cursor
@@ -112,6 +113,7 @@ class AlertRepository:
         alert_level: Optional[int],
         alert_status: Optional[int],
         alert_type: Optional[str],
+        alert_category: Optional[int],
         sensor_no: Optional[str],
         keyword: Optional[str],
         page: int,
@@ -128,6 +130,9 @@ class AlertRepository:
         if alert_type:
             where_clauses.append("alert_type = %s")
             params.append(normalize_alert_type(alert_type) or alert_type.strip())
+        if alert_category is not None:
+            where_clauses.append("alert_category = %s")
+            params.append(alert_category)
         if sensor_no:
             where_clauses.append("LOWER(sensor_no) LIKE %s")
             params.append(f"%{sensor_no.strip().lower()}%")
@@ -190,6 +195,7 @@ class AlertRepository:
                 SET alert_status = 1,
                     ack_by = %s,
                     ack_time = NOW(),
+                    update_time = NOW(),
                     seq = nextval('public.seq_alert_record')
                 WHERE id = %s
                 RETURNING *
@@ -213,6 +219,7 @@ class AlertRepository:
                     SET alert_status = 1,
                         ack_by = %s,
                         ack_time = NOW(),
+                        update_time = NOW(),
                         seq = nextval('public.seq_alert_record')
                     WHERE alert_status = 0 AND alert_level = %s
                     RETURNING id
@@ -226,6 +233,7 @@ class AlertRepository:
                     SET alert_status = 1,
                         ack_by = %s,
                         ack_time = NOW(),
+                        update_time = NOW(),
                         seq = nextval('public.seq_alert_record')
                     WHERE alert_status = 0
                     RETURNING id
@@ -246,17 +254,18 @@ class AlertRepository:
         trigger_val: float,
         direction: str = ALERT_DIRECTION_NONE,
     ) -> Dict[str, Any]:
+        alert_category = alert_category_for_type(alert_type)
         with get_db_cursor(commit=True) as cur:
             cur.execute(
                 """
                 INSERT INTO public.t_alert_record (
                     id, sensor_no, threshold_id, trigger_val, create_time,
-                    alert_status, remark, channel, seq, alert_type, alert_level,
-                    direction, trigger_count
+                    alert_status, remark, channel, seq, alert_type, alert_category,
+                    alert_level, direction, trigger_count, update_time
                 ) VALUES (
                     %s, %s, %s, %s, NOW(),
                     0, '', %s, nextval('public.seq_alert_record'), %s, %s,
-                    %s, 1
+                    %s, %s, 1, NOW()
                 )
                 RETURNING *
                 """,
@@ -267,6 +276,7 @@ class AlertRepository:
                     trigger_val,
                     channel,
                     alert_type,
+                    alert_category,
                     alert_level,
                     direction,
                 ),

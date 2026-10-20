@@ -9,7 +9,6 @@ from app.core.security import Principal
 from app.schemas.statistics import (
     ExtremesResponse,
     StatSensorListResponse,
-    WindRoseResponse,
 )
 from app.services.common import pick
 from app.services.statistics import StatisticsService
@@ -47,25 +46,4 @@ def get_stat_extremes(
         start_time=pick(start_time, startTime),
         end_time=pick(end_time, endTime),
         limit=limit,
-    )
-
-
-@router.get("/wind-rose", response_model=WindRoseResponse)
-def get_wind_rose(
-    sensorNo: str = Query("all", description="wea-01 | fhj-01 | all"),
-    sensor_no: Optional[str] = Query(None),
-    startTime: Optional[str] = Query(None),
-    start_time: Optional[str] = Query(None),
-    endTime: Optional[str] = Query(None),
-    end_time: Optional[str] = Query(None),
-    includeDemotyphoon: bool = Query(False),
-    includeDemoTyphoon: bool = Query(False),
-    service: StatisticsService = Depends(get_statistics_service),
-    _: Principal = Depends(require_roles("viewer", "operator", "admin")),
-) -> Dict[str, Any]:
-    return service.wind_rose(
-        sensor_no=pick(sensor_no, sensorNo, "all"),
-        start_time=pick(start_time, startTime),
-        end_time=pick(end_time, endTime),
-        include_demo_typhoon=bool(includeDemotyphoon or includeDemoTyphoon),
     )

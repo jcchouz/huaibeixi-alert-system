@@ -12,6 +12,19 @@ ALERT_DIRECTION_UPPER = "上限超限"
 ALERT_DIRECTION_LOWER = "下限超限"
 ALERT_DIRECTION_NONE = "无方向"
 
+ALERT_CATEGORY_DATA = 0
+ALERT_CATEGORY_DEVICE = 1
+
+ALERT_CATEGORY_LABELS = {
+    ALERT_CATEGORY_DATA: "数据预警",
+    ALERT_CATEGORY_DEVICE: "设备预警",
+}
+
+DEVICE_ALERT_TYPES = {
+    ALERT_TYPE_OFFLINE,
+    ALERT_TYPE_DAQ_OFFLINE,
+}
+
 ALERT_DIRECTION_VALUES = (
     ALERT_DIRECTION_UPPER,
     ALERT_DIRECTION_LOWER,
@@ -53,6 +66,13 @@ def normalize_alert_type(value: Optional[str]) -> Optional[str]:
     if not text:
         return None
     return ALERT_TYPE_ALIASES.get(text.upper(), text)
+
+
+def alert_category_for_type(value: Optional[str]) -> int:
+    normalized = normalize_alert_type(value)
+    if normalized in DEVICE_ALERT_TYPES:
+        return ALERT_CATEGORY_DEVICE
+    return ALERT_CATEGORY_DATA
 
 
 def normalize_alert_direction(value: Optional[str]) -> str:

@@ -61,8 +61,12 @@
               <span class="m-val mono-num">{{ item.trigger_count || 1 }} 次</span>
             </div>
             <div class="metric-cell">
-              <span class="m-label">触发时间</span>
-              <span class="m-val mono-num">{{ item.create_time }}</span>
+              <span class="m-label">首次触发</span>
+              <span class="m-val mono-num">{{ item.create_time || '-' }}</span>
+            </div>
+            <div class="metric-cell">
+              <span class="m-label">最后更新</span>
+              <span class="m-val mono-num">{{ item.update_time || item.create_time }}</span>
             </div>
           </div>
 
@@ -102,7 +106,6 @@ import { ElMessage } from 'element-plus'
 import { BellFilled, Select } from '@element-plus/icons-vue'
 import { alertAudio } from '../utils/audio'
 import {
-  buildAlertStreamUrl,
   pollAlertsApi,
   ackAlertApi,
   formatAlertTypeLabel
@@ -124,16 +127,15 @@ const emit = defineEmits([
 
 const LAST_SEQ_STORAGE_KEY = 'last_notified_seq'
 const BASELINE_STORAGE_KEY = 'alert_baseline_initialized'
+const POLL_INTERVAL_MS = 5000
 const popupQueue = ref([])
-const sseConnected = ref(false)
 const pollActive = ref(false)
 const lastNotifiedSeq = ref(Number(localStorage.getItem(LAST_SEQ_STORAGE_KEY) || 0))
 const baselineInitialized = ref(localStorage.getItem(BASELINE_STORAGE_KEY) === '1')
-const lastHeartbeat = ref('')
+const lastPollTime = ref('')
 
-let eventSource = null
 let pollTimer = null
-let reconnectTimer = null
+let pollInFlight = false
 
 function getStoredMaxSeq() {
   const val = Number(localStorage.getItem(LAST_SEQ_STORAGE_KEY) || 0)
@@ -149,10 +151,9 @@ function setStoredMaxSeq(seq) {
 
 function emitStatus() {
   emit('status-change', {
-    sseConnected: sseConnected.value,
     pollActive: pollActive.value,
     lastSeq: lastNotifiedSeq.value,
-    lastHeartbeat: lastHeartbeat.value
+    lastPollTime: lastPollTime.value
   })
 }
 
@@ -176,7 +177,7 @@ function formatNumber(val) {
 }
 
 /**
- * Process an incoming alert record from SSE or Poll or manual simulation
+ * Process an incoming alert record from API polling.
  * Deduplicates across browser tabs via localStorage('last_notified_seq')
  */
 function processIncomingAlert(alertObj, options = { forcePopup: false }) {
@@ -245,9 +246,7 @@ async function handleQuickAck(item) {
   }
   item.acking = true
   try {
-    await ackAlertApi(item.id, {
-      ack_user: '值班监控工程师 (弹窗处理)'
-    })
+    await ackAlertApi(item.id)
     ElMessage.success(`已处理预警：${item.sensor_name || item.sensor_no}`)
     dismissPopup(item.popupKey)
     emit('alert-acked', item)
@@ -269,81 +268,15 @@ function handleInspectDetail(item) {
   emit('inspect-alert', item)
 }
 
-// 1. SSE Real-time EventSource connection
-function connectSSE() {
-  if (eventSource) {
-    try {
-      eventSource.close()
-    } catch (_) {}
-  }
-
-  try {
-    const afterSeq = getStoredMaxSeq()
-    eventSource = new EventSource(buildAlertStreamUrl(afterSeq))
-
-    eventSource.onopen = () => {
-      sseConnected.value = true
-      lastHeartbeat.value = new Date().toLocaleTimeString()
-      emitStatus()
-    }
-
-    const handleSsePayload = (rawEvent) => {
-      if (!rawEvent || !rawEvent.data) return
-      try {
-        const parsed = JSON.parse(rawEvent.data)
-        lastHeartbeat.value = new Date().toLocaleTimeString()
-        sseConnected.value = true
-
-        if (parsed.initMaxSeq !== undefined || parsed.maxSeq !== undefined) {
-          const srvSeq = Number(parsed.initMaxSeq ?? parsed.maxSeq ?? 0)
-          if (getStoredMaxSeq() === 0 && srvSeq > 0) {
-            setStoredMaxSeq(srvSeq)
-          }
-        }
-
-        if (parsed.alert && typeof parsed.alert === 'object') {
-          processIncomingAlert(parsed.alert)
-        } else if (Array.isArray(parsed.alerts)) {
-          parsed.alerts.forEach((a) => processIncomingAlert(a))
-        } else if (parsed.seq && parsed.sensor_no) {
-          processIncomingAlert(parsed)
-        }
-        emitStatus()
-      } catch (_) {}
-    }
-
-    eventSource.onmessage = handleSsePayload
-    eventSource.addEventListener('alert', handleSsePayload)
-    eventSource.addEventListener('ALERT_UPSERT', handleSsePayload)
-    eventSource.addEventListener('connected', handleSsePayload)
-    eventSource.addEventListener('heartbeat', () => {
-      sseConnected.value = true
-      lastHeartbeat.value = new Date().toLocaleTimeString()
-      emitStatus()
-    })
-
-    eventSource.onerror = () => {
-      sseConnected.value = false
-      emitStatus()
-      try {
-        eventSource.close()
-      } catch (_) {}
-      clearTimeout(reconnectTimer)
-      reconnectTimer = setTimeout(connectSSE, 5000)
-    }
-  } catch (err) {
-    sseConnected.value = false
-    emitStatus()
-  }
-}
-
-// 2. Smart Cursor Polling (every 3 seconds) as dual-mode compensation
+// Poll unhandled alerts every 5 seconds.
 async function runCursorPoll() {
+  if (pollInFlight) return
+  pollInFlight = true
   try {
     const afterSeq = getStoredMaxSeq()
     const res = await pollAlertsApi(afterSeq)
     pollActive.value = true
-    lastHeartbeat.value = new Date().toLocaleTimeString()
+    lastPollTime.value = new Date().toLocaleTimeString()
 
     // On initial page load when localStorage has 0, initialize baseline seq so historical alerts don't flood popups
     const serverMaxSeq = Number(res.latestSeq ?? res.latest_seq ?? res.maxSeq ?? res.max_seq ?? 0)
@@ -365,6 +298,8 @@ async function runCursorPoll() {
   } catch (_) {
     pollActive.value = false
     emitStatus()
+  } finally {
+    pollInFlight = false
   }
 }
 
@@ -376,7 +311,6 @@ function handleStorageSync(e) {
 }
 
 function handleTokenChanged() {
-  connectSSE()
   runCursorPoll()
 }
 
@@ -384,20 +318,13 @@ onMounted(async () => {
   window.addEventListener('storage', handleStorageSync)
   window.addEventListener('auth:token-changed', handleTokenChanged)
   await runCursorPoll()
-  connectSSE()
-  pollTimer = setInterval(runCursorPoll, 3000)
+  pollTimer = setInterval(runCursorPoll, POLL_INTERVAL_MS)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('storage', handleStorageSync)
   window.removeEventListener('auth:token-changed', handleTokenChanged)
-  if (eventSource) {
-    try {
-      eventSource.close()
-    } catch (_) {}
-  }
   clearInterval(pollTimer)
-  clearTimeout(reconnectTimer)
 })
 
 defineExpose({

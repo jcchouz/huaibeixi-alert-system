@@ -1,10 +1,9 @@
 #!/usr/bin/env python
-"""HTTP / SSE / CRUD validation for the running FastAPI service on :8090.
+"""HTTP / CRUD validation for the running FastAPI service on :8090.
 
 Snapshots ``t_alert_threshold`` and ``t_alert_record`` to binary files first and
 restores them at the end, so this is safe to run against a live database. The
-alert-engine background loop is only stepped when explicitly requested, and it
-is stopped again before the snapshot restore.
+alert records are restored before the validation finishes.
 """
 from __future__ import annotations
 
@@ -13,8 +12,6 @@ import io
 import json
 import os
 import sys
-import threading
-import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -103,51 +100,6 @@ def restore_table(conn: Any, table: str, path: Path) -> int:
     conn.commit()
     cur.execute(f"SELECT COUNT(*) FROM public.{table}")
     return int(cur.fetchone()[0])
-
-
-def sse_probe(trigger_after: float = 1.5, total: float = 6.0) -> Tuple[List[str], Optional[str]]:
-    holder: Dict[str, Any] = {"lines": [], "stop": False, "err": None}
-
-    def reader() -> None:
-        headers = {"Accept": "text/event-stream"}
-        if AUTH_TOKEN:
-            headers["Authorization"] = f"Bearer {AUTH_TOKEN}"
-        req = urllib.request.Request(
-            f"{BASE}/api/alerts/stream", headers=headers)
-        try:
-            resp = urllib.request.urlopen(req, timeout=30)
-        except Exception as exc:
-            holder["err"] = f"connect: {exc}"
-            return
-        holder["resp"] = resp
-        try:
-            while not holder["stop"]:
-                line = resp.readline()
-                if not line:
-                    break
-                holder["lines"].append(line.decode("utf-8", "replace").rstrip("\n"))
-        except Exception as exc:
-            holder["err"] = f"read: {exc}"
-        finally:
-            try:
-                resp.close()
-            except Exception:
-                pass
-
-    thread = threading.Thread(target=reader, daemon=True)
-    thread.start()
-    time.sleep(trigger_after)
-    http("POST", "/api/engine/replay", {"action": "trigger_test_alert"})
-    time.sleep(max(0.0, total - trigger_after))
-    holder["stop"] = True
-    resp = holder.get("resp")
-    if resp is not None:
-        try:
-            resp.close()
-        except Exception:
-            pass
-    thread.join(timeout=5)
-    return holder["lines"], holder["err"]
 
 
 def run(args: argparse.Namespace) -> int:
@@ -286,27 +238,6 @@ def run(args: argparse.Namespace) -> int:
             remaining = int(cur.fetchone()["c"])
         c.check(remaining == 0, "ack-all leaves 0 unhandled alerts", f"remaining={remaining}")
 
-        # ---------- SSE ----------
-        lines, err = sse_probe()
-        joined = "\n".join(lines)
-        c.check("event: connected" in joined, "SSE emits initial connected event", err or joined[:120])
-        c.check("event: alert" in joined, "SSE pushes alert event on test trigger",
-                err or f"lines={len(lines)}")
-        print(f"[api]   SSE events={sum(1 for line in lines if line.startswith('event:'))}")
-
-        # ---------- engine replay step/stop ----------
-        st, step = http("POST", "/api/engine/replay",
-                        {"action": "step", "replayTime": "2026-09-28 13:55:00"}, timeout=90)
-        c.check(st == 200 and isinstance(step, dict) and "stepResult" in step,
-                "POST /api/engine/replay step runs a detection window", f"{st} {str(step)[:150]}")
-        if isinstance(step, dict) and isinstance(step.get("stepResult"), dict):
-            sr = step["stepResult"]
-            print(f"[api]   step raw={sr.get('rawPointsProcessed')} stats={sr.get('upsertedStatsCount')} "
-                  f"alerts={sr.get('triggeredAlertsCount')} elapsed={sr.get('elapsedMs')}ms")
-        st, stopped = http("POST", "/api/engine/replay", {"action": "stop"})
-        c.check(st == 200 and isinstance(stopped, dict) and stopped.get("success") is True,
-                "POST /api/engine/replay stop halts the loop", f"{st} {str(stopped)[:120]}")
-
         # ---------- statistics ----------
         st, sens = http("GET", "/api/stats/sensors")
         items = (sens.get("items") or sens.get("sensors") or []) if isinstance(sens, dict) else []
@@ -321,14 +252,7 @@ def run(args: argparse.Namespace) -> int:
         c.check(st == 200 and bool(has_series), "GET /api/stats/extremes returns 1m series",
                 f"{st} {str(ext)[:150]}")
 
-        st, rose = http("GET", "/api/stats/wind-rose?sensorNo=wea-01")
-        c.check(st == 200 and isinstance(rose, dict) and len(rose) > 0,
-                "GET /api/stats/wind-rose returns payload", f"{st} {str(rose)[:150]}")
-        if isinstance(rose, dict):
-            print(f"[api]   wind-rose keys={list(rose)[:12]}")
-
     finally:
-        http("POST", "/api/engine/replay", {"action": "stop"})
         conn = psycopg2.connect(DSN)
         try:
             thr_rows = restore_table(conn, "t_alert_threshold", SNAP_DIR / "threshold.bin")

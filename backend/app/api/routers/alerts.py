@@ -2,19 +2,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import (
     get_alert_service,
-    get_engine,
-    get_sse_hub,
-    get_sse_principal,
     require_roles,
 )
 from app.core.security import Principal
-from app.domain.engine import AlertAnalyticsEngine
-from app.infrastructure.sse import SSEHub
 from app.schemas.alerts import (
     AlertAckRequest,
     AlertActionResponse,
@@ -43,16 +37,6 @@ def poll_alerts(
     return service.poll(cursor_seq, limit)
 
 
-@router.get("/stream")
-async def stream_alerts(
-    request: Request,
-    engine: AlertAnalyticsEngine = Depends(get_engine),
-    sse: SSEHub = Depends(get_sse_hub),
-    _: Principal = Depends(get_sse_principal),
-) -> StreamingResponse:
-    return sse.response(request, engine)
-
-
 @router.get("", response_model=AlertListResponse)
 def list_alerts(
     alertLevel: Optional[int] = Query(None),
@@ -61,6 +45,8 @@ def list_alerts(
     alert_status: Optional[int] = Query(None),
     alertType: Optional[str] = Query(None),
     alert_type: Optional[str] = Query(None),
+    alertCategory: Optional[int] = Query(None, ge=0, le=1),
+    alert_category: Optional[int] = Query(None, ge=0, le=1),
     sensorNo: Optional[str] = Query(None),
     sensor_no: Optional[str] = Query(None),
     keyword: Optional[str] = Query(None),
@@ -74,6 +60,7 @@ def list_alerts(
         alert_level=pick(alertLevel, alert_level),
         alert_status=pick(alertStatus, alert_status),
         alert_type=pick(alertType, alert_type),
+        alert_category=pick(alertCategory, alert_category),
         sensor_no=pick(sensorNo, sensor_no),
         keyword=keyword,
         page=page,

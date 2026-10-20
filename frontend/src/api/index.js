@@ -72,61 +72,12 @@ export function logoutApi() {
   setAuthToken('')
 }
 
-export function buildAlertStreamUrl(afterSeq = 0) {
-  const token = getAuthToken()
-  const query = new URLSearchParams({ afterSeq: String(afterSeq) })
-  if (token) query.set('token', token)
-  return `/api/alerts/stream?${query.toString()}`
-}
-
 // 1. Overview & KPI Summary
 export async function getOverviewApi() {
   return await http.get('/overview')
 }
 
-export async function getAlertsSummaryApi() {
-  const data = await http.get('/overview')
-  return {
-    raw: data,
-    engine: {
-      ...(data.engineStatus || {}),
-      mode: data.engineMode || data.engineStatus?.mode || 'REPLAY',
-      currentWatermark: data.currentWatermark || data.engineStatus?.currentWatermark,
-      totalChannels: data.totalChannels || 208,
-      enabledChannels: data.enabledChannels || 185,
-      uncommissionedChannels: Math.max(0, (data.totalChannels || 208) - (data.enabledChannels || 185)),
-      onlineChannels: data.onlineChannels ?? 185,
-      offlineChannels: data.offlineChannels ?? 23
-    },
-    kpi: {
-      totalSensors: data.totalSensors ?? 146,
-      totalChannels: data.totalChannels ?? 208,
-      enabledChannels: data.enabledChannels ?? 185,
-      uncommissionedChannels: Math.max(0, (data.totalChannels || 208) - (data.enabledChannels || 185)),
-      onlineChannels: data.onlineChannels ?? 185,
-      offlineChannels: data.offlineChannels ?? 23,
-      activeAlertsCount: data.activeAlertsCount ?? 0,
-      unackedAlertsCount: data.unackedAlertsCount ?? 0,
-      ackedAlertsCount: data.ackedAlertsCount ?? 0,
-      resolvedAlertsCount: data.resolvedAlertsCount ?? 0,
-      totalAlertsCount: data.totalAlertsCount ?? 0,
-      level1Count: data.level1Count ?? 0,
-      level2Count: data.level2Count ?? 0,
-      level3Count: data.level3Count ?? 0,
-      totalLevel1Count: data.totalLevel1Count ?? 0,
-      totalLevel2Count: data.totalLevel2Count ?? 0,
-      totalLevel3Count: data.totalLevel3Count ?? 0,
-      totalMonitorRows: data.totalMonitorRows ?? 398059510,
-      statRecordCount: data.statRecordCount ?? 0,
-      maxSeq: data.maxSeq ?? 0,
-      alertsByType: data.alertsByType || [],
-      alertsByLevel: data.alertsByLevel || [],
-      recentAlerts: data.recentAlerts || []
-    }
-  }
-}
-
-// 2. Cursor Polling for Real-time Alert Popup
+// 2. Cursor polling for alert popups
 export async function pollAlertsApi(afterSeq = 0, limit = 50) {
   return await http.get('/alerts/poll', {
     params: { afterSeq, limit }
@@ -150,41 +101,20 @@ export async function createAlertApi(payload = {}) {
 }
 
 // 4. Acknowledge Single Alert
-export async function ackAlertApi(alertId, payload = {}) {
-  const body = {
-    alertStatus: 1,
-    ackBy: payload.ack_user ?? payload.ackBy ?? payload.ack_by ?? '值班工程师'
-  }
-  const res = await http.post(`/alerts/${alertId}/ack`, body)
+export async function ackAlertApi(alertId) {
+  const res = await http.post(`/alerts/${alertId}/ack`, { alertStatus: 1 })
   return res.alert || res
 }
 
 // 5. Batch Acknowledge Alerts
 export async function ackAllAlertsApi(payload = {}) {
   return await http.post('/alerts/ack-all', {
-    ackBy: payload.ackBy || '值班工程师',
     alertLevel: payload.alertLevel ?? null
   })
 }
 
 export async function deleteAlertApi(alertId) {
   return await http.delete(`/alerts/${alertId}`)
-}
-
-// 6. Engine Replay & Live Simulation Control
-export async function controlEngineReplayApi(payload = {}) {
-  return await http.post('/engine/replay', payload)
-}
-
-export async function simulateRealtimeAlertApi(options = {}) {
-  const res = await http.post('/engine/replay', {
-    action: 'trigger_test_alert',
-    sensorNo: options.sensorNo || null,
-    channel: options.channel ?? null,
-    alertLevel: options.alertLevel || null,
-    alertType: options.alertType || null
-  })
-  return res.alert || (res.stepResult?.triggeredAlerts?.[0]) || null
 }
 
 // 7. Scheduled Max/Min Extremes Dashboard APIs
@@ -194,11 +124,6 @@ export async function getStatSensorsApi() {
 
 export async function getStatExtremesApi(params = {}) {
   return await http.get('/stats/extremes', { params })
-}
-
-// 8. Bridge Wind Rose Analysis API
-export async function getWindRoseApi(params = {}) {
-  return await http.get('/stats/wind-rose', { params })
 }
 
 // 9. 3-Level Threshold Rules & Dry-Run Workbench APIs

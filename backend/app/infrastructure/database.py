@@ -94,26 +94,3 @@ def get_db_cursor(commit: bool = False) -> Generator[Any, None, None]:
             raise
         finally:
             cur.close()
-
-
-@contextmanager
-def acquire_replay_leader_lock(lock_key: int) -> Generator[bool, None, None]:
-    """Use a dedicated PostgreSQL session advisory lock for a single replay leader."""
-    conn = psycopg2.connect(
-        get_settings().dsn,
-        cursor_factory=psycopg2.extras.RealDictCursor,
-    )
-    acquired = False
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT pg_try_advisory_lock(%s) AS acquired", (lock_key,))
-            acquired = bool(cur.fetchone()["acquired"])
-        yield acquired
-    finally:
-        if acquired:
-            try:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
-            except Exception:
-                logger.exception("Failed to release replay leader lock")
-        conn.close()

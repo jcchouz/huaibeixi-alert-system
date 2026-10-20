@@ -15,8 +15,8 @@
       </nav>
 
       <div class="header-status">
-        <span class="status-dot" :class="{ online: commState.sseConnected || commState.pollActive }"></span>
-        <span>{{ commState.sseConnected ? '实时推送' : '轮询中' }}</span>
+        <span class="status-dot" :class="{ online: commState.pollActive }"></span>
+        <span>{{ commState.pollActive ? '5秒轮询正常' : '等待轮询' }}</span>
         <el-button
           text
           :icon="isMuted ? MuteNotification : BellFilled"
@@ -62,7 +62,6 @@ const popupRef = ref(null)
 const isMuted = ref(alertAudio.isMuted())
 const lastAlertEvent = ref(null)
 const commState = ref({
-  sseConnected: false,
   pollActive: false
 })
 

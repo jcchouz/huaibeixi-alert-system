@@ -28,7 +28,7 @@
         </el-button>
         <el-button type="primary" size="small" @click="openSimulatorDialog()">
           <el-icon style="margin-right: 4px"><DataAnalysis /></el-icon>
-          【历史数据回放试算 (Dry-Run Simulator)】
+          【历史数据模拟试算 (Dry-Run Simulator)】
         </el-button>
       </div>
     </div>
@@ -194,7 +194,7 @@
               编辑阈值
             </el-button>
             <el-button type="success" link size="small" @click="openSimulatorDialog(row)">
-              回放试算
+              历史试算
             </el-button>
           </template>
         </el-table-column>
@@ -401,7 +401,7 @@
     <!-- 5. Historical Data Dry-Run Simulator Dialog -->
     <el-dialog
       v-model="simDialogVisible"
-      title="🔬 历史数据回放试算台 (Dry-Run Simulator) — 保存前预演新阈值在峰值历史数据下的触发效果"
+      title="🔬 历史数据模拟试算台 (Dry-Run Simulator) — 保存前预演新阈值在历史数据下的触发效果"
       width="960px"
       top="5vh"
     >
@@ -426,7 +426,7 @@
           </div>
 
           <div class="sim-field">
-            <label>历史回放时段选择</label>
+            <label>历史试算时段选择</label>
             <el-select v-model="simForm.timeWindow" size="small" style="width: 100%" @change="runDryRunSimulation">
               <el-option label="🔥 峰值吞吐时段 (2026-09-28 12:00 ~ 15:00)" value="PEAK_928" />
               <el-option label="⚡ 掉线与波动时段 (2026-09-30 15:00 ~ 18:00)" value="DROP_930" />
@@ -457,7 +457,7 @@
             <el-input-number v-model="simForm.level3_upper" size="small" :step="0.5" placeholder="L3上限" />
           </div>
           <el-button type="primary" size="small" :loading="simLoading" @click="runDryRunSimulation">
-            ⚡ 立即执行回放试算
+            ⚡ 立即执行历史试算
           </el-button>
         </div>
 
@@ -819,7 +819,7 @@ async function runDryRunSimulation() {
     await nextTick()
     renderSimChart(res)
   } catch (err) {
-    ElMessage.error(`回放试算失败: ${err?.message || ''}`)
+    ElMessage.error(`历史试算失败: ${err?.message || ''}`)
   } finally {
     simLoading.value = false
   }

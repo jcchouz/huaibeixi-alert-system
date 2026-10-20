@@ -3,10 +3,10 @@
 
 Phases
 ------
-precheck : inspect DB state, rule set and wind-rose expectations (read-only)
+precheck : inspect DB state and rule set (read-only)
 seed     : write synthetic ``t_monitor`` traffic (default 4000 rows/s)
 detect   : drive ``AlertAnalyticsEngine.step_detection`` window by window
-verify   : assert produced alerts / 1m stats / 10m wind-rose
+verify   : assert produced alerts and 1m stats
 clean    : delete synthetic rows and restore the ``t_alert_record`` snapshot
 all      : seed -> detect -> verify -> clean
 
@@ -50,8 +50,6 @@ from app.engine import AlertAnalyticsEngine
 # --------------------------------------------------------------------------- #
 STREAM_START = datetime(2026, 10, 18, 22, 0, 0)
 WINDOW_SECONDS = 60
-WIND_START = datetime(2026, 10, 18, 21, 50, 0)
-WIND_END = datetime(2026, 10, 18, 22, 0, 0)
 TEST_END = STREAM_START + timedelta(seconds=6 * WINDOW_SECONDS)
 
 DEFAULT_TARGET_RATE = 4000.0
@@ -89,17 +87,6 @@ EXPECTED_ALERTS: List[Tuple[str, int, int]] = [
 ]
 
 DAQ_SENSOR = "zd-wg-01"
-
-WIND_SENSORS = ("wea-01", "fhj-01")
-WIND_EXPECT = {
-    "pair_count": 600,
-    "vector_speed": math.sqrt(1500.0 ** 2 + 900.0 ** 2) / 600.0,   # ~2.915475
-    "vector_direction": math.degrees(math.atan2(1500.0, -900.0)),   # ~120.9638
-    "scalar_speed": 4.0,
-    "sector": 6,       # ESE
-    "beaufort_level": 2,
-}
-
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -197,18 +184,6 @@ def build_window_rows(
     return rows
 
 
-def build_wind_rows() -> List[Tuple[str, str, float, datetime]]:
-    rows: List[Tuple[str, str, float, datetime]] = []
-    total = int((WIND_END - WIND_START).total_seconds())
-    for i in range(total):
-        t = WIND_START + timedelta(seconds=i)
-        speed, direction = (5.0, 90.0) if i < total // 2 else (3.0, 180.0)
-        for sensor in WIND_SENSORS:
-            rows.append((sensor, "windSpeed", speed, t))
-            rows.append((sensor, "windDirection", direction, t))
-    return rows
-
-
 def insert_rows(rows: List[Tuple[Any, ...]], target_rate: float, pace: bool = True) -> float:
     """Insert rows paced to ``target_rate`` rows/s; returns achieved rows/s."""
     if not rows:
@@ -296,8 +271,6 @@ def phase_precheck(args: argparse.Namespace) -> bool:
     print(f"[precheck] target rate            : {args.target_rate:.0f} rows/s")
     print(f"[precheck] scale factor           : {scale:.4f}")
     print(f"[precheck] stream window          : {STREAM_START} .. {STREAM_START + timedelta(seconds=args.windows * 60)}")
-    print(f"[precheck] wind window            : {WIND_START} .. {WIND_END}")
-    print(f"[precheck] wind expectation       : {WIND_EXPECT}")
 
     rows_per_window = 0
     for win_idx in range(args.windows):
@@ -318,7 +291,7 @@ def phase_precheck(args: argparse.Namespace) -> bool:
         cur.execute(
             "SELECT COUNT(*) AS c FROM public.t_monitor "
             "WHERE time >= %s AND time < %s",
-            (WIND_START, TEST_END),
+            (STREAM_START, TEST_END),
         )
         print(f"[precheck] leftover test rows     : {cur.fetchone()['c']}")
     return True
@@ -336,11 +309,7 @@ def phase_seed(args: argparse.Namespace) -> Tuple[bool, Optional[bytes]]:
     finally:
         conn.close()
 
-    wind_rows = build_wind_rows()
-    print(f"[seed] wind rows                  : {len(wind_rows)}")
     pace = not args.no_pace
-    achieved = insert_rows(wind_rows, args.target_rate, pace=pace)
-    print(f"[seed] wind achieved rate         : {achieved:.0f} rows/s")
 
     total = 0
     for win_idx in range(args.windows):
@@ -359,7 +328,6 @@ def phase_seed(args: argparse.Namespace) -> Tuple[bool, Optional[bytes]]:
 
 def phase_detect(args: argparse.Namespace) -> bool:
     engine = AlertAnalyticsEngine()
-    engine.mode = "REPLAY"
     engine.initialize()
     print(f"[detect] rules in memory          : {len(engine.channel_states)}")
     for win_idx in range(args.windows):
@@ -520,37 +488,6 @@ def phase_verify(args: argparse.Namespace) -> bool:
         else:
             c.check(int(r["sample_count"]) == 3, "yb-sx01-a/stress sample_count == 3", f"got {r['sample_count']}")
 
-        # 10m wind rose
-        for sensor in WIND_SENSORS:
-            cur.execute(
-                """
-                SELECT ext_json, sample_count
-                FROM public.t_stat_record
-                WHERE period_type = '10m' AND channel = 'wind_rose'
-                  AND sensor_no = %s AND stat_time = %s
-                """,
-                (sensor, WIND_START),
-            )
-            r = cur.fetchone()
-            if r is None:
-                c.check(False, f"10m wind_rose row for {sensor} @21:50 exists", "missing")
-                continue
-            ext = r["ext_json"] or {}
-            c.check(int(ext.get("pair_count") or 0) == WIND_EXPECT["pair_count"],
-                    f"{sensor} wind_rose pair_count == {WIND_EXPECT['pair_count']}", str(ext.get("pair_count")))
-            c.check(abs(float(ext.get("vector_speed") or 0) - WIND_EXPECT["vector_speed"]) < 1e-3,
-                    f"{sensor} wind_rose vector_speed ~= {WIND_EXPECT['vector_speed']:.4f}",
-                    str(ext.get("vector_speed")))
-            c.check(abs(float(ext.get("vector_direction") or 0) - WIND_EXPECT["vector_direction"]) < 1e-3,
-                    f"{sensor} wind_rose vector_direction ~= {WIND_EXPECT['vector_direction']:.4f}",
-                    str(ext.get("vector_direction")))
-            c.check(abs(float(ext.get("scalar_speed") or 0) - WIND_EXPECT["scalar_speed"]) < 1e-3,
-                    f"{sensor} wind_rose scalar_speed ~= {WIND_EXPECT['scalar_speed']}", str(ext.get("scalar_speed")))
-            c.check(int(ext.get("sector") or 0) == WIND_EXPECT["sector"],
-                    f"{sensor} wind_rose sector == {WIND_EXPECT['sector']}", str(ext.get("sector")))
-            c.check(int(ext.get("beaufort_level") or 0) == WIND_EXPECT["beaufort_level"],
-                    f"{sensor} wind_rose beaufort == {WIND_EXPECT['beaufort_level']}", str(ext.get("beaufort_level")))
-
     # unexpected alerts created in the synthetic window
     expected_keys = {k for k, _, _ in expected_list}
     with get_db_cursor() as cur:
@@ -584,11 +521,11 @@ def phase_clean(args: argparse.Namespace, snapshot: Optional[bytes]) -> bool:
     conn = psycopg2.connect(DSN)
     try:
         cur = conn.cursor()
-        cur.execute("DELETE FROM public.t_monitor WHERE time >= %s AND time < %s", (WIND_START, TEST_END))
+        cur.execute("DELETE FROM public.t_monitor WHERE time >= %s AND time < %s", (STREAM_START, TEST_END))
         print(f"[clean] deleted {cur.rowcount} t_monitor rows")
         cur.execute(
             "DELETE FROM public.t_stat_record WHERE stat_time >= %s AND stat_time < %s",
-            (WIND_START, TEST_END),
+            (STREAM_START, TEST_END),
         )
         print(f"[clean] deleted {cur.rowcount} t_stat_record rows")
         conn.commit()
@@ -602,7 +539,7 @@ def phase_clean(args: argparse.Namespace, snapshot: Optional[bytes]) -> bool:
         else:
             cur.execute(
                 "DELETE FROM public.t_alert_record WHERE create_time >= %s AND create_time < %s",
-                (WIND_START, TEST_END),
+                (STREAM_START, TEST_END),
             )
             conn.commit()
             print(f"[clean] deleted {cur.rowcount} synthetic alert rows (no snapshot)")

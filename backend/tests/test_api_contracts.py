@@ -85,3 +85,23 @@ def test_validation_errors_use_stable_error_shape() -> None:
     payload = response.json()
     assert payload["error"]["code"] == "VALIDATION_ERROR"
     assert isinstance(payload["error"]["details"], list)
+
+
+def test_alert_api_uses_polling_and_has_no_removed_features() -> None:
+    settings = Settings(
+        environment="test",
+        auth_enabled=False,
+        trusted_hosts="*",
+        cors_origins="http://testserver",
+    )
+    paths = {
+        path
+        for path, operations in create_app(settings).openapi()["paths"].items()
+        if operations
+    }
+
+    assert "/api/alerts/poll" in paths
+    assert "/api/alerts/{alert_id}/ack" in paths
+    assert "/api/alerts/stream" not in paths
+    assert "/api/engine/replay" not in paths
+    assert "/api/stats/wind-rose" not in paths

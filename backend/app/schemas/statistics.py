@@ -27,14 +27,3 @@ class ExtremesResponse(BaseModel):
     periodType: str
     summary: dict[str, Any]
     series: List[dict[str, Any]]
-
-
-class WindRoseResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    sensorNo: str
-    sectors: List[dict[str, Any]]
-    speedBins: List[dict[str, Any]]
-    matrixPct: List[List[float]]
-    matrixCount: List[List[int]]
-    summary: dict[str, Any]

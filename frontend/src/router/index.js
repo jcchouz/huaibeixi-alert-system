@@ -24,10 +24,6 @@ const routes = [
     redirect: '/analysis'
   },
   {
-    path: '/wind-rose',
-    redirect: '/analysis'
-  },
-  {
     path: '/thresholds',
     redirect: '/analysis'
   }

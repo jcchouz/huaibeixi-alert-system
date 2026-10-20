@@ -40,16 +40,10 @@ class FakeEngine:
         return row
 
 
-class FakeSSE:
-    def publish_threadsafe(self, event: dict) -> None:
-        return None
-
-
 def test_alert_status_two_is_not_supported() -> None:
     service = AlertService(
         FakeAlertRepository(),  # type: ignore[arg-type]
         FakeEngine(),  # type: ignore[arg-type]
-        FakeSSE(),  # type: ignore[arg-type]
     )
 
     with pytest.raises(HTTPException) as error:
@@ -67,7 +61,6 @@ def test_non_threshold_alert_is_forced_to_level_three() -> None:
     service = AlertService(
         repository,  # type: ignore[arg-type]
         FakeEngine(),  # type: ignore[arg-type]
-        FakeSSE(),  # type: ignore[arg-type]
     )
 
     result = service.create_alert(
