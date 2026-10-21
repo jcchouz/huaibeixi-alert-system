@@ -1,7 +1,7 @@
-"""Backward-compatible configuration imports.
+"""向后兼容的配置、序列化和数据库导入入口。
 
-New code should import from ``app.core.config``, ``app.core.serialization`` and
-``app.infrastructure.database``.
+新代码应直接从 ``app.core.config``、``app.core.serialization`` 和
+``app.infrastructure.database`` 导入。
 """
 
 from app.core.config import get_settings

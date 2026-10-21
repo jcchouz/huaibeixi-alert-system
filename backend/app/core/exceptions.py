@@ -1,3 +1,5 @@
+"""统一 API 错误响应和异常处理。"""
+
 from __future__ import annotations
 
 import logging
@@ -12,6 +14,8 @@ logger = logging.getLogger("huaibeixi.errors")
 
 
 class AppError(Exception):
+    """携带公开错误码、状态码和详情的应用异常。"""
+
     def __init__(self, message: str, *, code: str, status_code: int = 400, details: Any = None):
         super().__init__(message)
         self.message = message
@@ -21,6 +25,7 @@ class AppError(Exception):
 
 
 def _error_payload(code: str, message: str, details: Any = None) -> Dict[str, Any]:
+    """生成所有异常处理器共用的错误结构。"""
     return {
         "error": {
             "code": code,
@@ -31,6 +36,7 @@ def _error_payload(code: str, message: str, details: Any = None) -> Dict[str, An
 
 
 def install_exception_handlers(app: FastAPI) -> None:
+    """注册应用异常、参数校验、HTTP 和未知异常处理器。"""
     @app.exception_handler(AppError)
     async def app_error_handler(_: Request, exc: AppError) -> JSONResponse:
         return JSONResponse(

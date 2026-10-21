@@ -1,2 +1,2 @@
-"""Huaibeixi & Yuhuan High-Speed Railway Station Structural Health Monitoring Alert & Analytics Backend."""
+"""淮北西站、玉环站结构健康监测预警与统计分析后端。"""
 __version__ = "2.0.0"

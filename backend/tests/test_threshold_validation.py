@@ -56,9 +56,40 @@ def test_detection_group_counts_are_configured_and_positive() -> None:
     assert settings.detection_confirm_points == 3
     assert settings.detection_stuck_points == 100
     assert settings.detection_offline_points == 5
+    assert settings.detection_condition_unit == "seconds"
+    assert settings.detection_confirm_seconds == 3.0
+    assert settings.detection_stuck_seconds == 100.0
+    assert settings.detection_offline_seconds == 5.0
+
+    point_settings = Settings(
+        environment="test",
+        detection_condition_unit="points",
+    )
+    assert point_settings.detection_condition_unit == "points"
+    assert point_settings.detection_confirm_points == 3
+    assert point_settings.detection_stuck_points == 100
+    assert point_settings.detection_offline_points == 5
 
     with pytest.raises(ValidationError):
         Settings(environment="test", detection_confirm_points=0)
+    with pytest.raises(ValidationError):
+        Settings(
+            environment="test",
+            detection_condition_unit="seconds",
+            detection_confirm_seconds=0,
+        )
+
+
+def test_detection_condition_unit_can_be_switched_by_environment(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("DETECTION_CONDITION_UNIT", "points")
+    point_settings = Settings(environment="test")
+    assert point_settings.detection_condition_unit == "points"
+
+    monkeypatch.setenv("DETECTION_CONDITION_UNIT", "seconds")
+    second_settings = Settings(environment="test")
+    assert second_settings.detection_condition_unit == "seconds"
 
 
 def test_range_min_must_not_exceed_range_max() -> None:

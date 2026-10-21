@@ -1,3 +1,5 @@
+"""阈值查询、更新、批量更新和模拟接口。"""
+
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
@@ -30,6 +32,7 @@ def list_thresholds(
     keyword: Optional[str] = Query(None),
     service: ThresholdService = Depends(get_threshold_service),
 ) -> Dict[str, Any]:
+    """按可选条件列出已加载的阈值规则。"""
     return service.list_thresholds(
         sensor_no=pick(sensorNo, sensor_no),
         physical_quantity=pick(physicalQuantity, physical_quantity),
@@ -44,6 +47,7 @@ def update_threshold(
     body: ThresholdUpdateRequest,
     service: ThresholdService = Depends(get_threshold_service),
 ) -> Dict[str, Any]:
+    """更新单条阈值规则。"""
     return service.update_threshold(threshold_id, body)
 
 
@@ -52,6 +56,7 @@ def batch_update_thresholds(
     body: ThresholdBatchUpdateRequest,
     service: ThresholdService = Depends(get_threshold_service),
 ) -> Dict[str, Any]:
+    """按物理量或指定编号批量更新阈值规则。"""
     return service.batch_update(body)
 
 
@@ -60,4 +65,5 @@ def simulate_threshold(
     body: ThresholdSimulateRequest,
     service: ThresholdService = Depends(get_threshold_service),
 ) -> Dict[str, Any]:
+    """使用历史统计数据对比拟调整阈值。"""
     return service.simulate(body)

@@ -8,11 +8,14 @@
 
 ## 运行职责
 
-- `AlertDetectionWorker` 是生产检测入口，随 FastAPI 生命周期启动，按数据库时间消费最近结束的平均窗口；默认窗口为 1 分钟，可通过 `DETECTION_WINDOW_MINUTES` 配置。
-- 离线超时和死值判定时间独立配置，分别使用 `DETECTION_OFFLINE_TIMEOUT_SECONDS` 和 `DETECTION_STUCK_TIME_SECONDS`。
-- 检测线程负责生成平均窗口统计、通道离线、采集仪离线、阈值超限、传感器死值和超物理量程预警；阈值和超量程判断使用窗口平均值。
+- `AlertDetectionWorker` 是生产检测入口，随 FastAPI 生命周期启动，负责按数据库时间持续检测 `t_monitor` 原始采样点，并周期性生成统计记录。
+- `t_stat_record` 按完整窗口生成，默认窗口为 1 分钟，可通过 `DETECTION_WINDOW_MINUTES` 配置。
+- 通道离线、采集仪离线、阈值超限、传感器死值和超物理量程预警按原始采样点连续命中判定，不等待统计窗口结束。
+- 连续命中条件由 `DETECTION_CONDITION_UNIT` 切换：默认 `seconds`，通过 `DETECTION_CONFIRM_SECONDS`、`DETECTION_OFFLINE_SECONDS` 和 `DETECTION_STUCK_SECONDS` 配置；`points` 模式保留原行为，通过 `DETECTION_CONFIRM_POINTS`、`DETECTION_OFFLINE_POINTS` 和 `DETECTION_STUCK_POINTS` 配置，持续时间由组数和 `t_sensor.frequency` 换算。
+- 实时预警扫描周期由 `DETECTION_INTERVAL_SECONDS` 配置，统计窗口只影响 `t_stat_record`，不得阻塞实时预警。
+- 实时扫描通过 `DETECTION_ALERT_OVERLAP_SECONDS` 短回看以覆盖外部事务提交延迟，重复样本必须依据 `last_ts` 去重。
 - `continuous_simulator.py` 只负责持续向 `t_monitor` 写入测试数据，并周期性制造各类预警场景，不执行检测，不写入统计或预警表。
-- 多个后端实例同时运行时，检测通过 PostgreSQL advisory lock 选主，避免重复检测。
+- 多个后端实例同时运行时，实时预警和统计任务分别通过 PostgreSQL advisory lock 选主，避免重复处理。
 
 ## 修改原则
 

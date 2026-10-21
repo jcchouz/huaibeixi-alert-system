@@ -1,1 +1,1 @@
-"""Cross-cutting infrastructure: configuration, logging, security, and errors."""
+"""配置、日志、安全和错误处理等公共基础设施。"""

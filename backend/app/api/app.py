@@ -1,3 +1,5 @@
+"""应用装配和生命周期管理。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -19,18 +21,25 @@ from app.services.detection import AlertDetectionWorker
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
+    """创建共享检测引擎、检测 Worker、中间件和路由。"""
     settings = settings or get_settings()
     configure_logging(settings)
 
+    # 引擎负责检测规则和运行状态，Worker 只负责按周期驱动引擎。
     engine_instance = AlertAnalyticsEngine(
         confirm_points=settings.detection_confirm_points,
         stuck_points=settings.detection_stuck_points,
         offline_points=settings.detection_offline_points,
+        condition_unit=settings.detection_condition_unit,
+        confirm_seconds=settings.detection_confirm_seconds,
+        stuck_seconds=settings.detection_stuck_seconds,
+        offline_seconds=settings.detection_offline_seconds,
     )
     detection_worker = AlertDetectionWorker(engine_instance, settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # 接收请求前先初始化数据库连接池并加载检测元数据。
         init_db_pool(
             minconn=settings.db_pool_minconn,
             maxconn=settings.db_pool_maxconn,
@@ -41,6 +50,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
+            # 先停止后台检测任务，再释放数据库连接。
             await asyncio.to_thread(detection_worker.stop)
             close_db_pool()
 
@@ -58,6 +68,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.detection_worker = detection_worker
     app.dependency_overrides[get_settings] = lambda: settings
 
+    # 统一处理错误、请求编号、主机校验和跨域策略。
     install_exception_handlers(app)
     app.add_middleware(RequestContextMiddleware)
     if settings.allowed_hosts and "*" not in settings.allowed_hosts:
@@ -72,6 +83,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     api_prefix = settings.api_prefix.rstrip("/")
+    # REST 接口主要用于本地联调和人工测试；生产检测由生命周期中的
+    # 后台 Worker 独立完成。
     app.include_router(health.router, prefix=api_prefix)
     app.include_router(overview.router, prefix=api_prefix)
     app.include_router(alerts.router, prefix=api_prefix)

@@ -1,3 +1,5 @@
+"""统计通道和极值查询接口。"""
+
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
@@ -19,6 +21,7 @@ router = APIRouter(prefix="/stats", tags=["Statistics"])
 def list_stat_sensors(
     service: StatisticsService = Depends(get_statistics_service),
 ) -> Dict[str, Any]:
+    """列出已有持久化统计数据的通道。"""
     return service.list_sensors()
 
 
@@ -36,6 +39,7 @@ def get_stat_extremes(
     limit: int = Query(500, ge=10, le=2000),
     service: StatisticsService = Depends(get_statistics_service),
 ) -> Dict[str, Any]:
+    """返回指定传感器和通道的极值序列和汇总。"""
     return service.extremes(
         sensor_no=pick(sensor_no, sensorNo, "stn-12-b"),
         channel=channel,

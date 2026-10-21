@@ -1,1 +1,1 @@
-"""Application use cases. HTTP routes should stay thin."""
+"""应用业务用例；HTTP 路由层保持轻量。"""

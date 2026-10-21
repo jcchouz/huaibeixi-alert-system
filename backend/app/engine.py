@@ -1,4 +1,4 @@
-"""Backward-compatible import path for the alert engine."""
+"""预警引擎的向后兼容导入入口。"""
 
 from app.domain.engine import AlertAnalyticsEngine
 

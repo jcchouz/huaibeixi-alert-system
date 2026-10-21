@@ -118,7 +118,7 @@ goto :fail
 :missing_env
 echo.
 echo ERROR: backend\.env is missing.
-echo Copy backend\.env.example to backend\.env and configure the database.
+echo Create backend\.env and configure the database.
 goto :fail
 
 :missing_npm

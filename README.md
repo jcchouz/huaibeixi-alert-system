@@ -39,8 +39,8 @@ backend/
    .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
    ```
 
-2. Copy `backend/.env.example` to `backend/.env` and configure the database.
-   `backend/.env` is ignored by Git.
+2. Create `backend/.env` and configure the database. Local development and
+   production both use this file. `backend/.env` is ignored by Git.
 
 3. Start the backend, frontend and continuous data simulator:
 
@@ -60,15 +60,20 @@ To start only the backend and frontend:
 .\start_all.bat --no-simulator
 ```
 
-Production only needs the backend service. It continuously consumes the latest
-completed average window from `t_monitor` (one minute by default), runs all alert
-detection in-process, and survives multiple backend instances through a
-PostgreSQL advisory leader lock. Configure the window with
+Production only needs the backend service. It scans newly arrived raw samples
+from `t_monitor` for alerts every second by default and writes one-minute
+statistics to `t_stat_record`. Multiple backend instances are coordinated
+through PostgreSQL advisory leader locks. Configure the realtime alert interval
+with `DETECTION_INTERVAL_SECONDS`, the commit-delay lookback with
+`DETECTION_ALERT_OVERLAP_SECONDS`, and the statistics window with
 `DETECTION_WINDOW_MINUTES`. Sampling interval is derived from
-`t_sensor.frequency`; threshold/out-of-range, stuck and offline detection use
+`t_sensor.frequency`. `DETECTION_CONDITION_UNIT=seconds` is the default and
+uses `DETECTION_CONFIRM_SECONDS`, `DETECTION_STUCK_SECONDS` and
+`DETECTION_OFFLINE_SECONDS` for threshold/out-of-range, stuck and offline
+detection. Set `DETECTION_CONDITION_UNIT=points` to keep the original
 `DETECTION_CONFIRM_POINTS`, `DETECTION_STUCK_POINTS` and
-`DETECTION_OFFLINE_POINTS`. Set `DETECTION_ENABLED=false` only when detection
-should run in a separate deployment.
+`DETECTION_OFFLINE_POINTS` behavior. Set `DETECTION_ENABLED=false` only when
+detection should run in a separate deployment.
 
 ## Alert Categories
 
@@ -127,8 +132,7 @@ Live database validation tools are in `backend/tools/`.
 
 ## Docker
 
-Create `backend/.env` from `backend/.env.production.example`, fill in the database
-credentials, then run:
+Configure the database credentials in `backend/.env`, then run:
 
 ```powershell
 docker compose up --build -d

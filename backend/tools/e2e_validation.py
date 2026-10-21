@@ -1,19 +1,19 @@
 #!/usr/bin/env python
-"""End-to-end validation harness for the bridge alert & analytics engine.
+"""桥梁预警与统计分析引擎端到端验证工具。
 
-Phases
-------
-precheck : inspect DB state and rule set (read-only)
-seed     : write synthetic ``t_monitor`` traffic (default 4000 rows/s)
-detect   : drive ``AlertAnalyticsEngine.step_detection`` window by window
-verify   : assert produced alerts and 1m stats
-clean    : delete synthetic rows and restore the ``t_alert_record`` snapshot
+执行阶段
+--------
+precheck : 只读检查数据库状态和规则集
+seed     : 写入模拟 ``t_monitor`` 数据，默认每秒 4000 行
+detect   : 按窗口驱动 ``AlertAnalyticsEngine.step_detection``
+verify   : 校验生成的预警和一分钟统计
+clean    : 删除模拟数据并恢复 ``t_alert_record`` 快照
 all      : seed -> detect -> verify -> clean
 
-The harness only touches:
-  * ``public.t_monitor``      synthetic window rows (deleted in clean)
-  * ``public.t_stat_record``  engine-produced rows for that window (deleted)
-  * ``public.t_alert_record`` engine-produced rows (fully snapshotted/restored)
+本工具只操作以下数据：
+  * ``public.t_monitor``      模拟窗口数据，在 clean 阶段删除
+  * ``public.t_stat_record``  引擎为该窗口生成的统计，在 clean 阶段删除
+  * ``public.t_alert_record`` 引擎生成的预警，执行前快照并在结束后恢复
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ from app.config import DSN, get_db_cursor
 from app.engine import AlertAnalyticsEngine
 
 # --------------------------------------------------------------------------- #
-# Test plan constants
+# 测试计划常量
 # --------------------------------------------------------------------------- #
 STREAM_START = datetime(2026, 10, 18, 22, 0, 0)
 WINDOW_SECONDS = 60
@@ -51,27 +51,27 @@ DEFAULT_TARGET_RATE = 4000.0
 DEFAULT_WINDOWS = 4
 INSERT_BATCH = 20000
 
-# (lower sensor_no, channel) -> {window_index: spec}
+# (小写 sensor_no, channel) -> {窗口序号: 场景配置}
 ANOMALIES: Dict[Tuple[str, str], Dict[int, Dict[str, Any]]] = {
     ("wy-sj-01", "x"): {
-        0: {"mode": "band", "lo": 36.5, "hi": 37.5},     # L3 (yellow)
-        1: {"mode": "band", "lo": 39.5, "hi": 40.5},     # L2 (orange) escalation
-        2: {"mode": "band", "lo": 43.5, "hi": 44.5},     # L1 (red) escalation
-        3: {"mode": "band", "lo": 28.0, "hi": 34.0},     # back inside L3 -> recover
+        0: {"mode": "band", "lo": 36.5, "hi": 37.5},     # 三级黄色预警
+        1: {"mode": "band", "lo": 39.5, "hi": 40.5},     # 升级为二级橙色预警
+        2: {"mode": "band", "lo": 43.5, "hi": 44.5},     # 升级为一级红色预警
+        3: {"mode": "band", "lo": 28.0, "hi": 34.0},     # 回到三级阈值内，模拟恢复
     },
     ("wy-sj-01", "y"): {0: {"mode": "const", "v": 30.0}},   # 传感器死值
     ("zd-wg-01", "x"): {1: {"mode": "skip"}, 2: {"mode": "skip"}},   # 传感器离线
     ("zd-wg-01", "y"): {1: {"mode": "skip"}, 2: {"mode": "skip"}},   # 采集仪离线
     ("wlg-10", ""): {
-        1: {"mode": "band", "lo": -260.0, "hi": -255.0},  # LOWER L3
-        2: {"mode": "band", "lo": -330.0, "hi": -322.0},  # 超物理量程 + LOWER L1
+        1: {"mode": "band", "lo": -260.0, "hi": -255.0},  # 低于三级下限
+        2: {"mode": "band", "lo": -330.0, "hi": -322.0},  # 超物理量程且低于一级下限
     },
-    ("yb-sx01-a", "stress"): {0: {"mode": "pairs", "points": [(0.0, 0.0), (1.0, 0.0), (5.0, 0.0)]}},  # GAP
+    ("yb-sx01-a", "stress"): {0: {"mode": "pairs", "points": [(0.0, 0.0), (1.0, 0.0), (5.0, 0.0)]}},  # 采样间隔异常
 }
 
-# sensor identity -> (final alert_status, final alert_level)
-# The device-level DAQ alert key is added dynamically in ``phase_verify`` because
-# the engine keys it on the collect-instrument id, not on the sensor number.
+# 传感器标识 -> (最终 alert_status, 最终 alert_level)
+# 采集仪级预警的唯一键使用采集仪 id，而不是传感器编号，
+# 因此会在 ``phase_verify`` 中动态加入预期结果。
 EXPECTED_ALERTS: List[Tuple[str, int, int]] = [
     ("wy-sj-01:x:阈值超限", 0, 1),
     ("wy-sj-01:y:传感器死值", 0, 1),
@@ -84,7 +84,7 @@ EXPECTED_ALERTS: List[Tuple[str, int, int]] = [
 DAQ_SENSOR = "zd-wg-01"
 
 # --------------------------------------------------------------------------- #
-# Helpers
+# 辅助函数
 # --------------------------------------------------------------------------- #
 def seq_dt(i: int, win_start: datetime, n: int) -> datetime:
     return win_start + timedelta(seconds=60.0 * i / n)
@@ -99,7 +99,7 @@ def rule_key(rule: Dict[str, Any]) -> Tuple[str, str]:
 
 
 def normal_band(rule: Dict[str, Any]) -> Tuple[float, float]:
-    """Centre/amplitude of a benign signal that sits inside level-3 limits."""
+    """返回位于三级阈值内的正常信号中心值和幅值。"""
     lo = rule.get("level3_lower")
     hi = rule.get("level3_upper")
     lo = float(lo) if lo is not None else 0.0
@@ -120,7 +120,7 @@ def normal_value(rule: Dict[str, Any], i: int) -> float:
 
 
 def window_points(rule: Dict[str, Any], n: int, spec: Optional[Dict[str, Any]]) -> List[Tuple[float, float]]:
-    """Return [(offset_seconds, value), ...] for one rule in one window."""
+    """返回单条规则在一个窗口内的 (秒偏移, 数值) 列表。"""
     mode = spec.get("mode") if spec else None
     if mode == "pairs":
         return [(float(off), float(val)) for off, val in spec["points"]]
@@ -180,7 +180,7 @@ def build_window_rows(
 
 
 def insert_rows(rows: List[Tuple[Any, ...]], target_rate: float, pace: bool = True) -> float:
-    """Insert rows paced to ``target_rate`` rows/s; returns achieved rows/s."""
+    """按 ``target_rate`` 行/秒写入数据，并返回实际写入速率。"""
     if not rows:
         return 0.0
     conn = psycopg2.connect(DSN)
@@ -192,7 +192,7 @@ def insert_rows(rows: List[Tuple[Any, ...]], target_rate: float, pace: bool = Tr
             batch = rows[start:start + INSERT_BATCH]
             payload = io.StringIO()
             for sensor_no, channel, value, ts in batch:
-                # t_monitor identifiers and numeric values contain no CSV delimiters.
+                # t_monitor 的标识符和数值不包含 CSV 分隔符。
                 payload.write(
                     f"{sensor_no},{channel},{value},{ts.strftime('%Y-%m-%d %H:%M:%S.%f')}\n"
                 )
@@ -216,7 +216,7 @@ def insert_rows(rows: List[Tuple[Any, ...]], target_rate: float, pace: bool = Tr
 
 
 def fetch_alert_map() -> Dict[str, Dict[str, Any]]:
-    """alert identity -> latest alert row (by seq)."""
+    """返回预警标识到最新预警记录（按 seq）的映射。"""
     with get_db_cursor() as cur:
         cur.execute(
             """
@@ -255,7 +255,7 @@ def restore_alert_record(conn: Any, payload: bytes) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Phases
+# 执行阶段
 # --------------------------------------------------------------------------- #
 def phase_precheck(args: argparse.Namespace) -> bool:
     rules = load_rules()
@@ -419,7 +419,7 @@ def phase_verify(args: argparse.Namespace) -> bool:
         )
         c.check(int(row["alert_level"]) == level, f"alert {key} level == {level}", f"got {row['alert_level']}")
 
-    # escalation / debounce specifics
+    # 校验级别升级和连续命中次数。
     row = alerts.get("wy-sj-01:x:阈值超限")
     if row:
         c.check(int(row["trigger_count"]) >= 3, "wy-sj-01/x 阈值超限 debounced across windows",
@@ -445,7 +445,7 @@ def phase_verify(args: argparse.Namespace) -> bool:
         c.check(int(row["trigger_count"]) >= 2, "采集仪离线 aggregated over >=2 windows",
                 f"trigger_count={row['trigger_count']}")
 
-    # 1m statistics
+    # 校验一分钟统计结果。
     with get_db_cursor() as cur:
         cur.execute(
             """
@@ -500,7 +500,7 @@ def phase_verify(args: argparse.Namespace) -> bool:
         else:
             c.check(int(r["sample_count"]) == 3, "yb-sx01-a/stress sample_count == 3", f"got {r['sample_count']}")
 
-    # unexpected alerts created in the synthetic window
+    # 检查模拟时间窗口内是否产生预期外的预警。
     expected_keys = {k for k, _, _ in expected_list}
     with get_db_cursor() as cur:
         cur.execute(

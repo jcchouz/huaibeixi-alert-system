@@ -1,3 +1,5 @@
+"""存活检查和数据库就绪检查接口。"""
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.api.deps import get_engine
@@ -13,6 +15,7 @@ def health_check(
     request: Request,
     engine: AlertAnalyticsEngine = Depends(get_engine),
 ) -> dict:
+    """不访问数据库，返回进程存活以及引擎和 Worker 状态。"""
     response = {
         "status": "ok",
         "service": "huaibeixi-alert-backend",
@@ -29,6 +32,7 @@ def readiness_check(
     request: Request,
     engine: AlertAnalyticsEngine = Depends(get_engine),
 ) -> dict:
+    """数据库查询成功后才返回就绪状态。"""
     try:
         with get_db_cursor() as cur:
             cur.execute("SELECT 1 AS ready")

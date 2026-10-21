@@ -1,3 +1,5 @@
+"""仪表盘和图表的统计查询组装。"""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -11,14 +13,18 @@ from app.services.common import parse_datetime
 
 
 class StatisticsService:
+    """将持久化统计结果与实时引擎元数据组合。"""
+
     def __init__(self, repository: StatisticsRepository, engine: AlertAnalyticsEngine):
         self.repository = repository
         self.engine = engine
 
     def list_sensors(self) -> Dict[str, Any]:
+        """列出已有统计记录的通道及其最新统计值。"""
         with get_db_cursor() as cur:
             rows = self.repository.list_sensor_rows(cur)
 
+        # 将数据库聚合结果与内存中的规则元数据合并。
         items: List[Dict[str, Any]] = []
         for row in rows:
             sensor_no = row["sensor_no"]
@@ -82,9 +88,11 @@ class StatisticsService:
         end_time: str | None,
         limit: int,
     ) -> Dict[str, Any]:
+        """返回极值时间序列和区间汇总。"""
         sensor_no = (sensor_no or "stn-12-b").strip().lower()
         period_type = "1m"
         with get_db_cursor() as cur:
+            # 调用方未指定通道时，自动解析默认通道。
             if channel is None:
                 channel = self.repository.resolve_channel(cur, sensor_no)
             channel = channel.strip()
@@ -122,6 +130,7 @@ class StatisticsService:
                 ),
             )
 
+        # 组装图表数据点，并汇总整个时间区间的极值。
         key = self.engine.make_key(sensor_no, channel)
         rule = self.engine.channel_states.get(key) or {}
         sensor_meta = self.engine.sensor_meta.get(sensor_no) or {}
@@ -168,6 +177,7 @@ class StatisticsService:
             )
 
         if int(summary_row.get("bucket_count") or 0) > 0:
+            # 请求时间范围内的最终汇总以 SQL 聚合结果为准。
             window_max = float(summary_row["window_max"])
             window_max_time = serialize_val(summary_row["window_max_time"])
             window_min = float(summary_row["window_min"])

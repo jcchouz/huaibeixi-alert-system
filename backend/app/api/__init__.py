@@ -1,1 +1,1 @@
-"""HTTP application and route modules."""
+"""HTTP 应用与路由模块。"""

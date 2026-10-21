@@ -1,3 +1,5 @@
+"""请求编号、访问日志和 Prometheus HTTP 指标。"""
+
 from __future__ import annotations
 
 import logging
@@ -24,10 +26,13 @@ REQUEST_LATENCY = Histogram(
 
 
 class RequestContextMiddleware(BaseHTTPMiddleware):
+    """为每次请求附加编号，并记录指标和访问日志。"""
+
     async def dispatch(self, request: Request, call_next) -> Response:
         request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
         request.state.request_id = request_id
         started = time.perf_counter()
+        # 成功和失败的请求都保留同一个请求编号。
         try:
             response = await call_next(request)
         except Exception:
@@ -41,6 +46,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             )
             raise
         duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        # 使用路由模板，避免指标标签出现大量动态值。
         route_path = request.scope.get("route")
         metric_path = getattr(route_path, "path", "unmatched")
         REQUEST_COUNT.labels(request.method, metric_path, str(response.status_code)).inc()

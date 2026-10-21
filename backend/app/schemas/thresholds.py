@@ -1,3 +1,5 @@
+"""阈值管理 API 请求和响应模型。"""
+
 from __future__ import annotations
 
 from typing import Any, List, Optional
@@ -6,6 +8,8 @@ from pydantic import BaseModel, ConfigDict
 
 
 class ThresholdUpdateRequest(BaseModel):
+    """阈值和物理量程的部分更新字段。"""
+
     level1_upper: Optional[float] = None
     level1_lower: Optional[float] = None
     level2_upper: Optional[float] = None
@@ -27,6 +31,8 @@ class ThresholdUpdateRequest(BaseModel):
 
 
 class ThresholdBatchUpdateRequest(ThresholdUpdateRequest):
+    """批量选择条件以及可选的公共阈值覆盖值。"""
+
     physical_quantity: Optional[str] = None
     physicalQuantity: Optional[str] = None
     threshold_ids: Optional[List[str]] = None
@@ -34,6 +40,8 @@ class ThresholdBatchUpdateRequest(ThresholdUpdateRequest):
 
 
 class ThresholdSimulateRequest(BaseModel):
+    """阈值模拟使用的拟调整阈值和时间范围。"""
+
     sensor_no: Optional[str] = None
     sensorNo: Optional[str] = None
     channel: Optional[str] = ""
@@ -56,6 +64,8 @@ class ThresholdSimulateRequest(BaseModel):
 
 
 class ThresholdRule(BaseModel):
+    """阈值管理接口返回的规则记录。"""
+
     model_config = ConfigDict(extra="allow")
 
     id: Optional[str] = None
@@ -67,6 +77,8 @@ class ThresholdRule(BaseModel):
 
 
 class ThresholdListResponse(BaseModel):
+    """筛选后的阈值列表和可用筛选项。"""
+
     items: List[ThresholdRule]
     total: int
     physicalQuantities: List[str]
@@ -74,17 +86,23 @@ class ThresholdListResponse(BaseModel):
 
 
 class ThresholdUpdateResponse(BaseModel):
+    """单条阈值更新响应。"""
+
     success: bool
     threshold: ThresholdRule
 
 
 class ThresholdBatchUpdateResponse(BaseModel):
+    """批量阈值更新响应。"""
+
     success: bool
     updatedCount: int
     physicalQuantity: Optional[str] = None
 
 
 class ThresholdSimulationResponse(BaseModel):
+    """阈值对比序列和汇总。"""
+
     model_config = ConfigDict(extra="allow")
 
     sensorNo: str

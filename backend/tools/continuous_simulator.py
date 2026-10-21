@@ -1,14 +1,14 @@
 #!/usr/bin/env python
-"""Continuously write synthetic bridge monitoring data to t_monitor.
+"""持续向 t_monitor 写入模拟桥梁监测数据。
 
-Sample rates are loaded from ``t_sensor.frequency``.
+采样频率从 ``t_sensor.frequency`` 读取。
 
-Alert scenarios included:
-  * threshold exceedance: stn-12-b/stress
-  * stuck sensor: wy-sj-01/x
-  * out-of-physical-range: wprs-01
-  * sensor offline: zd-wg-01/x
-  * acquisition instrument offline: accl-03 and accl-04 channels
+包含的预警场景：
+  * 阈值超限：stn-12-b/stress
+  * 传感器死值：wy-sj-01/x
+  * 超物理量程：wprs-01
+  * 传感器离线：zd-wg-01/x
+  * 采集仪离线：accl-03 和 accl-04 通道
 """
 
 from __future__ import annotations
@@ -43,6 +43,8 @@ OOR_CHANNELS = {("wprs-01", "")}
 
 @dataclass(frozen=True)
 class ChannelPlan:
+    """单个通道的采样和波形配置。"""
+
     sensor_no: str
     channel: str
     sample_rate: float
@@ -55,6 +57,7 @@ class ChannelPlan:
 
 
 def load_channel_plans() -> list[ChannelPlan]:
+    """加载阈值和传感器元数据，并生成模拟计划。"""
     query = """
         SELECT t.sensor_no, COALESCE(t.channel, '') AS channel,
                t.physical_quantity, t.level3_lower, t.level3_upper,
@@ -69,6 +72,7 @@ def load_channel_plans() -> list[ChannelPlan]:
             cur.execute(query)
             rows = cur.fetchall()
 
+    # 将数据库元数据转换为波形参数和预警场景配置。
     plans: list[ChannelPlan] = []
     for sensor_no, channel, quantity, level3_lower, level3_upper, range_min, range_max, sensor_name, frequency in rows:
         sensor_key = str(sensor_no).strip().lower()
@@ -107,6 +111,7 @@ def load_channel_plans() -> list[ChannelPlan]:
             base_value = 0.0
             amplitude = 0.05
 
+        # 为指定测试通道选择固定的预警场景。
         scenario = "normal"
         dc_offset = 0.0
         if is_acceleration:
@@ -146,6 +151,7 @@ def load_channel_plans() -> list[ChannelPlan]:
 
 
 def should_skip(plan: ChannelPlan) -> bool:
+    """跳过用于模拟传感器或采集仪离线的通道。"""
     key = (plan.sensor_no.lower(), plan.channel)
     if key in OFFLINE_CHANNELS:
         return True
@@ -153,6 +159,7 @@ def should_skip(plan: ChannelPlan) -> bool:
 
 
 def channel_value(plan: ChannelPlan, elapsed_seconds: float) -> float:
+    """生成一个正常、死值或超量程样本。"""
     if plan.scenario == "stuck":
         return plan.base_value
     t = elapsed_seconds
@@ -164,6 +171,7 @@ def channel_value(plan: ChannelPlan, elapsed_seconds: float) -> float:
 
 
 def insert_rows(rows: list[tuple[str, str, float, datetime]]) -> None:
+    """将生成的样本批量写入 t_monitor。"""
     if not rows:
         return
     with psycopg2.connect(DSN) as conn:
@@ -180,6 +188,7 @@ def insert_rows(rows: list[tuple[str, str, float, datetime]]) -> None:
 
 
 def database_now() -> datetime:
+    """使用数据库时间作为模拟起始时间。"""
     with psycopg2.connect(DSN) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT LOCALTIMESTAMP")
@@ -187,14 +196,17 @@ def database_now() -> datetime:
 
 
 def parse_args() -> argparse.Namespace:
+    """解析模拟器运行参数。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--max-seconds", type=int, default=0, help="0 means run forever")
     return parser.parse_args()
 
 
 def main() -> int:
+    """持续生成按秒分批的监测样本。"""
     args = parse_args()
 
+    # 生成正常写入和有意跳过的通道集合。
     plans = load_channel_plans()
     if not plans:
         raise SystemExit("No threshold channels found")
@@ -224,6 +236,7 @@ def main() -> int:
 
     stop_requested = [False]
 
+    # 捕获退出信号，保证最终统计信息正常输出。
     def request_stop(_signum: int, _frame: Any) -> None:
         stop_requested[0] = True
 
@@ -245,6 +258,7 @@ def main() -> int:
             tick_start = time.monotonic()
             second_start = simulation_start + timedelta(seconds=second_index)
             rows: list[tuple[str, str, float, datetime]] = []
+            # 生成当前一秒内应写入的全部样本。
             for plan in active_plans:
                 first_index = math.ceil(second_index * plan.sample_rate)
                 last_index = math.ceil((second_index + 1) * plan.sample_rate)
@@ -259,6 +273,7 @@ def main() -> int:
                         )
                     )
 
+            # 模拟器只写数据库，检测由后端读取 t_monitor 独立完成。
             insert_rows(rows)
             total_rows += len(rows)
             second_index += 1
@@ -274,6 +289,7 @@ def main() -> int:
                 )
                 last_report = now_monotonic
 
+            # 对齐下一批数据，保持稳定的一秒节奏。
             next_tick += 1.0
             sleep_seconds = next_tick - time.monotonic()
             if sleep_seconds > 0:

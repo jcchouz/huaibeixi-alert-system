@@ -1,3 +1,5 @@
+"""实时预警扫描和完整统计窗口处理的后台 Worker。"""
+
 from __future__ import annotations
 
 import logging
@@ -15,11 +17,12 @@ from app.infrastructure.database import get_db_cursor
 
 logger = logging.getLogger("huaibeixi.detection")
 
-DETECTION_ADVISORY_LOCK_KEY = 0x48425844
+ALERT_ADVISORY_LOCK_KEY = 0x48425844
+STATISTICS_ADVISORY_LOCK_KEY = 0x48425845
 
 
 class AlertDetectionWorker:
-    """Continuously turn t_monitor windows into statistics and alerts."""
+    """独立运行实时预警检测和统计窗口生成。"""
 
     def __init__(
         self,
@@ -32,66 +35,161 @@ class AlertDetectionWorker:
         self.settings = settings
         self.clock = clock
         self.interval_seconds = settings.detection_interval_seconds
+        self.alert_overlap_seconds = settings.detection_alert_overlap_seconds
         self.lag_seconds = settings.detection_lag_seconds
         self.window_minutes = settings.detection_window_minutes
         self.max_catchup_windows = settings.detection_max_catchup_windows
 
+        # 两条 Worker 线程共享的生命周期和并发状态。
         self._stop_event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._alert_thread: Optional[threading.Thread] = None
+        self._statistics_thread: Optional[threading.Thread] = None
         self._lock_connection: Optional[Any] = None
+        self._statistics_lock_connection: Optional[Any] = None
         self._state_lock = threading.Lock()
+        self._alert_cycle_lock = threading.Lock()
+        self._statistics_cycle_lock = threading.Lock()
         self._leader = False
+        self._statistics_leader = False
         self._running = False
+        self._last_alert_scan_at: Optional[datetime] = None
         self._last_window_end: Optional[datetime] = None
         self._last_run_at: Optional[datetime] = None
         self._last_completed_at: Optional[datetime] = None
         self._last_result: Optional[Dict[str, Any]] = None
+        self._last_alert_result: Optional[Dict[str, Any]] = None
         self._last_error: Optional[str] = None
-        self._cycles = 0
+        self._last_alert_error: Optional[str] = None
+        self._last_statistics_error: Optional[str] = None
+        self._alert_cycles = 0
+        self._statistics_cycles = 0
 
     def start(self) -> None:
+        """分别启动实时预警线程和统计线程。"""
+        threads: List[threading.Thread] = []
         with self._state_lock:
-            if self._thread and self._thread.is_alive():
+            # 任一后台线程仍存活时，重复调用启动不会创建新线程。
+            if (
+                self._alert_thread
+                and self._alert_thread.is_alive()
+            ) or (
+                self._statistics_thread
+                and self._statistics_thread.is_alive()
+            ):
                 return
             self._stop_event.clear()
             self._running = True
-            self._thread = threading.Thread(
-                target=self._run_loop,
-                name="alert-detection-worker",
+            self._alert_thread = threading.Thread(
+                target=self._run_alert_loop,
+                name="alert-realtime-worker",
                 daemon=True,
             )
-            self._thread.start()
+            self._statistics_thread = threading.Thread(
+                target=self._run_statistics_loop,
+                name="alert-statistics-worker",
+                daemon=True,
+            )
+            threads = [self._alert_thread, self._statistics_thread]
+        for thread in threads:
+            thread.start()
         logger.info(
             "Alert detection worker started "
-            "(window=%sm, interval=%ss, lag=%ss, catchup=%s).",
-            self.window_minutes,
+            "(alerts=%ss, overlap=%ss, statistics=%sm, stats-lag=%ss, catchup=%s).",
             self.interval_seconds,
+            self.alert_overlap_seconds,
+            self.window_minutes,
             self.lag_seconds,
             self.max_catchup_windows,
         )
 
     def stop(self) -> None:
+        """通知两条循环停止，释放选主锁并清理线程状态。"""
         self._stop_event.set()
         with self._state_lock:
-            thread = self._thread
-        if thread and thread.is_alive():
+            threads = [
+                thread
+                for thread in (self._alert_thread, self._statistics_thread)
+                if thread and thread.is_alive()
+            ]
+        for thread in threads:
             thread.join(timeout=30)
         self._release_leader_lock()
+        self._release_statistics_leader_lock()
         with self._state_lock:
             self._running = False
             self._leader = False
-            self._thread = None
+            self._statistics_leader = False
+            self._alert_thread = None
+            self._statistics_thread = None
         logger.info("Alert detection worker stopped.")
 
     def run_once(self, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
-        """Run all currently eligible average windows once."""
-        if not self._ensure_leader():
-            return []
-
+        """执行一次手动检测，用于测试或本地诊断。"""
         current_time = now or self._current_time()
-        with self._state_lock:
-            self._last_run_at = current_time
+        # 两条链路彼此独立，其中一条未取得 advisory lock 不影响另一条。
+        if self._ensure_leader():
+            self.scan_alerts_once(current_time)
+        if self._ensure_statistics_leader():
+            return self.process_statistics_once(current_time)
+        return []
 
+    def scan_alerts_once(self, current_time: datetime) -> Optional[Dict[str, Any]]:
+        """从上一次水位开始扫描样本，并保留短时间重叠回看。"""
+        with self._alert_cycle_lock:
+            with self._state_lock:
+                self._last_run_at = current_time
+                last_alert_scan_at = self._last_alert_scan_at
+
+            if last_alert_scan_at is None:
+                # 首轮只需覆盖一个扫描间隔和事务提交延迟重叠时间。
+                alert_start = current_time - timedelta(
+                    seconds=max(
+                        self.interval_seconds,
+                        self.alert_overlap_seconds,
+                    )
+                )
+            else:
+                # 少量回看用于覆盖提交延迟，重复样本由各通道 last_ts 去重。
+                alert_start = last_alert_scan_at - timedelta(
+                    seconds=self.alert_overlap_seconds
+                )
+            if current_time <= alert_start:
+                return None
+
+            alert_result = self.engine.scan_realtime_alerts(
+                alert_start,
+                current_time,
+            )
+            summary = {
+                "windowStart": serialize_val(alert_start),
+                "windowEnd": serialize_val(current_time),
+                "rawPointsProcessed": int(
+                    alert_result.get("rawPointsProcessed") or 0
+                ),
+                "triggeredAlertsCount": int(
+                    alert_result.get("triggeredAlertsCount") or 0
+                ),
+                "elapsedMs": alert_result.get("elapsedMs"),
+            }
+            with self._state_lock:
+                # 只有扫描成功后，才推进实时预警水位。
+                self._last_alert_scan_at = current_time
+                self._last_alert_result = summary
+                self._last_alert_error = None
+                self._last_error = None
+                self._alert_cycles += 1
+            return summary
+
+    def process_statistics_once(self, current_time: datetime) -> List[Dict[str, Any]]:
+        """按顺序处理当前所有已到期的统计窗口。"""
+        with self._statistics_cycle_lock:
+            return self._process_statistics_once(current_time)
+
+    def _process_statistics_once(
+        self,
+        current_time: datetime,
+    ) -> List[Dict[str, Any]]:
+        """查找已到期的完整窗口，并按顺序逐个持久化。"""
         eligible_end = self.latest_eligible_window_end(current_time)
         with self._state_lock:
             last_window_end = self._last_window_end
@@ -100,8 +198,10 @@ class AlertDetectionWorker:
             return []
 
         if last_window_end is None:
+            # 首次运行从最近一个完整窗口开始。
             window_ends = [eligible_end]
         else:
+            # 从上一次完成位置继续，并受最大补处理窗口数限制。
             first_end = last_window_end + timedelta(minutes=self.window_minutes)
             earliest_end = eligible_end - timedelta(
                 minutes=max(0, self.max_catchup_windows - 1) * self.window_minutes
@@ -124,29 +224,31 @@ class AlertDetectionWorker:
         results: List[Dict[str, Any]] = []
         for window_end in window_ends:
             window_start = window_end - timedelta(minutes=self.window_minutes)
-            result = self.engine.step_detection(
+            result = self.engine.record_statistics_window(
                 window_start,
                 window_end,
                 period_type=f"{self.window_minutes}m",
             )
             results.append(result)
             with self._state_lock:
+                # 每完成一个窗口就推进一次统计水位。
                 self._last_window_end = window_end
                 self._last_result = {
                     "windowStart": serialize_val(window_start),
                     "windowEnd": serialize_val(window_end),
                     "rawPointsProcessed": int(result.get("rawPointsProcessed") or 0),
                     "upsertedStatsCount": int(result.get("upsertedStatsCount") or 0),
-                    "triggeredAlertsCount": int(result.get("triggeredAlertsCount") or 0),
                     "elapsedMs": result.get("elapsedMs"),
                 }
                 self._last_completed_at = current_time
+                self._last_statistics_error = None
                 self._last_error = None
-                self._cycles += 1
+                self._statistics_cycles += 1
 
         return results
 
     def latest_eligible_window_end(self, now: datetime) -> datetime:
+        """应用落库延迟和统计周期后，返回最近完整窗口结束时间。"""
         cutoff = now - timedelta(seconds=self.lag_seconds)
         day_start = cutoff.replace(hour=0, minute=0, second=0, microsecond=0)
         elapsed_minutes = int((cutoff - day_start).total_seconds() // 60)
@@ -156,6 +258,7 @@ class AlertDetectionWorker:
         return block_start
 
     def _current_time(self) -> datetime:
+        """优先使用注入时钟，否则使用数据库时钟确定扫描边界。"""
         if self.clock is not None:
             return self.clock()
         with get_db_cursor() as cur:
@@ -164,6 +267,7 @@ class AlertDetectionWorker:
         return row["now"]
 
     def get_status(self) -> Dict[str, Any]:
+        """返回可供健康检查和运维接口使用的 JSON 安全状态。"""
         with self._state_lock:
             return {
                 "enabled": bool(
@@ -172,36 +276,73 @@ class AlertDetectionWorker:
                 ),
                 "running": self._running,
                 "leader": self._leader,
+                "statisticsLeader": self._statistics_leader,
                 "intervalSeconds": self.interval_seconds,
+                "alertOverlapSeconds": self.alert_overlap_seconds,
                 "lagSeconds": self.lag_seconds,
                 "windowMinutes": self.window_minutes,
-                "detectionMode": "frequency_sample_groups",
+                "detectionMode": "realtime_sample_groups",
+                "conditionUnit": self.settings.detection_condition_unit,
                 "confirmPoints": self.settings.detection_confirm_points,
                 "stuckPoints": self.settings.detection_stuck_points,
                 "offlinePoints": self.settings.detection_offline_points,
+                "confirmSeconds": self.settings.detection_confirm_seconds,
+                "stuckSeconds": self.settings.detection_stuck_seconds,
+                "offlineSeconds": self.settings.detection_offline_seconds,
                 "maxCatchupWindows": self.max_catchup_windows,
-                "cycles": self._cycles,
+                "cycles": self._alert_cycles + self._statistics_cycles,
+                "alertCycles": self._alert_cycles,
+                "statisticsCycles": self._statistics_cycles,
                 "lastRunAt": serialize_val(self._last_run_at),
                 "lastCompletedAt": serialize_val(self._last_completed_at),
+                "lastAlertScanAt": serialize_val(self._last_alert_scan_at),
+                "lastAlertResult": (
+                    dict(self._last_alert_result)
+                    if self._last_alert_result
+                    else None
+                ),
                 "lastWindowEnd": serialize_val(self._last_window_end),
                 "lastResult": dict(self._last_result) if self._last_result else None,
                 "lastError": self._last_error,
+                "lastAlertError": self._last_alert_error,
+                "lastStatisticsError": self._last_statistics_error,
             }
 
-    def _run_loop(self) -> None:
+    def _run_alert_loop(self) -> None:
+        """参与选主并持续执行实时扫描，直到收到停止信号。"""
         while not self._stop_event.is_set():
             started = time.monotonic()
-            try:
-                self.run_once()
-            except Exception as exc:
-                logger.exception("Alert detection cycle failed")
-                with self._state_lock:
-                    self._last_error = str(exc)
+            if self._ensure_leader():
+                try:
+                    self.scan_alerts_once(self._current_time())
+                except Exception as exc:
+                    logger.exception("Realtime alert scan failed")
+                    with self._state_lock:
+                        self._last_alert_error = str(exc)
+                        self._last_error = str(exc)
+            elapsed = time.monotonic() - started
+            # 即使单次扫描耗时较长，也尽量保持稳定扫描节奏。
+            wait_seconds = max(0.1, self.interval_seconds - elapsed)
+            self._stop_event.wait(wait_seconds)
+
+    def _run_statistics_loop(self) -> None:
+        """参与选主并持续处理完整统计窗口，直到收到停止信号。"""
+        while not self._stop_event.is_set():
+            started = time.monotonic()
+            if self._ensure_statistics_leader():
+                try:
+                    self.process_statistics_once(self._current_time())
+                except Exception as exc:
+                    logger.exception("Statistics window processing failed")
+                    with self._state_lock:
+                        self._last_statistics_error = str(exc)
+                        self._last_error = str(exc)
             elapsed = time.monotonic() - started
             wait_seconds = max(0.1, self.interval_seconds - elapsed)
             self._stop_event.wait(wait_seconds)
 
     def _ensure_leader(self) -> bool:
+        """持有实时预警链路的 PostgreSQL advisory lock。"""
         if (
             self._lock_connection is not None
             and not self._lock_connection.closed
@@ -216,7 +357,7 @@ class AlertDetectionWorker:
             with self._lock_connection.cursor() as cur:
                 cur.execute(
                     "SELECT pg_try_advisory_lock(%s) AS locked",
-                    (DETECTION_ADVISORY_LOCK_KEY,),
+                    (ALERT_ADVISORY_LOCK_KEY,),
                 )
                 row = cur.fetchone()
             is_leader = bool(row and row[0])
@@ -228,12 +369,14 @@ class AlertDetectionWorker:
             self._leader = is_leader
             return is_leader
         except Exception as exc:
+            # 锁连接失败时退回从节点状态，并在后续循环重试。
             logger.warning("Could not acquire alert detection leader lock: %s", exc)
             self._close_lock_connection()
             self._leader = False
             return False
 
     def _release_leader_lock(self) -> None:
+        """关闭时释放实时预警选主锁。"""
         if self._lock_connection is None:
             return
         try:
@@ -242,17 +385,88 @@ class AlertDetectionWorker:
                     with self._lock_connection.cursor() as cur:
                         cur.execute(
                             "SELECT pg_advisory_unlock(%s)",
-                            (DETECTION_ADVISORY_LOCK_KEY,),
+                            (ALERT_ADVISORY_LOCK_KEY,),
                         )
         except Exception:
             logger.debug("Could not release alert detection leader lock", exc_info=True)
         finally:
             self._close_lock_connection()
 
+    def _ensure_statistics_leader(self) -> bool:
+        """持有统计链路的 PostgreSQL advisory lock。"""
+        if (
+            self._statistics_lock_connection is not None
+            and not self._statistics_lock_connection.closed
+            and self._statistics_leader
+        ):
+            return True
+
+        try:
+            if (
+                self._statistics_lock_connection is None
+                or self._statistics_lock_connection.closed
+            ):
+                self._statistics_lock_connection = psycopg2.connect(
+                    self.settings.dsn
+                )
+                self._statistics_lock_connection.autocommit = True
+            with self._statistics_lock_connection.cursor() as cur:
+                cur.execute(
+                    "SELECT pg_try_advisory_lock(%s) AS locked",
+                    (STATISTICS_ADVISORY_LOCK_KEY,),
+                )
+                row = cur.fetchone()
+            is_leader = bool(row and row[0])
+            if is_leader != self._statistics_leader:
+                logger.info(
+                    "Statistics worker %s leader lock.",
+                    "acquired" if is_leader else "is waiting for",
+                )
+            self._statistics_leader = is_leader
+            return is_leader
+        except Exception as exc:
+            logger.warning(
+                "Could not acquire statistics leader lock: %s",
+                exc,
+            )
+            self._close_statistics_lock_connection()
+            self._statistics_leader = False
+            return False
+
+    def _release_statistics_leader_lock(self) -> None:
+        """关闭时释放统计链路选主锁。"""
+        if self._statistics_lock_connection is None:
+            return
+        try:
+            if not self._statistics_lock_connection.closed:
+                if self._statistics_leader:
+                    with self._statistics_lock_connection.cursor() as cur:
+                        cur.execute(
+                            "SELECT pg_advisory_unlock(%s)",
+                            (STATISTICS_ADVISORY_LOCK_KEY,),
+                        )
+        except Exception:
+            logger.debug(
+                "Could not release statistics leader lock",
+                exc_info=True,
+            )
+        finally:
+            self._close_statistics_lock_connection()
+
     def _close_lock_connection(self) -> None:
+        """关闭实时预警锁连接，避免关闭异常影响主流程。"""
         if self._lock_connection is not None:
             try:
                 self._lock_connection.close()
             except Exception:
                 pass
         self._lock_connection = None
+
+    def _close_statistics_lock_connection(self) -> None:
+        """关闭统计锁连接，避免关闭异常影响主流程。"""
+        if self._statistics_lock_connection is not None:
+            try:
+                self._statistics_lock_connection.close()
+            except Exception:
+                pass
+        self._statistics_lock_connection = None

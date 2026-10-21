@@ -1,3 +1,5 @@
+"""应用日志格式配置。"""
+
 from __future__ import annotations
 
 import json
@@ -10,6 +12,8 @@ from app.core.config import Settings
 
 
 class JsonFormatter(logging.Formatter):
+    """将一条日志记录转换为结构化 JSON。"""
+
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -27,6 +31,7 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure_logging(settings: Settings) -> None:
+    """配置根日志器，并统一接管 Uvicorn 访问日志。"""
     handler = logging.StreamHandler(sys.stdout)
     if settings.log_json:
         handler.setFormatter(JsonFormatter())

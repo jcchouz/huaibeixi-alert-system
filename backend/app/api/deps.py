@@ -1,3 +1,5 @@
+"""为 API 请求装配业务服务的依赖工厂。"""
+
 from __future__ import annotations
 
 from fastapi import Depends, Request
@@ -13,30 +15,35 @@ from app.services.thresholds import ThresholdService
 
 
 def get_engine(request: Request) -> AlertAnalyticsEngine:
+    """返回应用启动时创建的进程级检测引擎。"""
     return request.app.state.engine
 
 
 def get_alert_service(
     engine: AlertAnalyticsEngine = Depends(get_engine),
 ) -> AlertService:
+    """创建预警业务服务并注入仓储依赖。"""
     return AlertService(AlertRepository(), engine)
 
 
 def get_threshold_service(
     engine: AlertAnalyticsEngine = Depends(get_engine),
 ) -> ThresholdService:
+    """创建阈值管理接口使用的业务服务。"""
     return ThresholdService(ThresholdRepository(), StatisticsRepository(), engine)
 
 
 def get_statistics_service(
     engine: AlertAnalyticsEngine = Depends(get_engine),
 ) -> StatisticsService:
+    """创建统计查询业务服务。"""
     return StatisticsService(StatisticsRepository(), engine)
 
 
 def get_overview_service(
     engine: AlertAnalyticsEngine = Depends(get_engine),
 ) -> OverviewService:
+    """创建总览页汇总业务服务。"""
     return OverviewService(AlertRepository(), engine)
 
 

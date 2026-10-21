@@ -1,3 +1,5 @@
+"""预警记录和总览计数的数据库访问。"""
+
 from __future__ import annotations
 
 import math
@@ -14,8 +16,12 @@ from app.infrastructure.database import get_db_cursor
 
 
 class AlertRepository:
+    """封装预警 SQL 查询和写入操作。"""
+
     def get_overview_snapshot(self) -> Dict[str, Any]:
+        """加载 KPI、类型统计、统计记录数和最近预警快照。"""
         with get_db_cursor() as cur:
+            # 预警状态和级别计数。
             cur.execute(
                 """
                 SELECT
@@ -42,6 +48,7 @@ class AlertRepository:
             )
             kpi = dict(cur.fetchone())
 
+            # 按预警类型汇总数量。
             cur.execute(
                 """
                 SELECT alert_type,
@@ -54,6 +61,7 @@ class AlertRepository:
             )
             by_type_rows = [dict(r) for r in cur.fetchall()]
 
+            # 仪表盘使用的辅助计数。
             cur.execute("SELECT COUNT(*) AS cnt FROM public.t_stat_record")
             stat_count = int(cur.fetchone()["cnt"] or 0)
 
@@ -75,6 +83,7 @@ class AlertRepository:
         }
 
     def poll(self, after_seq: int, limit: int) -> Dict[str, Any]:
+        """读取轮询序列之后的增量预警。"""
         with get_db_cursor() as cur:
             cur.execute(
                 """
@@ -87,6 +96,7 @@ class AlertRepository:
                 (after_seq, limit + 1),
             )
             rows = [dict(r) for r in cur.fetchall()]
+            # 多取一条记录，用于判断是否还有下一页。
             has_more = len(rows) > limit
             rows = rows[:limit]
 
@@ -118,6 +128,8 @@ class AlertRepository:
         page: int,
         page_size: int,
     ) -> Tuple[List[Dict[str, Any]], int, Dict[str, int]]:
+        """返回筛选结果、总数和不受状态筛选影响的状态计数。"""
+        # 状态汇总和筛选结果共用这些基础筛选条件。
         base_where_clauses = ["1 = 1"]
         base_params: List[Any] = []
         if alert_level is not None:
@@ -152,6 +164,7 @@ class AlertRepository:
         where_sql = " AND ".join(where_clauses)
         offset = (page - 1) * page_size
         with get_db_cursor() as cur:
+            # 状态计数不应用 alert_status，确保各状态页签始终可见。
             cur.execute(
                 f"""
                 SELECT
@@ -170,6 +183,7 @@ class AlertRepository:
                 "handled": int(status_row["handled"] or 0),
             }
 
+            # 总数和分页记录使用完整筛选条件。
             cur.execute(
                 f"SELECT COUNT(*) AS cnt FROM public.t_alert_record WHERE {where_sql}",
                 tuple(params),
@@ -201,6 +215,7 @@ class AlertRepository:
         handle_phone: Optional[str],
         handle_opinion: Optional[str],
     ) -> Optional[Dict[str, Any]]:
+        """处理单条预警，并更新轮询序列。"""
         with get_db_cursor(commit=True) as cur:
             cur.execute(
                 "SELECT * FROM public.t_alert_record WHERE id = %s",
@@ -209,6 +224,7 @@ class AlertRepository:
             existing = cur.fetchone()
             if not existing:
                 return None
+            # 重复确认已处理预警保持幂等。
             if int(existing["alert_status"] or 0) == 1:
                 return dict(existing)
 
@@ -238,6 +254,7 @@ class AlertRepository:
         alert_level: Optional[int],
         alert_category: Optional[int],
     ) -> List[str]:
+        """批量处理符合级别或分类条件的未处理预警。"""
         with get_db_cursor(commit=True) as cur:
             where_clauses = ["alert_status = 0"]
             params: List[Any] = [handler, handle_phone]
@@ -275,6 +292,7 @@ class AlertRepository:
         alert_level: int,
         trigger_val: float,
     ) -> Dict[str, Any]:
+        """插入人工创建的预警记录。"""
         alert_category = alert_category_for_type(alert_type)
         with get_db_cursor(commit=True) as cur:
             cur.execute(
@@ -304,6 +322,7 @@ class AlertRepository:
             return dict(cur.fetchone())
 
     def delete(self, alert_id: str) -> bool:
+        """删除单条预警，并返回是否实际删除记录。"""
         with get_db_cursor(commit=True) as cur:
             cur.execute(
                 "DELETE FROM public.t_alert_record WHERE id = %s RETURNING id",
@@ -313,13 +332,16 @@ class AlertRepository:
 
     @staticmethod
     def _max_seq(cur: Any) -> int:
+        """返回最新预警轮询序列。"""
         cur.execute("SELECT COALESCE(MAX(seq), 0) AS m FROM public.t_alert_record")
         return int(cur.fetchone()["m"] or 0)
 
     @staticmethod
     def total_pages(total: int, page_size: int) -> int:
+        """计算分页响应的总页数。"""
         return math.ceil(total / page_size) if page_size > 0 else 1
 
     @staticmethod
     def now_string() -> str:
+        """返回 API 响应使用的服务器时间格式。"""
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")

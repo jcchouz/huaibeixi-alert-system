@@ -1,4 +1,4 @@
-"""Domain services and the alert analytics engine."""
+"""领域服务和预警分析引擎。"""
 
 from app.domain.engine import AlertAnalyticsEngine
 

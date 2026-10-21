@@ -1,11 +1,16 @@
+"""阈值定义的数据库访问。"""
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
 
 
 class ThresholdRepository:
+    """封装阈值规则查询和更新。"""
+
     @staticmethod
     def fetch_rule(cur: Any, threshold_id: str) -> Optional[Dict[str, Any]]:
+        """按编号加载单条阈值规则。"""
         cur.execute(
             "SELECT * FROM public.t_alert_threshold WHERE id = %s",
             (threshold_id,),
@@ -20,6 +25,7 @@ class ThresholdRepository:
         threshold_ids: Optional[Sequence[str]] = None,
         physical_quantity: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        """按指定编号或物理量加载阈值规则。"""
         if threshold_ids:
             cur.execute(
                 "SELECT * FROM public.t_alert_threshold WHERE id = ANY(%s)",
@@ -34,6 +40,7 @@ class ThresholdRepository:
 
     @staticmethod
     def update_rule(cur: Any, threshold_id: str, values: Dict[str, Any]) -> Dict[str, Any]:
+        """持久化已校验的阈值和物理量程。"""
         cur.execute(
             """
             UPDATE public.t_alert_threshold

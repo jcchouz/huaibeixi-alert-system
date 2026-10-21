@@ -1,9 +1,8 @@
 #!/usr/bin/env python
-"""HTTP / CRUD validation for the running FastAPI service on :8090.
+"""验证运行在 8090 端口的 FastAPI 服务和 CRUD 接口。
 
-Snapshots ``t_alert_threshold`` and ``t_alert_record`` to binary files first and
-restores them at the end, so this is safe to run against a live database. The
-alert records are restored before the validation finishes.
+工具会先将 ``t_alert_threshold`` 和 ``t_alert_record`` 快照为二进制文件，
+验证结束后恢复，因此可以在活动数据库上运行。预警记录会在验证完成前恢复。
 """
 from __future__ import annotations
 

@@ -1,1 +1,1 @@
-"""HTTP request and response contracts."""
+"""HTTP 请求和响应契约。"""

@@ -1,1 +1,1 @@
-"""Database access objects. SQL stays out of HTTP route modules."""
+"""数据库访问对象；SQL 不直接放在 HTTP 路由中。"""

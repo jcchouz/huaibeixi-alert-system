@@ -1,3 +1,5 @@
+"""阈值查询、校验、更新和模拟业务流程。"""
+
 from __future__ import annotations
 
 import time
@@ -20,6 +22,8 @@ from app.services.common import parse_datetime, pick
 
 
 class ThresholdService:
+    """管理阈值规则，并用历史统计对比拟调整方案。"""
+
     def __init__(
         self,
         repository: ThresholdRepository,
@@ -38,6 +42,7 @@ class ThresholdService:
         station_name: str | None,
         keyword: str | None,
     ) -> Dict[str, Any]:
+        """返回内存中的规则列表和可用筛选值。"""
         all_rules = self.engine.channel_states.values()
         all_physical_quantities = sorted(
             {rule.get("physical_quantity") for rule in all_rules if rule.get("physical_quantity")}
@@ -45,6 +50,7 @@ class ThresholdService:
         all_stations = sorted(
             {rule.get("station_name") for rule in all_rules if rule.get("station_name")}
         )
+        # 在已加载的规则快照上应用可选筛选条件。
         filtered: List[Dict[str, Any]] = []
         for rule in all_rules:
             if sensor_no and sensor_no.strip().lower() not in (rule.get("sensor_no") or "").lower():
@@ -79,6 +85,7 @@ class ThresholdService:
         threshold_id: str,
         body: ThresholdUpdateRequest,
     ) -> Dict[str, Any]:
+        """更新单条阈值规则，并重新加载引擎缓存。"""
         with get_db_cursor(commit=True) as cur:
             row = self.repository.fetch_rule(cur, threshold_id)
             if not row:
@@ -88,6 +95,7 @@ class ThresholdService:
             self._validate_thresholds(values)
             updated_row = self.repository.update_rule(cur, threshold_id, values)
 
+        # 返回补充后的响应前，先刷新检测规则。
         self.engine.reload_thresholds()
         key = self.engine.make_key(updated_row["sensor_no"], updated_row.get("channel"))
         enriched = self.engine.channel_states.get(key) or serialize_row(updated_row)
@@ -97,6 +105,7 @@ class ThresholdService:
         self,
         body: ThresholdBatchUpdateRequest,
     ) -> Dict[str, Any]:
+        """按物理量或指定编号批量更新阈值规则。"""
         physical_quantity = pick(body.physical_quantity, body.physicalQuantity)
         threshold_ids = pick(body.threshold_ids, body.thresholdIds)
         if not physical_quantity and not threshold_ids:
@@ -116,6 +125,7 @@ class ThresholdService:
         }
 
         with get_db_cursor(commit=True) as cur:
+            # 在同一事务中校验并更新所有匹配规则。
             rows = self.repository.fetch_rules(
                 cur,
                 threshold_ids=threshold_ids,
@@ -137,12 +147,14 @@ class ThresholdService:
         }
 
     def simulate(self, body: ThresholdSimulateRequest) -> Dict[str, Any]:
+        """使用历史统计对比当前阈值和拟调整阈值。"""
         started = time.perf_counter()
         sensor_no = (pick(body.sensor_no, body.sensorNo, "stn-12-b") or "stn-12-b").strip().lower()
         channel = (body.channel or "").strip()
         key = self.engine.make_key(sensor_no, channel)
         current_rule = self.engine.channel_states.get(key)
 
+        # 未精确匹配时，回退到该传感器下的任意通道。
         if not current_rule:
             for rule in self.engine.channel_states.values():
                 if rule.get("sensor_no_lower") == sensor_no:
@@ -183,6 +195,7 @@ class ThresholdService:
         )
         remove_dc = bool(current_rule.get("remove_dc_offset", False))
 
+        # 保留当前规则，同时允许请求字段覆盖对应阈值。
         current_thresholds = {
             "level1_upper": float(
                 current_rule.get("level1_upper")
@@ -233,6 +246,7 @@ class ThresholdService:
             pick(body.end_time, body.endTime),
             datetime(2026, 9, 30, 18, 0, 0),
         )
+        # 读取有限长度的历史序列，供两套规则共同评估。
         with get_db_cursor() as cur:
             rows = self.statistics.threshold_series_rows(
                 cur,
@@ -248,7 +262,9 @@ class ThresholdService:
             value_avg: float,
             thresholds: Dict[str, float],
         ) -> Tuple[int, float, float]:
+            """使用一套阈值评估一个统计桶。"""
             if remove_dc:
+                # 振动数据按围绕均值的幅值进行评估。
                 amplitude = max(abs(value_max - value_avg), abs(value_min - value_avg))
                 eval_upper, eval_lower = amplitude, -amplitude
             else:
@@ -267,6 +283,7 @@ class ThresholdService:
                 return 3, eval_upper, eval_lower
             return 0, eval_upper, eval_lower
 
+        # 分别统计拟调整阈值和当前阈值的命中数量。
         proposed_counts = {0: 0, 1: 0, 2: 0, 3: 0}
         current_counts = {0: 0, 1: 0, 2: 0, 3: 0}
         series: List[Dict[str, Any]] = []
@@ -307,6 +324,7 @@ class ThresholdService:
                 observed_min = eval_lower
                 observed_min_time = serialize_val(row.get("min_time") or row["stat_time"])
 
+            # 同时返回两套规则的评估结果，便于图表并列展示。
             series.append(
                 {
                     "time": serialize_val(row["stat_time"]),
@@ -381,6 +399,7 @@ class ThresholdService:
         row: Dict[str, Any],
         body: ThresholdUpdateRequest,
     ) -> Dict[str, Any]:
+        """将请求中的部分字段合并到现有规则记录上。"""
         return {
             "level1_upper": pick(
                 body.level1_upper,
@@ -432,6 +451,7 @@ class ThresholdService:
 
     @staticmethod
     def _validate_thresholds(values: Dict[str, Any]) -> None:
+        """校验阈值排序和物理量程边界。"""
         l1_upper = values.get("level1_upper")
         l2_upper = values.get("level2_upper")
         l3_upper = values.get("level3_upper")

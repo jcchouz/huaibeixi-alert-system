@@ -1,0 +1,627 @@
+from __future__ import annotations
+
+import threading
+from contextlib import contextmanager
+from datetime import datetime, timedelta
+from typing import Any
+
+import pytest
+
+import app.domain.engine as engine_module
+from app.domain.alert_types import (
+    ALERT_DIRECTION_NONE,
+    ALERT_TYPE_DAQ_OFFLINE,
+    ALERT_TYPE_OFFLINE,
+    ALERT_TYPE_THRESHOLD,
+)
+from app.domain.engine import AlertAnalyticsEngine
+
+
+def test_realtime_scan_uses_alert_only_path(monkeypatch) -> None:
+    engine = AlertAnalyticsEngine()
+    captured: dict[str, Any] = {}
+
+    def fake_run(window_start, window_end, period_type, **kwargs):
+        captured.update(
+            {
+                "window_start": window_start,
+                "window_end": window_end,
+                "period_type": period_type,
+                **kwargs,
+            }
+        )
+        return {
+            "rawPointsProcessed": 3,
+            "upsertedStatsCount": 0,
+            "triggeredAlertsCount": 1,
+            "triggeredAlerts": [],
+        }
+
+    monkeypatch.setattr(engine, "_run_detection_window", fake_run)
+
+    result = engine.scan_realtime_alerts(
+        datetime(2026, 10, 20, 12, 0, 1),
+        datetime(2026, 10, 20, 12, 0, 2),
+    )
+
+    assert captured["write_statistics"] is False
+    assert captured["detect_alerts"] is True
+    assert result["triggeredAlertsCount"] == 1
+    assert result["subWindowCount"] == 1
+
+
+def test_statistics_window_skips_alert_detection(monkeypatch) -> None:
+    engine = AlertAnalyticsEngine()
+    captured: dict[str, Any] = {}
+
+    def fake_run(window_start, window_end, period_type, **kwargs):
+        captured.update(
+            {
+                "window_start": window_start,
+                "window_end": window_end,
+                "period_type": period_type,
+                **kwargs,
+            }
+        )
+        return {
+            "rawPointsProcessed": 100,
+            "upsertedStatsCount": 2,
+            "triggeredAlertsCount": 0,
+            "triggeredAlerts": [],
+        }
+
+    monkeypatch.setattr(engine, "_run_detection_window", fake_run)
+
+    result = engine.record_statistics_window(
+        datetime(2026, 10, 20, 12, 0),
+        datetime(2026, 10, 20, 12, 1),
+    )
+
+    assert captured["write_statistics"] is True
+    assert captured["detect_alerts"] is False
+    assert result["upsertedStatsCount"] == 2
+
+
+def test_statistics_batch_supplies_create_by_and_create_time(monkeypatch) -> None:
+    engine = AlertAnalyticsEngine()
+    key = engine.make_key("sensor-1", "x")
+    engine.channel_states.set(
+        key,
+        {
+            "key": key,
+            "sensor_no_lower": "sensor-1",
+            "channel": "x",
+            "remove_dc_offset": False,
+        },
+    )
+    class StatisticsCursor:
+        def __init__(self) -> None:
+            self.rows: list[dict[str, Any]] = []
+
+        def execute(
+            self,
+            sql: str,
+            params: tuple[Any, ...] | None = None,
+        ) -> None:
+            self.rows = [
+                {
+                    "s_no": "sensor-1",
+                    "ch": "x",
+                    "sample_cnt": 2,
+                    "val_max": 2.0,
+                    "val_min": 1.0,
+                    "val_avg": 1.5,
+                    "first_ts": params[0],
+                    "last_ts": params[1],
+                    "max_gap_ms": 1.0,
+                    "min_time": params[0],
+                    "max_time": params[1],
+                }
+            ]
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return self.rows
+
+    cursor = StatisticsCursor()
+
+    @contextmanager
+    def fake_get_db_cursor(commit: bool = False):
+        yield cursor
+
+    captured: dict[str, Any] = {}
+
+    def fake_execute_values(cur, sql, rows, **kwargs):
+        captured.update({"sql": sql, "rows": rows, **kwargs})
+
+    monkeypatch.setattr(engine_module, "get_db_cursor", fake_get_db_cursor)
+    monkeypatch.setattr(engine_module, "execute_values", fake_execute_values)
+
+    engine.record_statistics_window(
+        datetime(2026, 10, 20, 12, 0),
+        datetime(2026, 10, 20, 12, 1),
+    )
+
+    assert len(captured["rows"]) == 1
+    assert "'system', NOW()" in captured["template"]
+
+
+def test_existing_same_level_alert_is_not_refreshed_on_every_scan() -> None:
+    engine = AlertAnalyticsEngine()
+    key = engine._alert_key("sensor-1", "x", ALERT_TYPE_THRESHOLD)
+    existing = {
+        "id": "alert-1",
+        "sensor_no": "sensor-1",
+        "channel": "x",
+        "alert_type": ALERT_TYPE_THRESHOLD,
+        "alert_level": 2,
+    }
+    active_map = {key: existing}
+    triggered: list[dict[str, Any]] = []
+
+    result = engine._apply_condition(
+        object(),
+        active_map,
+        triggered,
+        rule={},
+        sensor_no="sensor-1",
+        channel="x",
+        alert_type=ALERT_TYPE_THRESHOLD,
+        active=True,
+        alert_level=2,
+        trigger_val=12.0,
+        fire_time=datetime(2026, 10, 20, 12, 0, 0),
+    )
+
+    assert result is existing
+    assert triggered == []
+
+
+class RealtimeCursor:
+    def __init__(self) -> None:
+        self.rows: list[dict[str, Any]] = []
+        self.window_start: datetime | None = None
+        self.sql_calls: list[str] = []
+
+    def execute(self, sql: str, params: tuple[Any, ...] | None = None) -> None:
+        self.sql_calls.append(sql)
+        if "value IS NOT NULL" in sql:
+            self.window_start = params[0]
+            value = 11.0 + float(self.window_start.second)
+            self.rows = [
+                {
+                    "s_no": "sensor-1",
+                    "ch": "x",
+                    "time": self.window_start,
+                    "value": value,
+                }
+            ]
+        else:
+            self.rows = []
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        return self.rows
+
+    def fetchone(self) -> dict[str, Any] | None:
+        return self.rows[0] if self.rows else None
+
+
+class EmptyRealtimeCursor(RealtimeCursor):
+    def execute(self, sql: str, params: tuple[Any, ...] | None = None) -> None:
+        self.rows = []
+
+
+def test_realtime_threshold_streak_continues_across_one_second_scans(
+    monkeypatch,
+) -> None:
+    engine = AlertAnalyticsEngine()
+    key = engine.make_key("sensor-1", "x")
+    engine.channel_states.set(
+        key,
+        {
+            "id": "threshold-1",
+            "key": key,
+            "sensor_no_lower": "sensor-1",
+            "channel": "x",
+            "instrument_id": None,
+            "confirm_points": 3,
+            "stuck_points": 100,
+            "offline_points": 5,
+            "sample_interval_ms": 1000.0,
+            "level1_upper": 30.0,
+            "level2_upper": 20.0,
+            "level3_upper": 10.0,
+            "level1_lower": None,
+            "level2_lower": None,
+            "level3_lower": None,
+            "remove_dc_offset": False,
+            "physical_min": -100.0,
+            "physical_max": 100.0,
+            "threshold_streak_direction": ALERT_DIRECTION_NONE,
+            "threshold_streak_count": 0,
+            "threshold_condition_active": False,
+            "threshold_condition_level": None,
+            "oor_streak_direction": ALERT_DIRECTION_NONE,
+            "oor_streak_count": 0,
+            "oor_condition_active": False,
+            "stuck_streak_count": 0,
+            "stuck_condition_active": False,
+            "offline_condition_active": False,
+            "realtime_dc_offset": None,
+        },
+    )
+    cursor = RealtimeCursor()
+
+    @contextmanager
+    def fake_get_db_cursor(commit: bool = False):
+        yield cursor
+
+    applied: list[dict[str, Any]] = []
+
+    def fake_apply(cur, active_map, triggered, **kwargs):
+        applied.append(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(engine_module, "get_db_cursor", fake_get_db_cursor)
+    monkeypatch.setattr(engine, "_apply_condition", fake_apply)
+
+    base = datetime(2026, 10, 20, 12, 0, 0)
+    for offset in range(4):
+        engine.scan_realtime_alerts(
+            base.replace(second=offset),
+            base.replace(second=offset + 1),
+        )
+
+    assert len(applied) == 1
+    assert applied[0]["alert_type"] == ALERT_TYPE_THRESHOLD
+    assert applied[0]["alert_level"] == 3
+    assert sum("value IS NOT NULL" in sql for sql in cursor.sql_calls) == 4
+    assert not any("LOWER(sensor_no) = %s" in sql for sql in cursor.sql_calls)
+
+
+def test_no_data_still_alerts_offline_once_per_unrecovered_incident(
+    monkeypatch,
+) -> None:
+    engine = AlertAnalyticsEngine()
+    key = engine.make_key("sensor-1", "x")
+    engine.channel_states.set(
+        key,
+        {
+            "key": key,
+            "sensor_no_lower": "sensor-1",
+            "channel": "x",
+            "instrument_id": None,
+            "offline_points": 5,
+            "sample_interval_ms": 1000.0,
+            "last_ts": "2026-10-20 11:59:50",
+            "threshold_condition_active": False,
+            "threshold_condition_level": None,
+            "oor_condition_active": False,
+            "stuck_condition_active": False,
+        },
+    )
+    cursor = EmptyRealtimeCursor()
+
+    @contextmanager
+    def fake_get_db_cursor(commit: bool = False):
+        yield cursor
+
+    applied: list[dict[str, Any]] = []
+
+    def fake_apply(cur, active_map, triggered, **kwargs):
+        applied.append(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(engine_module, "get_db_cursor", fake_get_db_cursor)
+    monkeypatch.setattr(engine, "_apply_condition", fake_apply)
+
+    base = datetime(2026, 10, 20, 12, 0, 0)
+    engine.scan_realtime_alerts(base, base.replace(second=1))
+    engine.scan_realtime_alerts(base.replace(second=1), base.replace(second=2))
+
+    assert len(applied) == 1
+    assert applied[0]["alert_type"] == ALERT_TYPE_OFFLINE
+
+
+def test_overlap_window_does_not_replay_an_already_processed_sample(
+    monkeypatch,
+) -> None:
+    engine = AlertAnalyticsEngine()
+    key = engine.make_key("sensor-1", "x")
+    previous_sample_time = datetime(2026, 10, 20, 11, 59, 59)
+    engine.channel_states.set(
+        key,
+        {
+            "key": key,
+            "sensor_no_lower": "sensor-1",
+            "channel": "x",
+            "instrument_id": None,
+            "confirm_points": 3,
+            "stuck_points": 100,
+            "offline_points": 5,
+            "sample_interval_ms": 1000.0,
+            "level1_upper": 30.0,
+            "level2_upper": 20.0,
+            "level3_upper": 10.0,
+            "level1_lower": None,
+            "level2_lower": None,
+            "level3_lower": None,
+            "remove_dc_offset": False,
+            "physical_min": -100.0,
+            "physical_max": 100.0,
+            "last_ts": previous_sample_time,
+            "threshold_streak_direction": ALERT_DIRECTION_NONE,
+            "threshold_streak_count": 0,
+            "threshold_condition_active": False,
+            "threshold_condition_level": None,
+            "oor_streak_direction": ALERT_DIRECTION_NONE,
+            "oor_streak_count": 0,
+            "oor_condition_active": False,
+            "stuck_streak_count": 0,
+            "stuck_condition_active": False,
+            "offline_condition_active": False,
+            "realtime_dc_offset": None,
+        },
+    )
+    cursor = RealtimeCursor()
+
+    @contextmanager
+    def fake_get_db_cursor(commit: bool = False):
+        yield cursor
+
+    applied: list[dict[str, Any]] = []
+
+    def fake_apply(cur, active_map, triggered, **kwargs):
+        applied.append(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(engine_module, "get_db_cursor", fake_get_db_cursor)
+    monkeypatch.setattr(engine, "_apply_condition", fake_apply)
+
+    engine.scan_realtime_alerts(
+        previous_sample_time.replace(second=55),
+        previous_sample_time.replace(second=59) + timedelta(seconds=1),
+    )
+
+    assert applied == []
+    assert engine.channel_states.get(key)["last_ts"] == previous_sample_time
+
+
+def test_scan_does_not_advance_watermark_when_commit_fails(
+    monkeypatch,
+) -> None:
+    engine = AlertAnalyticsEngine()
+    key = engine.make_key("sensor-1", "x")
+    engine.channel_states.set(
+        key,
+        {
+            "key": key,
+            "sensor_no_lower": "sensor-1",
+            "channel": "x",
+            "instrument_id": None,
+            "confirm_points": 3,
+            "stuck_points": 100,
+            "offline_points": 5,
+            "sample_interval_ms": 1000.0,
+            "level1_upper": 30.0,
+            "level2_upper": 20.0,
+            "level3_upper": 10.0,
+            "level1_lower": None,
+            "level2_lower": None,
+            "level3_lower": None,
+            "remove_dc_offset": False,
+            "physical_min": -100.0,
+            "physical_max": 100.0,
+            "last_ts": None,
+            "threshold_streak_direction": ALERT_DIRECTION_NONE,
+            "threshold_streak_count": 0,
+            "threshold_condition_active": False,
+            "threshold_condition_level": None,
+            "oor_streak_direction": ALERT_DIRECTION_NONE,
+            "oor_streak_count": 0,
+            "oor_condition_active": False,
+            "stuck_streak_count": 0,
+            "stuck_condition_active": False,
+            "offline_condition_active": False,
+            "realtime_dc_offset": None,
+        },
+    )
+    cursor = RealtimeCursor()
+
+    @contextmanager
+    def failing_get_db_cursor(commit: bool = False):
+        yield cursor
+        raise RuntimeError("commit failed")
+
+    monkeypatch.setattr(engine_module, "get_db_cursor", failing_get_db_cursor)
+    window_start = datetime(2026, 10, 20, 12, 0, 0)
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        engine.scan_realtime_alerts(window_start, window_start + timedelta(seconds=1))
+
+    assert engine.channel_states.get(key)["last_ts"] is None
+
+
+def test_existing_daq_alert_is_not_refreshed_after_worker_restart(
+    monkeypatch,
+) -> None:
+    engine = AlertAnalyticsEngine()
+    instrument_id = "instrument-1"
+    window_end = datetime(2026, 10, 20, 12, 0, 10)
+    for channel in ("x", "y"):
+        key = engine.make_key(f"sensor-{channel}", channel)
+        engine.channel_states.set(
+            key,
+            {
+                "key": key,
+                "sensor_no_lower": f"sensor-{channel}",
+                "channel": channel,
+                "instrument_id": instrument_id,
+                "offline_points": 5,
+                "sample_interval_ms": 1000.0,
+                "last_ts": window_end.replace(second=0),
+                "offline_condition_active": False,
+            },
+        )
+
+    active_daq = {
+        "id": "daq-alert",
+        "sensor_no": instrument_id,
+        "channel": "__DAQ__",
+        "alert_type": ALERT_TYPE_DAQ_OFFLINE,
+        "alert_level": 1,
+    }
+
+    class DaqCursor(EmptyRealtimeCursor):
+        def execute(
+            self,
+            sql: str,
+            params: tuple[Any, ...] | None = None,
+        ) -> None:
+            if "FROM public.t_alert_record" in sql:
+                self.rows = [active_daq]
+            else:
+                self.rows = []
+
+    cursor = DaqCursor()
+
+    @contextmanager
+    def fake_get_db_cursor(commit: bool = False):
+        yield cursor
+
+    monkeypatch.setattr(engine_module, "get_db_cursor", fake_get_db_cursor)
+    monkeypatch.setattr(
+        engine,
+        "_apply_condition",
+        lambda cur, active_map, triggered, **kwargs: kwargs,
+    )
+
+    def fail_upsert(*args, **kwargs):
+        raise AssertionError("existing DAQ incident must not be refreshed")
+
+    monkeypatch.setattr(engine, "_upsert_alert_incident", fail_upsert)
+
+    engine.scan_realtime_alerts(
+        window_end.replace(second=0),
+        window_end,
+    )
+
+    assert engine._daq_condition_active[instrument_id] is True
+
+
+def test_statistics_window_does_not_block_realtime_alert_scan(
+    monkeypatch,
+) -> None:
+    engine = AlertAnalyticsEngine()
+    statistics_started = threading.Event()
+    release_statistics = threading.Event()
+
+    def fake_run(window_start, window_end, period_type, **kwargs):
+        if kwargs.get("write_statistics"):
+            statistics_started.set()
+            assert release_statistics.wait(2)
+        return {
+            "rawPointsProcessed": 1,
+            "upsertedStatsCount": int(bool(kwargs.get("write_statistics"))),
+            "triggeredAlertsCount": 0,
+            "triggeredAlerts": [],
+        }
+
+    monkeypatch.setattr(engine, "_run_detection_window", fake_run)
+
+    statistics_thread = threading.Thread(
+        target=engine.record_statistics_window,
+        args=(
+            datetime(2026, 10, 20, 12, 0),
+            datetime(2026, 10, 20, 12, 1),
+        ),
+    )
+    statistics_thread.start()
+    assert statistics_started.wait(1)
+
+    alert_result = engine.scan_realtime_alerts(
+        datetime(2026, 10, 20, 12, 1, 1),
+        datetime(2026, 10, 20, 12, 1, 2),
+    )
+
+    assert alert_result["rawPointsProcessed"] == 1
+    release_statistics.set()
+    statistics_thread.join(timeout=2)
+    assert not statistics_thread.is_alive()
+
+
+def test_statistics_window_uses_one_batch_upsert(monkeypatch) -> None:
+    engine = AlertAnalyticsEngine()
+    window_start = datetime(2026, 10, 20, 12, 0)
+    window_end = datetime(2026, 10, 20, 12, 1)
+    for sensor_no, channel in (("sensor-1", "x"), ("sensor-2", "y")):
+        key = engine.make_key(sensor_no, channel)
+        engine.channel_states.set(
+            key,
+            {
+                "key": key,
+                "sensor_no_lower": sensor_no,
+                "channel": channel,
+                "remove_dc_offset": False,
+            },
+        )
+
+    class StatisticsCursor:
+        def __init__(self) -> None:
+            self.rows: list[dict[str, Any]] = []
+            self.sql_calls: list[str] = []
+
+        def execute(
+            self,
+            sql: str,
+            params: tuple[Any, ...] | None = None,
+        ) -> None:
+            self.sql_calls.append(sql)
+            assert "WITH ordered_samples" in sql
+            self.rows = [
+                {
+                    "s_no": sensor_no,
+                    "ch": channel,
+                    "sample_cnt": 10,
+                    "val_max": 2.0,
+                    "val_min": 1.0,
+                    "val_avg": 1.5,
+                    "first_ts": window_start,
+                    "last_ts": window_end - timedelta(seconds=1),
+                    "max_gap_ms": 1000.0,
+                    "min_time": window_start,
+                    "max_time": window_end - timedelta(seconds=1),
+                }
+                for sensor_no, channel in (("sensor-1", "x"), ("sensor-2", "y"))
+            ]
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return self.rows
+
+    cursor = StatisticsCursor()
+
+    @contextmanager
+    def fake_get_db_cursor(commit: bool = False):
+        yield cursor
+
+    batches: list[tuple[str, list[tuple[Any, ...]], int]] = []
+
+    def fake_execute_values(
+        cur,
+        sql: str,
+        rows: list[tuple[Any, ...]],
+        **kwargs: Any,
+    ) -> None:
+        assert cur is cursor
+        batches.append((sql, rows, int(kwargs["page_size"])))
+        assert "'system', NOW()" in kwargs["template"]
+
+    monkeypatch.setattr(engine_module, "get_db_cursor", fake_get_db_cursor)
+    monkeypatch.setattr(engine_module, "execute_values", fake_execute_values)
+
+    result = engine.record_statistics_window(window_start, window_end)
+
+    assert result["upsertedStatsCount"] == 2
+    assert len(cursor.sql_calls) == 1
+    assert len(batches) == 1
+    assert len(batches[0][1]) == 2
+    assert batches[0][2] == 2

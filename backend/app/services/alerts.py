@@ -1,3 +1,5 @@
+"""预警接口业务逻辑和响应信息补充。"""
+
 from __future__ import annotations
 
 import time
@@ -19,6 +21,8 @@ from app.services.common import pick
 
 
 class AlertService:
+    """组织预警查询、处理操作和人工测试创建。"""
+
     def __init__(
         self,
         repository: AlertRepository,
@@ -28,8 +32,10 @@ class AlertService:
         self.engine = engine
 
     def poll(self, after_seq: int, limit: int) -> Dict[str, Any]:
+        """返回轮询游标之后的增量预警。"""
         started = time.perf_counter()
         result = self.repository.poll(after_seq, limit)
+        # 为数据库记录补充传感器、站点标签和展示字段。
         items = [self.engine.enrich_alert_row(row) for row in result["rows"]]
         return {
             "items": items,
@@ -55,6 +61,7 @@ class AlertService:
         page: int,
         page_size: int,
     ) -> Dict[str, Any]:
+        """返回经过筛选和分页的预警列表。"""
         rows, total, status_counts = self.repository.list(
             alert_level=alert_level,
             alert_status=alert_status,
@@ -79,6 +86,7 @@ class AlertService:
         alert_id: str,
         body: AlertAckRequest,
     ) -> Dict[str, Any]:
+        """将单条预警标记为已处理。"""
         target_status = int(pick(body.alertStatus, body.alert_status, 1))
         if target_status != 1:
             raise HTTPException(status_code=400, detail="alertStatus must be 1")
@@ -105,6 +113,7 @@ class AlertService:
         self,
         body: Optional[BatchAckRequest],
     ) -> Dict[str, Any]:
+        """将符合条件的未处理预警批量标记为已处理。"""
         request = body or BatchAckRequest()
         handler = str(
             pick(request.handleBy, request.handle_by, "web") or "web"
@@ -127,6 +136,7 @@ class AlertService:
         }
 
     def create_alert(self, body: AlertCreateRequest) -> Dict[str, Any]:
+        """创建人工预警，主要用于本地开发和测试。"""
         sensor_no = str(pick(body.sensorNo, body.sensor_no, "")).strip().lower()
         if not sensor_no:
             raise HTTPException(status_code=400, detail="sensorNo is required")
@@ -157,6 +167,7 @@ class AlertService:
         return {"success": True, "alert": enriched}
 
     def delete_alert(self, alert_id: str) -> Dict[str, Any]:
+        """删除人工维护的预警记录。"""
         if not self.repository.delete(alert_id):
             raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
         return {"success": True, "alertId": alert_id}

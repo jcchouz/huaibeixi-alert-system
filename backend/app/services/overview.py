@@ -1,3 +1,5 @@
+"""仪表盘总览数据聚合。"""
+
 from __future__ import annotations
 
 from typing import Any, Dict
@@ -14,11 +16,14 @@ from app.repositories.alerts import AlertRepository
 
 
 class OverviewService:
+    """将预警快照与实时通道和引擎状态组合。"""
+
     def __init__(self, alerts: AlertRepository, engine: AlertAnalyticsEngine):
         self.alerts = alerts
         self.engine = engine
 
     def get_overview(self) -> Dict[str, Any]:
+        """返回总览页需要的 KPI、类型、级别和最近预警数据。"""
         rules = self.engine.channel_states.values()
         total_channels = len(rules)
         enabled_channels = total_channels
@@ -29,6 +34,7 @@ class OverviewService:
         by_type_rows = snapshot["by_type_rows"]
         recent_rows = [self.engine.enrich_alert_row(row) for row in snapshot["recent_rows"]]
 
+        # 离线通道数同时参考活动离线预警和当前引擎状态。
         offline_channels = max(
             int(kpi["offline_alert_count"] or 0),
             sum(1 for rule in rules if rule.get("online_status") == "OFFLINE"),
@@ -41,6 +47,7 @@ class OverviewService:
             ALERT_TYPE_OOR: "超物理量程",
             ALERT_TYPE_STUCK: "传感器死值",
         }
+        # 将 SQL 原始计数整理为前端可直接使用的标签和数量结构。
         alerts_by_type = [
             {
                 "alertType": row["alert_type"],
