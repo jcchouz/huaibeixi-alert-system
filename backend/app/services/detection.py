@@ -134,7 +134,19 @@ class AlertDetectionWorker:
         return []
 
     def scan_alerts_once(self, current_time: datetime) -> Optional[Dict[str, Any]]:
-        """从上一次水位开始扫描样本，并保留短时间重叠回看。"""
+        """从上一次水位开始扫描样本，并保留短时间重叠回看。
+
+        窗口是左闭右开的 ``[alert_start, current_time)``：
+
+        - 首轮没有水位时，回看 ``max(扫描间隔, overlap)``，保证刚启动也能
+          看到最近到达的样本，同时不会一次拉太长的历史；
+        - 之后每轮从 ``上一次水位 - overlap`` 开始，用短回看覆盖外部系统
+          事务提交延迟导致的“样本晚到”；
+        - 回看必然带来重复样本，由引擎侧按各通道 ``last_ts`` 过滤，
+          只处理严格新于水位的点（new_samples_only）；
+        - 只有本轮扫描成功，才把 ``_last_alert_scan_at`` 推进到 ``current_time``，
+          异常时水位不动，下一轮会重新覆盖这段区间。
+        """
         with self._alert_cycle_lock:
             with self._state_lock:
                 self._last_run_at = current_time
@@ -156,6 +168,8 @@ class AlertDetectionWorker:
             if current_time <= alert_start:
                 return None
 
+            # 交给引擎逐点判定；这里不做任何统计窗口对齐，
+            # 所以实时预警不受 DETECTION_WINDOW_MINUTES 影响。
             alert_result = self.engine.scan_realtime_alerts(
                 alert_start,
                 current_time,

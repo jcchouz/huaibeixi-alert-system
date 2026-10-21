@@ -93,7 +93,17 @@ def test_detection_condition_unit_can_be_switched_by_environment(
 
 
 def test_alert_type_switches_default_to_enabled(monkeypatch) -> None:
-    settings = Settings(environment="test")
+    # 这里验证代码默认值，不能受开发机 backend/.env 的本地调试开关影响。
+    for name in (
+        "DETECTION_ALERT_THRESHOLD_ENABLED",
+        "DETECTION_ALERT_OFFLINE_ENABLED",
+        "DETECTION_ALERT_DAQ_OFFLINE_ENABLED",
+        "DETECTION_ALERT_STUCK_ENABLED",
+        "DETECTION_ALERT_OOR_ENABLED",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = Settings(_env_file=None, environment="test")
     assert settings.detection_alert_threshold_enabled is True
     assert settings.detection_alert_offline_enabled is True
     assert settings.detection_alert_daq_offline_enabled is True
@@ -101,7 +111,7 @@ def test_alert_type_switches_default_to_enabled(monkeypatch) -> None:
     assert settings.detection_alert_oor_enabled is True
 
     monkeypatch.setenv("DETECTION_ALERT_STUCK_ENABLED", "false")
-    disabled = Settings(environment="test")
+    disabled = Settings(_env_file=None, environment="test")
     assert disabled.detection_alert_stuck_enabled is False
     assert disabled.detection_alert_threshold_enabled is True
     assert disabled.detection_alert_offline_enabled is True

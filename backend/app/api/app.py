@@ -32,8 +32,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     configure_logging(settings)
 
-    # 引擎负责检测规则和运行状态，Worker 只负责按周期驱动引擎。
+    # 引擎是进程内唯一的检测状态持有者：
+    #   - reload_thresholds() 把 t_alert_threshold、t_sensor、t_sensor_channel
+    #     组装成 engine.channel_states 里的运行时规则；
+    #   - 阈值连续命中、离线、死值等跨轮次状态同样保存在 channel_states；
+    #   - REST 接口和后台 Worker 共用这一个实例，接口看到的就是检测状态。
     engine_instance = AlertAnalyticsEngine(
+        # 连续命中条件有两套单位，由 condition_unit 决定用哪一组：
+        #   seconds -> confirm_seconds / stuck_seconds / offline_seconds；
+        #   points  -> confirm_points / stuck_points / offline_points。
         confirm_points=settings.detection_confirm_points,
         stuck_points=settings.detection_stuck_points,
         offline_points=settings.detection_offline_points,
@@ -41,6 +48,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         confirm_seconds=settings.detection_confirm_seconds,
         stuck_seconds=settings.detection_stuck_seconds,
         offline_seconds=settings.detection_offline_seconds,
+        # 五类预警的独立开关来自 backend/.env。开关只决定“是否写预警”，
+        # 样本读取、连续命中计数和 t_stat_record 统计都不受开关影响。
         alert_type_switches={
             ALERT_TYPE_THRESHOLD: settings.detection_alert_threshold_enabled,
             ALERT_TYPE_OFFLINE: settings.detection_alert_offline_enabled,
@@ -49,6 +58,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ALERT_TYPE_OOR: settings.detection_alert_oor_enabled,
         },
     )
+    # Worker 只是驱动者：不保存规则，只按周期调用引擎并维护两条链路的选主状态。
     detection_worker = AlertDetectionWorker(engine_instance, settings)
 
     @asynccontextmanager
@@ -58,8 +68,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             minconn=settings.db_pool_minconn,
             maxconn=settings.db_pool_maxconn,
         )
+        # initialize() 依次执行三步：
+        #   reload_thresholds()     读取阈值表和传感器元数据，重建 channel_states；
+        #   bootstrap_last_seen()   用 t_monitor 最近样本恢复各通道 last_ts 和
+        #                           online_status，避免重启后把正在上报的通道误判为离线；
+        #   refresh_monitor_row_count() 刷新概览用的数据量。
         await asyncio.to_thread(engine_instance.initialize)
+        # test 环境只跑单元测试和本地联调，不启动后台检测线程。
         if settings.detection_enabled and settings.environment != "test":
+            # start() 拉起两条 daemon 线程：
+            #   alert-realtime-worker    按 DETECTION_INTERVAL_SECONDS 扫描原始点并写预警；
+            #   alert-statistics-worker  按完整窗口写 t_stat_record。
+            # 两条线程各自通过 PostgreSQL advisory lock 选主，互不阻塞。
             detection_worker.start()
         try:
             yield

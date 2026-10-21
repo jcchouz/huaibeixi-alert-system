@@ -68,6 +68,11 @@ FROM ordered_samples
 GROUP BY s_no, ch
 """
 
+# 实时预警专用的原始样本查询：按 time 升序返回窗口内的全部原始点。
+# 与 WINDOW_AGG_SQL 的区别：
+#   - 不聚合，保留每个点的时间，才能按时间跨度判断连续命中；
+#   - value 为空的行直接排除，不参与阈值、量程和死值判定；
+#   - 排序由数据库保证，下游 _evaluate_*_streak() 依赖这个顺序累计状态。
 SAMPLE_BATCH_SQL = """
 SELECT
     LOWER(sensor_no) AS s_no,
@@ -219,7 +224,14 @@ class AlertAnalyticsEngine:
         return f"{(sensor_no or '').strip().lower()}:{(channel or '').strip()}"
 
     def is_alert_type_enabled(self, alert_type: str) -> bool:
-        """返回某类预警的检测开关状态，未配置的类型默认启用。"""
+        """返回某类预警的检测开关状态，未配置的类型默认启用。
+
+        开关只在写预警时生效（_apply_condition / 采集仪离线聚合会调用它），
+        关闭某类预警只会停止写入该类 t_alert_record，不影响：
+          - t_monitor 样本读取和连续命中状态累计；
+          - t_stat_record 统计窗口生成。
+        开关值来自 backend/.env，只在进程启动时读取一次。
+        """
         normalized = normalize_alert_type(alert_type) or alert_type
         return bool(self.alert_type_switches.get(normalized, True))
 
@@ -560,7 +572,25 @@ class AlertAnalyticsEngine:
         bool,
         Optional[Tuple[int, float, float, datetime]],
     ]:
-        """结合历史状态判断连续阈值超限方向。"""
+        """结合历史状态判断连续阈值超限方向。
+
+        ``previous_*`` 来自上一轮扫描保存在 channel_states 的状态，
+        ``samples`` 是本轮新到达的样本（按时间升序），因此连续命中
+        可以跨扫描轮次累计；后端重启后这些状态清零，需重新累计。
+
+        逐点处理规则：
+          - 与上一点间隔超过 ``max_gap_ms`` -> 视为采集中断，本段连续命中作废；
+          - 样本未命中任何级别 -> 方向、计数和起点全部清零；
+          - 方向与上一点相同 -> ``count += 1``，起点保持首次命中的时间；
+          - 方向翻转 -> 以当前点作为新一段的起点，count 重新从 1 开始；
+          - 同时记录这一段里最严重（level 数字最小）的命中，供写告警使用。
+
+        达到条件即置 ``active=True``：``target_seconds`` 不为空时按时间跨度
+        （``sample_time - started_at``）判断，为空时按点数 ``count >= target_points``
+        判断，两者互斥。返回这一段连续命中中最严重的一次快照
+        ``(level, value, limit, fire_time)``。调用方再用 active 的状态变化
+        和级别是否升级决定要不要写 t_alert_record。
+        """
         direction = (
             str(previous_direction)
             if previous_direction in (ALERT_DIRECTION_UPPER, ALERT_DIRECTION_LOWER)
@@ -993,7 +1023,19 @@ class AlertAnalyticsEngine:
         trigger_val: Optional[float],
         fire_time: datetime,
     ) -> Dict[str, Any]:
-        """新增或刷新未处理预警事件。"""
+        """新增或刷新未处理预警事件。
+
+        同键（sensor_no + channel + alert_type）且 ``alert_status = 0``
+        的记录视为同一条活动事件：
+
+        - 已存在：执行 UPDATE，seq 重新取号、alert_level 取更严重的一侧
+          （``LEAST``，1 级最严重）、``trigger_count`` 加 1、刷新 update_time，
+          不新增行；
+        - 不存在：INSERT 一条 status=0 的新事件，并分配新的轮询 seq。
+
+        查询使用 ``FOR UPDATE`` 兜住并发实例同时写入的情况；
+        正常情况下调用方已通过 active_map 在内存里去重。
+        """
         alert_type = normalize_alert_type(alert_type) or alert_type
         alert_category = alert_category_for_type(alert_type)
         alert_id = uuid.uuid4().hex
@@ -1141,7 +1183,14 @@ class AlertAnalyticsEngine:
         )
 
     def _load_active_alerts(self, cur: Any) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
-        """按传感器、通道和预警类型加载未处理预警。"""
+        """按传感器、通道和预警类型加载未处理预警。
+
+        每个扫描轮次只查一次，结果作为本轮内存去重表：
+          - 键为 ``(sensor_no_lower, channel, alert_type)``；
+          - 条件成立且键已存在时不再 INSERT，避免每秒扫描都产生新行；
+          - 本轮新写入或升级的事件会回填到同一个 dict，
+            同一轮内后续判定直接命中该键，不会重复写库。
+        """
         cur.execute(
             """
             SELECT *
@@ -1176,7 +1225,18 @@ class AlertAnalyticsEngine:
         trigger_val: Optional[float],
         fire_time: datetime,
     ) -> Optional[Dict[str, Any]]:
-        """条件成立时写入预警，已存在同键活动事件时避免重复创建。"""
+        """条件成立时写入预警，已存在同键活动事件时避免重复创建。
+
+        判定顺序：
+          1. 条件未成立（active=False）或该类预警开关关闭 -> 直接返回 None；
+          2. 已存在同键活动事件且新级别不更严重（级别数字 >= 原级别）
+             -> 返回原事件，不写库；
+          3. 其余情况（首次命中、级别升级）-> 交给 _upsert_alert_incident()
+             执行 INSERT 或 UPDATE。
+
+        写库成功后把事件回填到 active_map 并追加到 triggered，
+        triggered 只用于接口展示和日志，不会重复写库。
+        """
         if not active or not self.is_alert_type_enabled(alert_type):
             return None
         key = self._alert_key(sensor_no, channel, alert_type)
@@ -1300,7 +1360,20 @@ class AlertAnalyticsEngine:
         detect_alerts: bool = True,
         new_samples_only: bool = False,
     ) -> Dict[str, Any]:
-        """在一个窗口中执行统计写入和预警检测。"""
+        """在一个窗口中执行统计写入和预警检测。
+
+        三种调用方式共用同一套逻辑，靠三个开关区分：
+
+        - ``scan_realtime_alerts()``：write_statistics=False、
+          detect_alerts=True、new_samples_only=True，只处理新到样本并写预警；
+        - ``record_statistics_window()``：write_statistics=True、
+          detect_alerts=False，只做 SQL 聚合并写 t_stat_record；
+        - ``step_detection()``：两者都为 True，用于人工补算/联调。
+
+        窗口是左闭右开的 ``[window_start, window_end)``。整个方法在一个
+        数据库事务里完成“读样本 -> 判定 -> 写预警/统计”，事务提交后才把
+        新的连续命中状态发布到 ``channel_states``，避免写库失败但内存已推进。
+        """
         # 以下累加结果与预警写入在同一事务中提交。
         triggered_alerts: List[Dict[str, Any]] = []
         upserted_stats = 0
@@ -1318,6 +1391,9 @@ class AlertAnalyticsEngine:
             if detect_alerts:
                 # 实时预警需要逐点样本；只加载已配置的传感器和通道，
                 # 并保持数据库时间顺序。
+                # 未在 t_alert_threshold 中配置的组合会被直接丢弃，
+                # 因此 raw_points_processed 统计的是“读到的行数”，
+                # 不等于参与判定的样本数。
                 cur.execute(SAMPLE_BATCH_SQL, (window_start, window_end))
                 for row in cur.fetchall():
                     raw_points_processed += 1
@@ -1329,6 +1405,10 @@ class AlertAnalyticsEngine:
                     )
                 if new_samples_only:
                     # 回看查询可能返回旧数据，丢弃各通道水位之前或同一时刻的样本。
+                    # 水位 last_ts 来自上一轮扫描结束后的 channel_states，
+                    # 比较使用严格大于，保证同一个时间戳只被计数一次。
+                    # 过滤后没有新样本的通道会从 dict 中移除，
+                    # 后续仍会走“无样本 -> 离线判定”的分支。
                     for key, samples in list(samples_by_key.items()):
                         previous_last_seen = self._parse_maybe_dt(
                             rules_by_key[key].get("last_ts")
@@ -1343,6 +1423,8 @@ class AlertAnalyticsEngine:
                             samples_by_key[key] = samples
                         else:
                             del samples_by_key[key]
+                # 把逐点样本聚合成与 WINDOW_AGG_SQL 相同的字段结构，
+                # 让后续统计和预警逻辑无需区分数据来源。
                 observed_map = {
                     key: self._aggregate_samples(samples)
                     for key, samples in samples_by_key.items()
@@ -1355,7 +1437,11 @@ class AlertAnalyticsEngine:
                     observed_map[self.make_key(row["s_no"], row["ch"])] = row
 
             # 一次性加载活动预警，重复条件在原事件上更新。
+            # 注意这里是“整个表里所有未处理记录”，不按窗口过滤，
+            # 所以跨窗口的活动事件也能在同一轮里被识别出来。
             active_map = self._load_active_alerts(cur) if detect_alerts else {}
+            # 采集仪级离线需要知道每台采集仪配置了多少个通道，
+            # 只有全部通道都离线时才汇总为一条采集仪离线预警。
             instrument_totals = Counter(
                 r.get("instrument_id")
                 for r in rules
@@ -1364,6 +1450,7 @@ class AlertAnalyticsEngine:
             offline_by_instrument: Dict[str, Set[str]] = {}
 
             # 每个已配置通道都要评估，包括当前窗口没有数据的通道。
+            # 没有样本不代表正常，可能是通道已经离线，必须继续判离线。
             for rule in rules:
                 key = rule["key"]
                 sensor_no = rule["sensor_no_lower"]
@@ -1473,6 +1560,8 @@ class AlertAnalyticsEngine:
                 )
 
                 # 依次评估阈值、物理量程和传感器死值条件。
+                # 上下文（上一轮方向、计数、起点、上一轮最后样本时间）
+                # 全部来自 channel_states，因此连续命中可以跨扫描轮次累计。
                 (
                     threshold_direction,
                     threshold_count,
@@ -1489,9 +1578,14 @@ class AlertAnalyticsEngine:
                     target_seconds=confirm_seconds,
                     previous_started_at=rule.get("threshold_streak_started_at"),
                     previous_sample_time=previous_last_seen,
+                    # 相邻样本间隔超过 1.5 个采样周期视为断流，
+                    # 不再把断流两侧的点算作同一段连续命中。
                     max_gap_ms=float(rule.get("sample_interval_ms") or 1000) * 1.5,
                 )
+                # 本轮待发布的通道状态。先写入 pending_state_updates，
+                # 事务提交成功后才真正更新 channel_states。
                 state_updates: Dict[str, Any] = {
+                    # last_ts 是下一轮去重的依据，必须取本轮最后一个样本时间。
                     "last_ts": serialize_val(samples[-1][0]),
                     "last_val": round(samples[-1][1], 5),
                     "online_status": "ONLINE",
@@ -1504,6 +1598,7 @@ class AlertAnalyticsEngine:
                     "threshold_condition_level": None,
                 }
                 if threshold_snapshot is not None:
+                    # snapshot 是本段连续命中里最严重的 (级别, 实测值, 阈值, 触发时间)。
                     level, value, limit, fire_time = threshold_snapshot
                     previous_condition_level = rule.get("threshold_condition_level")
                     previous_condition_active = bool(
@@ -1514,6 +1609,8 @@ class AlertAnalyticsEngine:
                         if previous_condition_level is not None
                         else None
                     )
+                    # 记录本段连续命中已经达到过的最严重级别，
+                    # 级别从 3 升到 1 时才会再次写库。
                     active_condition_level = (
                         level
                         if previous_condition_level_value is None
@@ -1527,6 +1624,11 @@ class AlertAnalyticsEngine:
                             "threshold_condition_level": active_condition_level,
                         }
                     )
+                    # 只有以下三种情况才写预警：
+                    #   1. 上一轮还没处于命中态（本段第一次达到确认条件）；
+                    #   2. 上一轮没有记录级别（升级判定缺少基准）；
+                    #   3. 本轮级别比上一轮更严重（数字更小）。
+                    # 持续同级别超限不会重复写库，避免每秒扫描产生新行。
                     if (
                         not previous_condition_active
                         or previous_condition_level_value is None
@@ -1740,6 +1842,8 @@ class AlertAnalyticsEngine:
                     daq_condition_updates[instrument_id] = True
 
         # 仅在数据库事务成功后发布新的运行状态。
+        # 这一步是“状态在内存里”的落点：下一轮扫描通过 channel_states
+        # 读取 last_ts、连续命中计数和 condition_active，继续累计。
         for key, updates in pending_state_updates.items():
             self.channel_states.update_field(key, **updates)
         for key, offset in dc_offsets.items():
@@ -1747,6 +1851,7 @@ class AlertAnalyticsEngine:
                 key,
                 realtime_dc_offset=offset,
             )
+        # 采集仪级离线状态按采集仪维度单独维护，没有对应的通道 key。
         self._daq_condition_active.update(daq_condition_updates)
 
         return {
@@ -1764,7 +1869,16 @@ class AlertAnalyticsEngine:
         window_start: datetime,
         window_end: datetime,
     ) -> Dict[str, Any]:
-        """只对新到达的原始样本执行实时预警检测。"""
+        """只对新到达的原始样本执行实时预警检测。
+
+        生产环境由 AlertDetectionWorker 的实时线程按
+        ``DETECTION_INTERVAL_SECONDS`` 调用；窗口由 Worker 计算，
+        这里只负责：
+
+        - ``write_statistics=False``：不写 t_stat_record，统计由另一条线程负责；
+        - ``new_samples_only=True``：按通道 last_ts 丢弃回看带来的重复样本；
+        - 用 ``_alert_step_lock`` 串行化，避免手工调用和后台线程同时改内存状态。
+        """
         with self._alert_step_lock:
             t0 = time.perf_counter()
             if window_end <= window_start:

@@ -60,6 +60,22 @@ To start only the backend and frontend:
 .\start_all.bat --no-simulator
 ```
 
+### Threshold-only debugging
+
+`backend/.env` currently enables only `DETECTION_ALERT_THRESHOLD_ENABLED`.
+To debug the threshold chain with a single channel, stop any running backend,
+start the backend, then inject samples:
+
+```powershell
+cd backend
+.\run_inject_threshold.bat --level 3 --seconds 20
+```
+
+The injector (`backend/tools/inject_threshold.py`) only writes one channel to
+`t_monitor`. See
+[单通道阈值预警调试指南.md](docs/单通道阈值预警调试指南.md) for the full
+breakpoint sequence, verification SQL and troubleshooting notes.
+
 Production only needs the backend service. It scans newly arrived raw samples
 from `t_monitor` for alerts every second by default and writes one-minute
 statistics to `t_stat_record`. Multiple backend instances are coordinated
