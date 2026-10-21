@@ -120,6 +120,27 @@ class Settings(BaseSettings):
         le=86400,
         validation_alias="DETECTION_OFFLINE_SECONDS",
     )
+    # 各类预警场景的独立开关，关闭后仍照常采集和统计，只是不再生成该类预警。
+    detection_alert_threshold_enabled: bool = Field(
+        default=True,
+        validation_alias="DETECTION_ALERT_THRESHOLD_ENABLED",
+    )
+    detection_alert_offline_enabled: bool = Field(
+        default=True,
+        validation_alias="DETECTION_ALERT_OFFLINE_ENABLED",
+    )
+    detection_alert_daq_offline_enabled: bool = Field(
+        default=True,
+        validation_alias="DETECTION_ALERT_DAQ_OFFLINE_ENABLED",
+    )
+    detection_alert_stuck_enabled: bool = Field(
+        default=True,
+        validation_alias="DETECTION_ALERT_STUCK_ENABLED",
+    )
+    detection_alert_oor_enabled: bool = Field(
+        default=True,
+        validation_alias="DETECTION_ALERT_OOR_ENABLED",
+    )
     # 服务恢复后单轮最多补处理的统计窗口数，防止长时间停机的追帧压力。
     detection_max_catchup_windows: int = Field(
         default=5,

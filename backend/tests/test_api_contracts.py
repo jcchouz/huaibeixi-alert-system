@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from app.api.app import create_app
 from app.api.deps import get_overview_service
 from app.core.config import Settings
+from app.domain.alert_types import ALERT_TYPE_STUCK, ALERT_TYPE_THRESHOLD
 
 
 class FakeOverviewService:
@@ -40,6 +41,22 @@ def test_health_and_overview_are_open() -> None:
     response = client.get("/api/overview")
     assert response.status_code == 200
     assert response.json()["totalSensors"] == 1
+
+
+def test_alert_type_switches_are_wired_to_engine() -> None:
+    settings = Settings(
+        environment="test",
+        trusted_hosts="*",
+        cors_origins="http://testserver",
+        detection_alert_stuck_enabled=False,
+    )
+    app = create_app(settings)
+
+    assert app.state.engine.is_alert_type_enabled(ALERT_TYPE_STUCK) is False
+    assert app.state.engine.is_alert_type_enabled(ALERT_TYPE_THRESHOLD) is True
+    switches = app.state.engine.get_status()["alertTypeSwitches"]
+    assert switches[ALERT_TYPE_STUCK] is False
+    assert switches[ALERT_TYPE_THRESHOLD] is True
 
 
 def test_validation_errors_use_stable_error_shape() -> None:

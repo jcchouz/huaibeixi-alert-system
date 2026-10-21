@@ -187,6 +187,7 @@ class AlertAnalyticsEngine:
         confirm_seconds: float = 3.0,
         stuck_seconds: float = 100.0,
         offline_seconds: float = 5.0,
+        alert_type_switches: Optional[Dict[str, bool]] = None,
     ) -> None:
         # 检测、接口补充信息和总览统计共用这些元数据。
         self.channel_states = ConcurrentDict()
@@ -204,6 +205,11 @@ class AlertAnalyticsEngine:
         self.confirm_seconds = max(0.001, float(confirm_seconds))
         self.stuck_seconds = max(0.001, float(stuck_seconds))
         self.offline_seconds = max(0.001, float(offline_seconds))
+        # 未显式配置的预警类型默认启用，避免新增类型被意外关闭。
+        self.alert_type_switches: Dict[str, bool] = {
+            (normalize_alert_type(name) or name): bool(enabled)
+            for name, enabled in (alert_type_switches or {}).items()
+        }
         self._alert_step_lock = threading.Lock()
         self._statistics_step_lock = threading.Lock()
 
@@ -211,6 +217,11 @@ class AlertAnalyticsEngine:
     def make_key(sensor_no: str, channel: Optional[str]) -> str:
         """生成标准化的传感器和通道组合键。"""
         return f"{(sensor_no or '').strip().lower()}:{(channel or '').strip()}"
+
+    def is_alert_type_enabled(self, alert_type: str) -> bool:
+        """返回某类预警的检测开关状态，未配置的类型默认启用。"""
+        normalized = normalize_alert_type(alert_type) or alert_type
+        return bool(self.alert_type_switches.get(normalized, True))
 
     # ------------------------------------------------------------------
     # 元数据初始化和热更新
@@ -1166,7 +1177,7 @@ class AlertAnalyticsEngine:
         fire_time: datetime,
     ) -> Optional[Dict[str, Any]]:
         """条件成立时写入预警，已存在同键活动事件时避免重复创建。"""
-        if not active:
+        if not active or not self.is_alert_type_enabled(alert_type):
             return None
         key = self._alert_key(sensor_no, channel, alert_type)
         existing = active_map.get(key)
@@ -1693,7 +1704,9 @@ class AlertAnalyticsEngine:
                     ),
                     page_size=len(stat_rows),
                 )
-            if detect_alerts:
+            if detect_alerts and self.is_alert_type_enabled(
+                ALERT_TYPE_DAQ_OFFLINE
+            ):
                 # 采集仪下全部通道均离线时才汇总为采集仪级离线预警。
                 for instrument_id in sorted(instrument_totals):
                     offline_keys = offline_by_instrument.get(instrument_id, set())
@@ -1837,6 +1850,7 @@ class AlertAnalyticsEngine:
             "lastReloadTime": serialize_val(self.last_reload_time),
             "detectionMode": "realtime_sample_groups",
             "conditionUnit": self.condition_unit,
+            "alertTypeSwitches": dict(self.alert_type_switches),
             "confirmPoints": self.confirm_points,
             "stuckPoints": self.stuck_points,
             "offlinePoints": self.offline_points,

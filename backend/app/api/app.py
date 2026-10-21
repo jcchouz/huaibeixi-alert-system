@@ -14,6 +14,13 @@ from app.api.routers import alerts, health, overview, statistics, thresholds
 from app.core.config import Settings, get_settings
 from app.core.exceptions import install_exception_handlers
 from app.core.logging import configure_logging
+from app.domain.alert_types import (
+    ALERT_TYPE_DAQ_OFFLINE,
+    ALERT_TYPE_OFFLINE,
+    ALERT_TYPE_OOR,
+    ALERT_TYPE_STUCK,
+    ALERT_TYPE_THRESHOLD,
+)
 from app.domain.engine import AlertAnalyticsEngine
 from app.infrastructure.database import close_db_pool, init_db_pool
 from app.infrastructure.middleware import RequestContextMiddleware
@@ -34,6 +41,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         confirm_seconds=settings.detection_confirm_seconds,
         stuck_seconds=settings.detection_stuck_seconds,
         offline_seconds=settings.detection_offline_seconds,
+        alert_type_switches={
+            ALERT_TYPE_THRESHOLD: settings.detection_alert_threshold_enabled,
+            ALERT_TYPE_OFFLINE: settings.detection_alert_offline_enabled,
+            ALERT_TYPE_DAQ_OFFLINE: settings.detection_alert_daq_offline_enabled,
+            ALERT_TYPE_STUCK: settings.detection_alert_stuck_enabled,
+            ALERT_TYPE_OOR: settings.detection_alert_oor_enabled,
+        },
     )
     detection_worker = AlertDetectionWorker(engine_instance, settings)
 

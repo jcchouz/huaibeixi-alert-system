@@ -92,6 +92,23 @@ def test_detection_condition_unit_can_be_switched_by_environment(
     assert second_settings.detection_condition_unit == "seconds"
 
 
+def test_alert_type_switches_default_to_enabled(monkeypatch) -> None:
+    settings = Settings(environment="test")
+    assert settings.detection_alert_threshold_enabled is True
+    assert settings.detection_alert_offline_enabled is True
+    assert settings.detection_alert_daq_offline_enabled is True
+    assert settings.detection_alert_stuck_enabled is True
+    assert settings.detection_alert_oor_enabled is True
+
+    monkeypatch.setenv("DETECTION_ALERT_STUCK_ENABLED", "false")
+    disabled = Settings(environment="test")
+    assert disabled.detection_alert_stuck_enabled is False
+    assert disabled.detection_alert_threshold_enabled is True
+    assert disabled.detection_alert_offline_enabled is True
+    assert disabled.detection_alert_daq_offline_enabled is True
+    assert disabled.detection_alert_oor_enabled is True
+
+
 def test_range_min_must_not_exceed_range_max() -> None:
     with pytest.raises(HTTPException) as error:
         ThresholdService._validate_thresholds(

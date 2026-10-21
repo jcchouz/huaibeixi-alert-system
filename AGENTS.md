@@ -14,6 +14,7 @@
 - 连续命中条件由 `DETECTION_CONDITION_UNIT` 切换：默认 `seconds`，通过 `DETECTION_CONFIRM_SECONDS`、`DETECTION_OFFLINE_SECONDS` 和 `DETECTION_STUCK_SECONDS` 配置；`points` 模式保留原行为，通过 `DETECTION_CONFIRM_POINTS`、`DETECTION_OFFLINE_POINTS` 和 `DETECTION_STUCK_POINTS` 配置，持续时间由组数和 `t_sensor.frequency` 换算。
 - 实时预警扫描周期由 `DETECTION_INTERVAL_SECONDS` 配置，统计窗口只影响 `t_stat_record`，不得阻塞实时预警。
 - 实时扫描通过 `DETECTION_ALERT_OVERLAP_SECONDS` 短回看以覆盖外部事务提交延迟，重复样本必须依据 `last_ts` 去重。
+- 各类预警可通过 `DETECTION_ALERT_THRESHOLD_ENABLED`、`DETECTION_ALERT_OFFLINE_ENABLED`、`DETECTION_ALERT_DAQ_OFFLINE_ENABLED`、`DETECTION_ALERT_STUCK_ENABLED` 和 `DETECTION_ALERT_OOR_ENABLED` 独立开关，默认全部开启；关闭某类预警只停止写入该类预警，采样和统计不受影响。
 - `continuous_simulator.py` 只负责持续向 `t_monitor` 写入测试数据，并周期性制造各类预警场景，不执行检测，不写入统计或预警表。
 - 多个后端实例同时运行时，实时预警和统计任务分别通过 PostgreSQL advisory lock 选主，避免重复处理。
 

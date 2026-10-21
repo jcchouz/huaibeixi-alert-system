@@ -12,6 +12,7 @@ from app.domain.alert_types import (
     ALERT_DIRECTION_NONE,
     ALERT_TYPE_DAQ_OFFLINE,
     ALERT_TYPE_OFFLINE,
+    ALERT_TYPE_STUCK,
     ALERT_TYPE_THRESHOLD,
 )
 from app.domain.engine import AlertAnalyticsEngine
@@ -627,6 +628,30 @@ def test_statistics_window_uses_one_batch_upsert(monkeypatch) -> None:
     assert batches[0][2] == 2
 
 
+def _add_offline_channel(
+    engine: AlertAnalyticsEngine,
+    instrument_id: str,
+    sensor_no: str,
+    channel: str,
+    last_ts: datetime,
+) -> None:
+    """登记一个采集仪下属通道，用于采集仪离线聚合测试。"""
+    key = engine.make_key(sensor_no, channel)
+    engine.channel_states.set(
+        key,
+        {
+            "key": key,
+            "sensor_no_lower": sensor_no,
+            "channel": channel,
+            "instrument_id": instrument_id,
+            "offline_points": 5,
+            "sample_interval_ms": 1000.0,
+            "last_ts": last_ts,
+            "offline_condition_active": False,
+        },
+    )
+
+
 def test_daq_offline_requires_every_channel_offline(monkeypatch) -> None:
     """采集仪下仍有通道在线时不得产生采集仪离线预警。"""
     engine = AlertAnalyticsEngine()
@@ -634,25 +659,15 @@ def test_daq_offline_requires_every_channel_offline(monkeypatch) -> None:
     window_end = datetime(2026, 10, 20, 12, 0, 10)
     stale_ts = window_end - timedelta(seconds=10)
 
-    def set_channel(sensor_no: str, channel: str, last_ts: datetime) -> None:
-        key = engine.make_key(sensor_no, channel)
-        engine.channel_states.set(
-            key,
-            {
-                "key": key,
-                "sensor_no_lower": sensor_no,
-                "channel": channel,
-                "instrument_id": instrument_id,
-                "offline_points": 5,
-                "sample_interval_ms": 1000.0,
-                "last_ts": last_ts,
-                "offline_condition_active": False,
-            },
-        )
-
-    set_channel("sensor-x", "x", stale_ts)
-    set_channel("sensor-y", "y", stale_ts)
-    set_channel("sensor-z", "z", window_end - timedelta(seconds=1))
+    _add_offline_channel(engine, instrument_id, "sensor-x", "x", stale_ts)
+    _add_offline_channel(engine, instrument_id, "sensor-y", "y", stale_ts)
+    _add_offline_channel(
+        engine,
+        instrument_id,
+        "sensor-z",
+        "z",
+        window_end - timedelta(seconds=1),
+    )
 
     cursor = EmptyRealtimeCursor()
 
@@ -679,7 +694,7 @@ def test_daq_offline_requires_every_channel_offline(monkeypatch) -> None:
     assert engine._daq_condition_active[instrument_id] is False
 
     # 最后一个通道也离线后才汇总为采集仪级预警。
-    set_channel("sensor-z", "z", stale_ts)
+    _add_offline_channel(engine, instrument_id, "sensor-z", "z", stale_ts)
     result = engine.scan_realtime_alerts(
         window_end,
         window_end + timedelta(seconds=1),
@@ -688,3 +703,96 @@ def test_daq_offline_requires_every_channel_offline(monkeypatch) -> None:
     assert [item["alert_type"] for item in upserted] == [ALERT_TYPE_DAQ_OFFLINE]
     assert result["triggeredAlertsCount"] == 1
     assert engine._daq_condition_active[instrument_id] is True
+
+
+def test_disabled_alert_type_switch_skips_alert_creation() -> None:
+    """关闭某类预警后条件命中也不再写入预警，其他类型不受影响。"""
+    engine = AlertAnalyticsEngine(
+        alert_type_switches={ALERT_TYPE_THRESHOLD: False},
+    )
+    created: list[dict[str, Any]] = []
+
+    def fake_upsert(cur, **kwargs):
+        created.append(kwargs)
+        return {"id": "alert", **kwargs}
+
+    engine._upsert_alert_incident = fake_upsert  # type: ignore[method-assign]
+
+    result = engine._apply_condition(
+        None,
+        {},
+        [],
+        rule={"id": "threshold-1"},
+        sensor_no="sensor-1",
+        channel="x",
+        alert_type=ALERT_TYPE_THRESHOLD,
+        active=True,
+        alert_level=1,
+        trigger_val=12.0,
+        fire_time=datetime(2026, 10, 20, 12, 0, 0),
+    )
+
+    assert result is None
+    assert created == []
+    assert engine.is_alert_type_enabled(ALERT_TYPE_THRESHOLD) is False
+    assert engine.is_alert_type_enabled(ALERT_TYPE_STUCK) is True
+
+    # 未关闭的预警类型仍然正常创建。
+    result = engine._apply_condition(
+        None,
+        {},
+        [],
+        rule={"id": "threshold-1"},
+        sensor_no="sensor-1",
+        channel="x",
+        alert_type=ALERT_TYPE_STUCK,
+        active=True,
+        alert_level=1,
+        trigger_val=0.0,
+        fire_time=datetime(2026, 10, 20, 12, 0, 0),
+    )
+
+    assert result is not None
+    assert [item["alert_type"] for item in created] == [ALERT_TYPE_STUCK]
+
+
+def test_daq_offline_switch_disables_collector_alert(monkeypatch) -> None:
+    """采集仪离线开关关闭后，即使全部通道离线也不写采集仪预警。"""
+    engine = AlertAnalyticsEngine(
+        alert_type_switches={ALERT_TYPE_DAQ_OFFLINE: False},
+    )
+    instrument_id = "instrument-1"
+    window_end = datetime(2026, 10, 20, 12, 0, 10)
+    stale_ts = window_end - timedelta(seconds=10)
+    for channel in ("x", "y", "z"):
+        _add_offline_channel(
+            engine,
+            instrument_id,
+            f"sensor-{channel}",
+            channel,
+            stale_ts,
+        )
+
+    cursor = EmptyRealtimeCursor()
+
+    @contextmanager
+    def fake_get_db_cursor(commit: bool = False):
+        yield cursor
+
+    def fake_apply_condition(cur, active_map, triggered, **kwargs):
+        return kwargs
+
+    def fail_upsert(*args, **kwargs):
+        raise AssertionError("disabled DAQ switch must not create alerts")
+
+    monkeypatch.setattr(engine_module, "get_db_cursor", fake_get_db_cursor)
+    monkeypatch.setattr(engine, "_apply_condition", fake_apply_condition)
+    monkeypatch.setattr(engine, "_upsert_alert_incident", fail_upsert)
+
+    result = engine.scan_realtime_alerts(
+        window_end - timedelta(seconds=1),
+        window_end,
+    )
+
+    assert result["triggeredAlertsCount"] == 0
+    assert instrument_id not in engine._daq_condition_active

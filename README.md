@@ -72,7 +72,12 @@ uses `DETECTION_CONFIRM_SECONDS`, `DETECTION_STUCK_SECONDS` and
 `DETECTION_OFFLINE_SECONDS` for threshold/out-of-range, stuck and offline
 detection. Set `DETECTION_CONDITION_UNIT=points` to keep the original
 `DETECTION_CONFIRM_POINTS`, `DETECTION_STUCK_POINTS` and
-`DETECTION_OFFLINE_POINTS` behavior. Set `DETECTION_ENABLED=false` only when
+`DETECTION_OFFLINE_POINTS` behavior. Each alert scenario can be disabled
+independently with `DETECTION_ALERT_THRESHOLD_ENABLED`,
+`DETECTION_ALERT_OFFLINE_ENABLED`, `DETECTION_ALERT_DAQ_OFFLINE_ENABLED`,
+`DETECTION_ALERT_STUCK_ENABLED` and `DETECTION_ALERT_OOR_ENABLED` (all default
+to `true`); disabling a scenario only stops writing that alert type, while
+sampling and statistics keep running. Set `DETECTION_ENABLED=false` only when
 detection should run in a separate deployment.
 
 ## Alert Categories
