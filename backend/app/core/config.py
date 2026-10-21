@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     # 应用与 API 基本信息。
     app_name: str = Field(
-        default="淮北西站/玉环站 结构健康监测实时报警与统计分析系统 API",
+        default="结构健康监测实时报警与统计分析系统 API",
         validation_alias="APP_NAME",
     )
     environment: Literal["development", "test", "staging", "production"] = Field(
