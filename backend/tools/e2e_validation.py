@@ -61,7 +61,10 @@ ANOMALIES: Dict[Tuple[str, str], Dict[int, Dict[str, Any]]] = {
     },
     ("wy-sj-01", "y"): {0: {"mode": "const", "v": 30.0}},   # 传感器死值
     ("zd-wg-01", "x"): {1: {"mode": "skip"}, 2: {"mode": "skip"}},   # 传感器离线
+    # 采集仪离线要求该采集仪下全部通道同时离线（ZD-WG-01 的 x/y/z + test-007）。
     ("zd-wg-01", "y"): {1: {"mode": "skip"}, 2: {"mode": "skip"}},   # 采集仪离线
+    ("zd-wg-01", "z"): {1: {"mode": "skip"}, 2: {"mode": "skip"}},   # 采集仪离线
+    ("test-007", ""): {1: {"mode": "skip"}, 2: {"mode": "skip"}},    # 采集仪离线
     ("wlg-10", ""): {
         1: {"mode": "band", "lo": -260.0, "hi": -255.0},  # 低于三级下限
         2: {"mode": "band", "lo": -330.0, "hi": -322.0},  # 超物理量程且低于一级下限
@@ -77,6 +80,8 @@ EXPECTED_ALERTS: List[Tuple[str, int, int]] = [
     ("wy-sj-01:y:传感器死值", 0, 1),
     ("zd-wg-01:x:传感器离线", 0, 1),
     ("zd-wg-01:y:传感器离线", 0, 1),
+    ("zd-wg-01:z:传感器离线", 0, 1),
+    ("test-007::传感器离线", 0, 1),
     ("wlg-10::阈值超限", 0, 1),
     ("wlg-10::超物理量程", 0, 1),
 ]

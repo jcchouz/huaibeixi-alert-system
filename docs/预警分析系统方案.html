@@ -328,7 +328,7 @@ effective_timeout_ms = max(3 × expected_interval_ms, 10000)   -- 10 秒下限</
   <p>再加 <strong>pending 持续时间</strong>（连续 3 次检查都超时才升级为 firing，按 5 秒一轮约 15 秒）和<strong>迟滞恢复</strong>（连续 3 次检查都有数据才算恢复，不是收到一条就恢复）。</p>
 
   <h4>第 3 层：按采集器聚合，抑制风暴</h4>
-  <p>库里的 <code>t_collect_box</code>（6 个）和 <code>t_collect_instrument</code>（12 个）是天然的分组维度。同一采集仪下 ≥5 个通道同时离线时，<strong>只发一条「仪器 XXX 离线（影响 N 个通道）」</strong>，其余子告警抑制掉。这正是 Alertmanager 的 inhibition 模式。</p>
+  <p>库里的 <code>t_collect_box</code>（6 个）和 <code>t_collect_instrument</code>（12 个）是天然的分组维度。同一采集仪下<strong>全部通道都离线</strong>时，<strong>只发一条「仪器 XXX 离线（影响 N 个通道）」</strong>，其余子告警抑制掉；只要还有任一通道上报数据就不判定。这正是 Alertmanager 的 inhibition 模式。</p>
 
   <div class="note">
     <div class="lbl">如果一定要严格按需求的 1000ms</div>

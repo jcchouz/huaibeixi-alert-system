@@ -5,14 +5,13 @@
 """
 
 import logging
-import math
 import re
 import threading
 import time
 import uuid
 from collections import Counter
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from psycopg2.extras import execute_values
 
@@ -1194,7 +1193,7 @@ class AlertAnalyticsEngine:
         cur: Any,
         active_map: Dict[Tuple[str, str, str], Dict[str, Any]],
         triggered: List[Dict[str, Any]],
-        offline_by_instrument: Dict[str, List[Dict[str, Any]]],
+        offline_by_instrument: Dict[str, Set[str]],
         pending_state_updates: Dict[str, Dict[str, Any]],
         *,
         rule: Dict[str, Any],
@@ -1214,7 +1213,7 @@ class AlertAnalyticsEngine:
         # 记录离线通道，供后续采集仪级离线聚合使用。
         instrument_id = (rule.get("instrument_id") or "").strip()
         if instrument_id:
-            offline_by_instrument.setdefault(instrument_id, []).append(rule)
+            offline_by_instrument.setdefault(instrument_id, set()).add(key)
 
         if not bool(rule.get("offline_condition_active")):
             # 同一个连续离线周期只创建一个离线事件。
@@ -1351,7 +1350,7 @@ class AlertAnalyticsEngine:
                 for r in rules
                 if (r.get("instrument_id") or "").strip()
             )
-            offline_by_instrument: Dict[str, List[Dict[str, Any]]] = {}
+            offline_by_instrument: Dict[str, Set[str]] = {}
 
             # 每个已配置通道都要评估，包括当前窗口没有数据的通道。
             for rule in rules:
@@ -1645,8 +1644,8 @@ class AlertAnalyticsEngine:
                     if instrument_id:
                         offline_by_instrument.setdefault(
                             instrument_id,
-                            [],
-                        ).append(rule)
+                            set(),
+                        ).add(key)
                 if offline_condition_hit and not previous_offline_active:
                     self._apply_condition(
                         cur,
@@ -1695,12 +1694,11 @@ class AlertAnalyticsEngine:
                     page_size=len(stat_rows),
                 )
             if detect_alerts:
-                # 将多个通道离线汇总为采集仪级离线预警。
+                # 采集仪下全部通道均离线时才汇总为采集仪级离线预警。
                 for instrument_id in sorted(instrument_totals):
-                    offline_rules = offline_by_instrument.get(instrument_id, [])
+                    offline_keys = offline_by_instrument.get(instrument_id, set())
                     total_channels = int(instrument_totals.get(instrument_id, 0))
-                    required_offline = max(2, int(math.ceil(total_channels * 0.5)))
-                    if total_channels <= 0 or len(offline_rules) < required_offline:
+                    if total_channels <= 0 or len(offline_keys) < total_channels:
                         daq_condition_updates[instrument_id] = False
                         continue
                     if self._daq_condition_active.get(instrument_id):

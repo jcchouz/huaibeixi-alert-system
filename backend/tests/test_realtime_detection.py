@@ -625,3 +625,66 @@ def test_statistics_window_uses_one_batch_upsert(monkeypatch) -> None:
     assert len(batches) == 1
     assert len(batches[0][1]) == 2
     assert batches[0][2] == 2
+
+
+def test_daq_offline_requires_every_channel_offline(monkeypatch) -> None:
+    """采集仪下仍有通道在线时不得产生采集仪离线预警。"""
+    engine = AlertAnalyticsEngine()
+    instrument_id = "instrument-1"
+    window_end = datetime(2026, 10, 20, 12, 0, 10)
+    stale_ts = window_end - timedelta(seconds=10)
+
+    def set_channel(sensor_no: str, channel: str, last_ts: datetime) -> None:
+        key = engine.make_key(sensor_no, channel)
+        engine.channel_states.set(
+            key,
+            {
+                "key": key,
+                "sensor_no_lower": sensor_no,
+                "channel": channel,
+                "instrument_id": instrument_id,
+                "offline_points": 5,
+                "sample_interval_ms": 1000.0,
+                "last_ts": last_ts,
+                "offline_condition_active": False,
+            },
+        )
+
+    set_channel("sensor-x", "x", stale_ts)
+    set_channel("sensor-y", "y", stale_ts)
+    set_channel("sensor-z", "z", window_end - timedelta(seconds=1))
+
+    cursor = EmptyRealtimeCursor()
+
+    @contextmanager
+    def fake_get_db_cursor(commit: bool = False):
+        yield cursor
+
+    upserted: list[dict[str, Any]] = []
+
+    def fake_apply_condition(cur, active_map, triggered, **kwargs):
+        return kwargs
+
+    def fake_upsert(cur, **kwargs):
+        upserted.append(kwargs)
+        return {"id": "daq-alert", **kwargs}
+
+    monkeypatch.setattr(engine_module, "get_db_cursor", fake_get_db_cursor)
+    monkeypatch.setattr(engine, "_apply_condition", fake_apply_condition)
+    monkeypatch.setattr(engine, "_upsert_alert_incident", fake_upsert)
+
+    engine.scan_realtime_alerts(window_end - timedelta(seconds=1), window_end)
+
+    assert upserted == []
+    assert engine._daq_condition_active[instrument_id] is False
+
+    # 最后一个通道也离线后才汇总为采集仪级预警。
+    set_channel("sensor-z", "z", stale_ts)
+    result = engine.scan_realtime_alerts(
+        window_end,
+        window_end + timedelta(seconds=1),
+    )
+
+    assert [item["alert_type"] for item in upserted] == [ALERT_TYPE_DAQ_OFFLINE]
+    assert result["triggeredAlertsCount"] == 1
+    assert engine._daq_condition_active[instrument_id] is True

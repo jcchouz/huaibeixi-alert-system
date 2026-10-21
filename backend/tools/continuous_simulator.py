@@ -8,7 +8,7 @@
   * 传感器死值：wy-sj-01/x
   * 超物理量程：wprs-01
   * 传感器离线：zd-wg-01/x
-  * 采集仪离线：accl-03 和 accl-04 通道
+  * 采集仪离线：加速度采集仪_YH 下全部通道（accl-01 ~ accl-04）
 """
 
 from __future__ import annotations
@@ -35,7 +35,8 @@ from app.config import DSN
 
 ACCELERATION_SENSOR_PREFIXES = ("accl-", "zd-wg-", "zd-cg-")
 OFFLINE_CHANNELS = {("zd-wg-01", "x")}
-DAQ_OFFLINE_SENSORS = {"accl-03", "accl-04"}
+# 采集仪离线需该采集仪下全部通道同时离线，因此整台加速度采集仪_YH 都停止上报。
+DAQ_OFFLINE_SENSORS = {"accl-01", "accl-02", "accl-03", "accl-04"}
 THRESHOLD_CHANNELS = {("stn-12-b", "stress")}
 STUCK_CHANNELS = {("wy-sj-01", "x")}
 OOR_CHANNELS = {("wprs-01", "")}
