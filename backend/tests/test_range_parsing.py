@@ -66,7 +66,6 @@ def test_threshold_seconds_uses_sample_timestamps() -> None:
         "level1_upper": 10.0,
         "level2_upper": 8.0,
         "level3_upper": 6.0,
-        "remove_dc_offset": False,
     }
     first_ts = datetime(2026, 10, 19, 10, 0, 0)
     samples = [
@@ -78,7 +77,6 @@ def test_threshold_seconds_uses_sample_timestamps() -> None:
         engine._evaluate_threshold_streak(
             samples,
             rule,
-            dc_offset=0.0,
             previous_direction=ALERT_DIRECTION_NONE,
             previous_count=0,
             target_points=3,
@@ -99,7 +97,6 @@ def test_points_and_seconds_condition_units_use_different_thresholds() -> None:
         "level1_upper": 10.0,
         "level2_upper": 8.0,
         "level3_upper": 6.0,
-        "remove_dc_offset": False,
     }
     first_ts = datetime(2026, 10, 19, 10, 0, 0)
     three_samples = [
@@ -110,7 +107,6 @@ def test_points_and_seconds_condition_units_use_different_thresholds() -> None:
     _, _, _, points_active, _ = engine._evaluate_threshold_streak(
         three_samples,
         rule,
-        dc_offset=0.0,
         previous_direction=ALERT_DIRECTION_NONE,
         previous_count=0,
         target_points=3,
@@ -124,7 +120,6 @@ def test_points_and_seconds_condition_units_use_different_thresholds() -> None:
     ) = engine._evaluate_threshold_streak(
         three_samples,
         rule,
-        dc_offset=0.0,
         previous_direction=ALERT_DIRECTION_NONE,
         previous_count=0,
         target_points=3,
@@ -137,7 +132,6 @@ def test_points_and_seconds_condition_units_use_different_thresholds() -> None:
     _, _, _, seconds_active, _ = engine._evaluate_threshold_streak(
         [(first_ts + timedelta(seconds=3), 7.0)],
         rule,
-        dc_offset=0.0,
         previous_direction=direction,
         previous_count=count,
         target_points=3,
@@ -205,7 +199,6 @@ def test_threshold_streak_continues_across_windows() -> None:
         "level1_upper": 10.0,
         "level2_upper": 8.0,
         "level3_upper": 6.0,
-        "remove_dc_offset": False,
     }
     first_ts = datetime(2026, 10, 19, 10, 0, 0)
     samples = [
@@ -217,7 +210,6 @@ def test_threshold_streak_continues_across_windows() -> None:
     direction, count, started_at, active, snapshot = engine._evaluate_threshold_streak(
         samples,
         rule,
-        dc_offset=0.0,
         previous_direction=ALERT_DIRECTION_NONE,
         previous_count=0,
         target_points=3,
@@ -234,7 +226,6 @@ def test_threshold_streak_continues_across_windows() -> None:
             (first_ts + timedelta(seconds=4), 7.2),
         ],
         rule,
-        dc_offset=0.0,
         previous_direction=direction,
         previous_count=count,
         target_points=3,
@@ -277,14 +268,12 @@ def test_missing_sample_groups_break_threshold_streak() -> None:
         "level1_upper": 10.0,
         "level2_upper": 8.0,
         "level3_upper": 6.0,
-        "remove_dc_offset": False,
     }
     previous_ts = datetime(2026, 10, 19, 10, 0, 0)
 
     direction, count, started_at, active, snapshot = engine._evaluate_threshold_streak(
         [(previous_ts + timedelta(seconds=2), 7.0)],
         rule,
-        dc_offset=0.0,
         previous_direction=ALERT_DIRECTION_UPPER,
         previous_count=2,
         target_points=3,

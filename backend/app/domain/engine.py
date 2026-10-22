@@ -31,6 +31,13 @@ from app.domain.alert_types import (
     normalize_alert_type,
 )
 from app.infrastructure.database import get_db_cursor
+from app.repositories.detection_state import (
+    RUNTIME_STATE_FIELDS,
+    load_channel_states,
+    load_rule_version,
+    persist_channel_states,
+    state_rows_for_persistence,
+)
 
 logger = logging.getLogger("huaibeixi.engine")
 
@@ -135,31 +142,8 @@ class ConcurrentDict:
             for k, v in new_map.items():
                 old = self._data.get(k)
                 if old:
-                    for rt_field in (
-                        "last_ts",
-                        "last_val",
-                        "online_status",
-                        "threshold_streak_count",
-                        "threshold_streak_direction",
-                        "threshold_streak_started_at",
-                        "threshold_last_level",
-                        "threshold_last_value",
-                        "threshold_last_limit",
-                        "oor_streak_count",
-                        "oor_streak_direction",
-                        "oor_streak_started_at",
-                        "oor_last_value",
-                        "stuck_streak_count",
-                        "stuck_last_value",
-                        "stuck_since",
-                        "threshold_condition_active",
-                        "threshold_condition_level",
-                        "oor_condition_active",
-                        "stuck_condition_active",
-                        "offline_condition_active",
-                        "realtime_dc_offset",
-                    ):
-                        if rt_field in old and rt_field not in v:
+                    for rt_field in RUNTIME_STATE_FIELDS:
+                        if rt_field in old:
                             v[rt_field] = old[rt_field]
                 merged[k] = v
             self._data = merged
@@ -193,12 +177,15 @@ class AlertAnalyticsEngine:
         stuck_seconds: float = 100.0,
         offline_seconds: float = 5.0,
         alert_type_switches: Optional[Dict[str, bool]] = None,
+        persist_state: bool = False,
+        rule_refresh_seconds: float = 5.0,
     ) -> None:
         # 检测、接口补充信息和总览统计共用这些元数据。
         self.channel_states = ConcurrentDict()
         self.sensor_meta: Dict[str, Dict[str, Any]] = {}
         self.instrument_meta: Dict[str, Dict[str, Any]] = {}
         self._daq_condition_active: Dict[str, bool] = {}
+        self._daq_state_known: Set[str] = set()
         self.total_monitor_rows: int = 398059510
         self.last_reload_time: Optional[datetime] = None
         self.confirm_points = max(1, int(confirm_points))
@@ -210,6 +197,10 @@ class AlertAnalyticsEngine:
         self.confirm_seconds = max(0.001, float(confirm_seconds))
         self.stuck_seconds = max(0.001, float(stuck_seconds))
         self.offline_seconds = max(0.001, float(offline_seconds))
+        self.persist_state = bool(persist_state)
+        self.rule_refresh_seconds = max(0.1, float(rule_refresh_seconds))
+        self.rule_version: Optional[int] = None
+        self._last_rule_check_monotonic = 0.0
         # 未显式配置的预警类型默认启用，避免新增类型被意外关闭。
         self.alert_type_switches: Dict[str, bool] = {
             (normalize_alert_type(name) or name): bool(enabled)
@@ -217,6 +208,9 @@ class AlertAnalyticsEngine:
         }
         self._alert_step_lock = threading.Lock()
         self._statistics_step_lock = threading.Lock()
+        self._active_alert_cache: Optional[
+            Dict[Tuple[str, str, str], Dict[str, Any]]
+        ] = None
 
     @staticmethod
     def make_key(sensor_no: str, channel: Optional[str]) -> str:
@@ -278,6 +272,8 @@ class AlertAnalyticsEngine:
 
         for rule in rules:
             key = rule["key"]
+            if rule.get("last_ts") is not None:
+                continue
             last_seen = self._parse_maybe_dt(latest_by_target.get(key))
             offline_timeout_ms = self._offline_timeout_ms(rule)
             timeout = timedelta(milliseconds=offline_timeout_ms)
@@ -315,6 +311,10 @@ class AlertAnalyticsEngine:
         """热更新规则和元数据，并保留现有运行状态。"""
         with get_db_cursor() as cur:
             # 1. 加载采集仪与站点映射。
+            persisted_states: Dict[str, Dict[str, Any]] = {}
+            persisted_daq_states: Dict[str, bool] = {}
+            if self.persist_state:
+                persisted_states, persisted_daq_states = load_channel_states(cur)
             cur.execute(
                 """
                 SELECT ci.id, ci.number, ci.name, ci.model, ci.manufacturer, ci.box_id,
@@ -418,7 +418,6 @@ class AlertAnalyticsEngine:
                 sname = sm.get("sensor_name") or d["sensor_no"]
                 st_name = sm.get("station_name") or ("玉环站" if "_YH" in sname or sno_l.startswith(("stn-", "wlg-", "wea-", "accl-", "disp-", "phtar-", "wprs-", "temp-")) else "淮北西站")
                 st_code = sm.get("station_code") or ("YHZ" if st_name == "玉环站" else "HBXZ")
-                remove_dc_offset = self._infer_remove_dc_offset(sno_l, sname, ch)
                 range_min = d.get("range_min")
                 range_max = d.get("range_max")
                 if range_min is None or range_max is None:
@@ -464,7 +463,6 @@ class AlertAnalyticsEngine:
                         "position": sm.get("position") or "-",
                         "physical_quantity": physical_quantity,
                         "unit": unit,
-                        "remove_dc_offset": remove_dc_offset,
                         "physical_min": range_min,
                         "physical_max": range_max,
                         "confirm_points": confirm_points,
@@ -488,16 +486,54 @@ class AlertAnalyticsEngine:
                         "stuck_streak_count": 0,
                         "stuck_condition_active": False,
                         "offline_condition_active": False,
-                        "realtime_dc_offset": None,
                     }
                 )
+                persisted = persisted_states.get(key)
+                if persisted:
+                    for runtime_field in RUNTIME_STATE_FIELDS:
+                        if runtime_field in persisted:
+                            d[runtime_field] = persisted[runtime_field]
                 new_states[key] = d
 
             # 完整构建后一次性替换，避免读取到半加载状态。
             self.channel_states.replace_all(new_states)
+            if self.persist_state:
+                self._daq_condition_active = dict(persisted_daq_states)
+                self._daq_state_known = set(persisted_daq_states)
+                self.rule_version = load_rule_version(cur)
+            self._last_rule_check_monotonic = time.monotonic()
             self.last_reload_time = datetime.now()
             logger.info("Loaded %d threshold rules into memory.", len(new_states))
             return len(new_states)
+
+    def refresh_rules_if_changed(self, force: bool = False) -> bool:
+        """Reload threshold rules when the database version changes."""
+
+        if not self.persist_state:
+            return False
+        now = time.monotonic()
+        if (
+            not force
+            and now - self._last_rule_check_monotonic < self.rule_refresh_seconds
+        ):
+            return False
+        with get_db_cursor() as cur:
+            current_version = load_rule_version(cur)
+        self._last_rule_check_monotonic = now
+        if current_version is None:
+            return False
+        if self.rule_version is None:
+            self.rule_version = current_version
+            return False
+        if current_version == self.rule_version:
+            return False
+        logger.info(
+            "Threshold rule version changed from %s to %s; reloading.",
+            self.rule_version,
+            current_version,
+        )
+        self.reload_thresholds()
+        return True
 
     @staticmethod
     def _hz_from_interval(interval_ms: Optional[int]) -> str:
@@ -540,16 +576,6 @@ class AlertAnalyticsEngine:
         )
         return max(1, int(rule.get("offline_points") or 5)) * interval_ms
 
-    @staticmethod
-    def _infer_remove_dc_offset(sensor_no: str, sensor_name: str, channel: str) -> bool:
-        """识别需要按幅值分析的加速度通道。"""
-        channel_name = (channel or "").strip().lower()
-        sensor_text = f"{sensor_no} {sensor_name}".lower()
-        return (
-            channel_name in {"x", "y", "z"}
-            and ("accl" in sensor_text or "加速度" in sensor_text or "振动" in sensor_text)
-        )
-
     # ------------------------------------------------------------------
     # 阈值、量程和死值连续命中判定
     # ------------------------------------------------------------------
@@ -557,7 +583,6 @@ class AlertAnalyticsEngine:
         self,
         samples: List[Tuple[datetime, float]],
         rule: Dict[str, Any],
-        dc_offset: float,
         previous_direction: Any,
         previous_count: Any,
         target_points: int,
@@ -625,7 +650,6 @@ class AlertAnalyticsEngine:
             level, sample_direction, eval_value, limit = self._sample_level(
                 rule,
                 value,
-                dc_offset,
             )
             if level is None or sample_direction == ALERT_DIRECTION_NONE:
                 # 正常样本会清空所有阈值连续命中状态。
@@ -1144,15 +1168,12 @@ class AlertAnalyticsEngine:
         rule: Dict[str, Any],
         eval_upper: float,
         eval_lower: float,
-        remove_dc: bool = False,
     ) -> Tuple[Optional[int], str, Optional[float], Optional[float]]:
         """返回单个评估值命中的最严重阈值级别。"""
         for level in (1, 2, 3):
             upper = rule.get(f"level{level}_upper")
             if upper is not None and eval_upper > float(upper):
                 return level, ALERT_DIRECTION_UPPER, eval_upper, float(upper)
-            if remove_dc:
-                continue
             lower = rule.get(f"level{level}_lower")
             if lower is not None and eval_lower < float(lower):
                 return level, ALERT_DIRECTION_LOWER, eval_lower, float(lower)
@@ -1162,14 +1183,9 @@ class AlertAnalyticsEngine:
         self,
         rule: Dict[str, Any],
         value: float,
-        dc_offset: float,
     ) -> Tuple[Optional[int], str, Optional[float], Optional[float]]:
         """评估单个样本，并对振动通道去除直流分量。"""
-        remove_dc = bool(rule.get("remove_dc_offset", False))
-        if remove_dc:
-            amplitude = abs(value - dc_offset)
-            return self._level_for(rule, amplitude, -amplitude, remove_dc=True)
-        return self._level_for(rule, value, value, remove_dc=False)
+        return self._level_for(rule, value, value)
 
     @staticmethod
     def _max_sample_gap_ms(samples: List[Tuple[datetime, float]]) -> float:
@@ -1224,6 +1240,7 @@ class AlertAnalyticsEngine:
         alert_level: int,
         trigger_val: Optional[float],
         fire_time: datetime,
+        force_refresh: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """条件成立时写入预警，已存在同键活动事件时避免重复创建。
 
@@ -1243,7 +1260,7 @@ class AlertAnalyticsEngine:
         existing = active_map.get(key)
         if existing is not None:
             existing_level = int(existing.get("alert_level") or 99)
-            if alert_level >= existing_level:
+            if alert_level >= existing_level and not force_refresh:
                 return existing
         alert = self._upsert_alert_incident(
             cur,
@@ -1300,6 +1317,7 @@ class AlertAnalyticsEngine:
                 alert_level=NON_THRESHOLD_ALERT_LEVEL,
                 trigger_val=0.0,
                 fire_time=window_end,
+                force_refresh=True,
             )
         pending_state_updates.setdefault(key, {}).update(
             {
@@ -1379,7 +1397,6 @@ class AlertAnalyticsEngine:
         upserted_stats = 0
         raw_points_processed = 0
         stat_rows: List[Tuple[Any, ...]] = []
-        dc_offsets: Dict[str, float] = {}
         pending_state_updates: Dict[str, Dict[str, Any]] = {}
         daq_condition_updates: Dict[str, bool] = {}
 
@@ -1439,7 +1456,16 @@ class AlertAnalyticsEngine:
             # 一次性加载活动预警，重复条件在原事件上更新。
             # 注意这里是“整个表里所有未处理记录”，不按窗口过滤，
             # 所以跨窗口的活动事件也能在同一轮里被识别出来。
-            active_map = self._load_active_alerts(cur) if detect_alerts else {}
+            if detect_alerts:
+                if self.persist_state and self._active_alert_cache is not None:
+                    active_map = {
+                        key: dict(value)
+                        for key, value in self._active_alert_cache.items()
+                    }
+                else:
+                    active_map = self._load_active_alerts(cur)
+            else:
+                active_map = {}
             # 采集仪级离线需要知道每台采集仪配置了多少个通道，
             # 只有全部通道都离线时才汇总为一条采集仪离线预警。
             instrument_totals = Counter(
@@ -1481,7 +1507,6 @@ class AlertAnalyticsEngine:
                 val_avg = float(obs["val_avg"])
                 max_time = obs.get("max_time") or last_ts
                 min_time = obs.get("min_time") or first_ts
-                remove_dc = bool(rule.get("remove_dc_offset", False))
                 if write_statistics:
                     # 每个完整统计窗口生成一条 t_stat_record 记录。
                     stat_rows.append(
@@ -1499,9 +1524,6 @@ class AlertAnalyticsEngine:
                         )
                     )
                     upserted_stats += 1
-                    if remove_dc:
-                        # 保存窗口均值，供后续实时样本去除直流分量。
-                        dc_offsets[key] = val_avg
                 if not detect_alerts:
                     continue
 
@@ -1551,13 +1573,7 @@ class AlertAnalyticsEngine:
                         )
                         continue
                     samples = [(last_ts, val_avg)]
-                realtime_dc_offset = rule.get("realtime_dc_offset")
                 # 实时扫描使用最近统计均值作为直流分量基准。
-                dc_offset = (
-                    float(realtime_dc_offset)
-                    if realtime_dc_offset is not None
-                    else float(val_avg)
-                )
 
                 # 依次评估阈值、物理量程和传感器死值条件。
                 # 上下文（上一轮方向、计数、起点、上一轮最后样本时间）
@@ -1571,7 +1587,6 @@ class AlertAnalyticsEngine:
                 ) = self._evaluate_threshold_streak(
                     samples,
                     rule,
-                    dc_offset,
                     rule.get("threshold_streak_direction"),
                     rule.get("threshold_streak_count"),
                     confirm_points,
@@ -1646,6 +1661,7 @@ class AlertAnalyticsEngine:
                             alert_level=level,
                             trigger_val=value,
                             fire_time=fire_time,
+                            force_refresh=not previous_condition_active,
                         )
 
                 (
@@ -1689,6 +1705,7 @@ class AlertAnalyticsEngine:
                             alert_level=NON_THRESHOLD_ALERT_LEVEL,
                             trigger_val=oor_value,
                             fire_time=fire_time,
+                            force_refresh=True,
                         )
 
                 (
@@ -1730,6 +1747,7 @@ class AlertAnalyticsEngine:
                             alert_level=NON_THRESHOLD_ALERT_LEVEL,
                             trigger_val=stuck_value,
                             fire_time=fire_time,
+                            force_refresh=True,
                         )
 
                 last_sample_time = samples[-1][0]
@@ -1772,6 +1790,7 @@ class AlertAnalyticsEngine:
                         alert_level=NON_THRESHOLD_ALERT_LEVEL,
                         trigger_val=0.0,
                         fire_time=window_end,
+                        force_refresh=True,
                     )
                 if currently_offline:
                     state_updates.update(
@@ -1794,6 +1813,13 @@ class AlertAnalyticsEngine:
 
                 pending_state_updates.setdefault(key, {}).update(state_updates)
 
+            if self.persist_state:
+                state_rows = state_rows_for_persistence(
+                    rules_by_key,
+                    pending_state_updates,
+                    daq_condition_updates,
+                )
+                persist_channel_states(cur, state_rows)
             if stat_rows:
                 # 批量更新插入，确保一个完整窗口在同一事务中提交。
                 execute_values(
@@ -1823,10 +1849,12 @@ class AlertAnalyticsEngine:
                         "__DAQ__",
                         ALERT_TYPE_DAQ_OFFLINE,
                     )
-                    if daq_key in active_map:
+                    if (
+                        daq_key in active_map
+                        and instrument_id not in self._daq_state_known
+                    ):
                         daq_condition_updates[instrument_id] = True
                         continue
-
                     daq_alert = self._upsert_alert_incident(
                         cur,
                         sensor_no=instrument_id,
@@ -1846,13 +1874,13 @@ class AlertAnalyticsEngine:
         # 读取 last_ts、连续命中计数和 condition_active，继续累计。
         for key, updates in pending_state_updates.items():
             self.channel_states.update_field(key, **updates)
-        for key, offset in dc_offsets.items():
-            self.channel_states.update_field(
-                key,
-                realtime_dc_offset=offset,
-            )
         # 采集仪级离线状态按采集仪维度单独维护，没有对应的通道 key。
         self._daq_condition_active.update(daq_condition_updates)
+        self._daq_state_known.update(daq_condition_updates)
+        if detect_alerts:
+            self._active_alert_cache = {
+                key: dict(value) for key, value in active_map.items()
+            }
 
         return {
             "windowStart": serialize_val(window_start),
@@ -1965,6 +1993,9 @@ class AlertAnalyticsEngine:
             "detectionMode": "realtime_sample_groups",
             "conditionUnit": self.condition_unit,
             "alertTypeSwitches": dict(self.alert_type_switches),
+            "persistState": self.persist_state,
+            "ruleVersion": self.rule_version,
+            "ruleRefreshSeconds": self.rule_refresh_seconds,
             "confirmPoints": self.confirm_points,
             "stuckPoints": self.stuck_points,
             "offlinePoints": self.offline_points,

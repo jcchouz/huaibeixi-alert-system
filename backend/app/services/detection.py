@@ -14,6 +14,10 @@ from app.core.config import Settings
 from app.core.serialization import serialize_val
 from app.domain.engine import AlertAnalyticsEngine
 from app.infrastructure.database import get_db_cursor
+from app.repositories.detection_state import (
+    load_worker_watermark,
+    save_worker_watermark,
+)
 
 logger = logging.getLogger("huaibeixi.detection")
 
@@ -39,6 +43,10 @@ class AlertDetectionWorker:
         self.lag_seconds = settings.detection_lag_seconds
         self.window_minutes = settings.detection_window_minutes
         self.max_catchup_windows = settings.detection_max_catchup_windows
+        self.max_alert_catchup_seconds = settings.detection_max_alert_catchup_seconds
+        self.alert_catchup_chunk_seconds = (
+            settings.detection_alert_catchup_chunk_seconds
+        )
 
         # 两条 Worker 线程共享的生命周期和并发状态。
         self._stop_event = threading.Event()
@@ -123,6 +131,47 @@ class AlertDetectionWorker:
             self._statistics_thread = None
         logger.info("Alert detection worker stopped.")
 
+    def initialize(self) -> None:
+        """Restore persisted alert and statistics watermarks before startup."""
+
+        if self.settings.environment == "test":
+            return
+        with get_db_cursor() as cur:
+            alert_state = load_worker_watermark(cur, "alert")
+            statistics_state = load_worker_watermark(cur, "statistics")
+        with self._state_lock:
+            if alert_state:
+                self._last_alert_scan_at = alert_state["last_processed_time"]
+            if statistics_state:
+                self._last_window_end = statistics_state["last_processed_time"]
+                self._last_completed_at = statistics_state["last_completed_time"]
+        logger.info(
+            "Restored detection watermarks (alert=%s, statistics=%s).",
+            self._last_alert_scan_at,
+            self._last_window_end,
+        )
+
+    def _persist_worker_watermark(
+        self,
+        worker_name: str,
+        last_processed_time: datetime,
+        last_completed_time: datetime,
+    ) -> None:
+        if self.settings.environment == "test":
+            return
+        with get_db_cursor(commit=True) as cur:
+            save_worker_watermark(
+                cur,
+                worker_name=worker_name,
+                last_processed_time=last_processed_time,
+                last_completed_time=last_completed_time,
+            )
+
+    def _refresh_rules(self) -> None:
+        refresh = getattr(self.engine, "refresh_rules_if_changed", None)
+        if refresh is not None:
+            refresh()
+
     def run_once(self, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """执行一次手动检测，用于测试或本地诊断。"""
         current_time = now or self._current_time()
@@ -134,60 +183,97 @@ class AlertDetectionWorker:
         return []
 
     def scan_alerts_once(self, current_time: datetime) -> Optional[Dict[str, Any]]:
-        """从上一次水位开始扫描样本，并保留短时间重叠回看。
+        """Scan from the persisted watermark, bounded into small chunks."""
 
-        窗口是左闭右开的 ``[alert_start, current_time)``：
-
-        - 首轮没有水位时，回看 ``max(扫描间隔, overlap)``，保证刚启动也能
-          看到最近到达的样本，同时不会一次拉太长的历史；
-        - 之后每轮从 ``上一次水位 - overlap`` 开始，用短回看覆盖外部系统
-          事务提交延迟导致的“样本晚到”；
-        - 回看必然带来重复样本，由引擎侧按各通道 ``last_ts`` 过滤，
-          只处理严格新于水位的点（new_samples_only）；
-        - 只有本轮扫描成功，才把 ``_last_alert_scan_at`` 推进到 ``current_time``，
-          异常时水位不动，下一轮会重新覆盖这段区间。
-        """
         with self._alert_cycle_lock:
+            self._refresh_rules()
             with self._state_lock:
                 self._last_run_at = current_time
                 last_alert_scan_at = self._last_alert_scan_at
 
+            started = time.perf_counter()
             if last_alert_scan_at is None:
-                # 首轮只需覆盖一个扫描间隔和事务提交延迟重叠时间。
-                alert_start = current_time - timedelta(
+                window_start = current_time - timedelta(
                     seconds=max(
                         self.interval_seconds,
                         self.alert_overlap_seconds,
                     )
                 )
+                if current_time <= window_start:
+                    return None
+                first_start = window_start
+                raw_points = 0
+                triggered = 0
+                result = self.engine.scan_realtime_alerts(
+                    window_start,
+                    current_time,
+                )
+                raw_points += int(result.get("rawPointsProcessed") or 0)
+                triggered += int(result.get("triggeredAlertsCount") or 0)
+                with self._state_lock:
+                    self._last_alert_scan_at = current_time
+                self._persist_worker_watermark(
+                    "alert",
+                    current_time,
+                    current_time,
+                )
             else:
-                # 少量回看用于覆盖提交延迟，重复样本由各通道 last_ts 去重。
-                alert_start = last_alert_scan_at - timedelta(
+                scan_cursor = last_alert_scan_at
+                earliest = current_time - timedelta(
+                    seconds=self.max_alert_catchup_seconds
+                )
+                if scan_cursor < earliest:
+                    logger.warning(
+                        "Alert catch-up skipped %.1fs of history before %s.",
+                        (earliest - scan_cursor).total_seconds(),
+                        earliest,
+                    )
+                    scan_cursor = earliest
+                if current_time <= scan_cursor:
+                    return None
+                first_start = scan_cursor - timedelta(
                     seconds=self.alert_overlap_seconds
                 )
-            if current_time <= alert_start:
-                return None
+                raw_points = 0
+                triggered = 0
+                chunk_seconds = max(
+                    1,
+                    min(
+                        self.alert_catchup_chunk_seconds,
+                        self.interval_seconds * 5,
+                    ),
+                )
+                while scan_cursor < current_time:
+                    chunk_end = min(
+                        current_time,
+                        scan_cursor + timedelta(seconds=chunk_seconds),
+                    )
+                    window_start = scan_cursor - timedelta(
+                        seconds=self.alert_overlap_seconds
+                    )
+                    result = self.engine.scan_realtime_alerts(
+                        window_start,
+                        chunk_end,
+                    )
+                    raw_points += int(result.get("rawPointsProcessed") or 0)
+                    triggered += int(result.get("triggeredAlertsCount") or 0)
+                    scan_cursor = chunk_end
+                    with self._state_lock:
+                        self._last_alert_scan_at = scan_cursor
+                    self._persist_worker_watermark(
+                        "alert",
+                        scan_cursor,
+                        scan_cursor,
+                    )
 
-            # 交给引擎逐点判定；这里不做任何统计窗口对齐，
-            # 所以实时预警不受 DETECTION_WINDOW_MINUTES 影响。
-            alert_result = self.engine.scan_realtime_alerts(
-                alert_start,
-                current_time,
-            )
             summary = {
-                "windowStart": serialize_val(alert_start),
+                "windowStart": serialize_val(first_start),
                 "windowEnd": serialize_val(current_time),
-                "rawPointsProcessed": int(
-                    alert_result.get("rawPointsProcessed") or 0
-                ),
-                "triggeredAlertsCount": int(
-                    alert_result.get("triggeredAlertsCount") or 0
-                ),
-                "elapsedMs": alert_result.get("elapsedMs"),
+                "rawPointsProcessed": raw_points,
+                "triggeredAlertsCount": triggered,
+                "elapsedMs": round((time.perf_counter() - started) * 1000, 2),
             }
             with self._state_lock:
-                # 只有扫描成功后，才推进实时预警水位。
-                self._last_alert_scan_at = current_time
                 self._last_alert_result = summary
                 self._last_alert_error = None
                 self._last_error = None
@@ -197,6 +283,7 @@ class AlertDetectionWorker:
     def process_statistics_once(self, current_time: datetime) -> List[Dict[str, Any]]:
         """按顺序处理当前所有已到期的统计窗口。"""
         with self._statistics_cycle_lock:
+            self._refresh_rules()
             return self._process_statistics_once(current_time)
 
     def _process_statistics_once(
@@ -258,6 +345,11 @@ class AlertDetectionWorker:
                 self._last_statistics_error = None
                 self._last_error = None
                 self._statistics_cycles += 1
+            self._persist_worker_watermark(
+                "statistics",
+                window_end,
+                current_time,
+            )
 
         return results
 
@@ -304,6 +396,8 @@ class AlertDetectionWorker:
                 "stuckSeconds": self.settings.detection_stuck_seconds,
                 "offlineSeconds": self.settings.detection_offline_seconds,
                 "maxCatchupWindows": self.max_catchup_windows,
+                "maxAlertCatchupSeconds": self.max_alert_catchup_seconds,
+                "alertCatchupChunkSeconds": self.alert_catchup_chunk_seconds,
                 "cycles": self._alert_cycles + self._statistics_cycles,
                 "alertCycles": self._alert_cycles,
                 "statisticsCycles": self._statistics_cycles,

@@ -8,6 +8,10 @@ uses FastAPI, PostgreSQL/TimescaleDB and a modular service architecture.
 Detailed folder-by-folder and file-by-file documentation is available in
 [后端架构说明.md](后端架构说明.md).
 
+Persistent detection state, rule-version synchronization and the 10,000
+rows/second benchmark are documented in
+[detection-state-and-10k-benchmark.md](docs/detection-state-and-10k-benchmark.md).
+
 ```text
 backend/
   app/

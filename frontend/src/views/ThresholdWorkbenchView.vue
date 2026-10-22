@@ -12,10 +12,6 @@
           <strong class="mono-num green-txt">{{ physicalQuantityOptions.length }}</strong>
         </div>
         <div class="wb-stat-item">
-          <span class="wb-label">去直流分量通道 (AC幅值)</span>
-          <strong class="mono-num cyan-txt">{{ dcOffsetRulesCount }}</strong>
-        </div>
-        <div class="wb-stat-item">
           <span class="wb-label">≥1Hz 高频1000ms盯防通道</span>
           <strong class="mono-num orange-txt">{{ highFreqRulesCount }}</strong>
         </div>
@@ -172,14 +168,6 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="去直流 (AC)" width="95" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.remove_dc_offset ? 'warning' : 'info'" effect="plain">
-              {{ row.remove_dc_offset ? '去直流开启' : '原始量' }}
-            </el-tag>
-          </template>
-        </el-table-column>
-
         <el-table-column prop="create_by" label="创建人" width="100" align="center">
           <template #default="{ row }">
             <span class="mono-num">{{ row.create_by || 'system' }}</span>
@@ -273,13 +261,6 @@
             </el-form-item>
           </el-col>
 
-          <el-col :span="12">
-            <el-form-item label="去直流处理">
-              <el-tag :type="editForm.remove_dc_offset ? 'warning' : 'info'" effect="plain">
-                {{ editForm.remove_dc_offset ? '按传感器类型自动去直流' : '原始值判定' }}
-              </el-tag>
-            </el-form-item>
-          </el-col>
         </el-row>
       </el-form>
 
@@ -498,7 +479,6 @@ const pageSize = ref(25)
 
 // Stats
 const allRulesCount = computed(() => rules.value.length || 208)
-const dcOffsetRulesCount = computed(() => rules.value.filter((r) => r.remove_dc_offset).length)
 const highFreqRulesCount = computed(() => rules.value.filter((r) => Number(r.frequency_hz || 1) >= 1).length)
 
 const filteredRules = computed(() => {
@@ -560,8 +540,7 @@ const editForm = reactive({
   level3_lower: 0,
   frequency: '',
   range_min: null,
-  range_max: null,
-  remove_dc_offset: false
+  range_max: null
 })
 
 function openEditModal(row) {
@@ -579,8 +558,7 @@ function openEditModal(row) {
     level3_lower: Number(row.level3_lower ?? -6),
     frequency: String(row.frequency ?? ''),
     range_min: row.range_min === null || row.range_min === undefined ? null : Number(row.range_min),
-    range_max: row.range_max === null || row.range_max === undefined ? null : Number(row.range_max),
-    remove_dc_offset: Boolean(row.remove_dc_offset)
+    range_max: row.range_max === null || row.range_max === undefined ? null : Number(row.range_max)
   })
   editDialogVisible.value = true
 }

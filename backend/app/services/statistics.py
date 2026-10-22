@@ -71,7 +71,6 @@ class StatisticsService:
                     "level2Lower": rule.get("level2_lower"),
                     "level3Upper": rule.get("level3_upper"),
                     "level3Lower": rule.get("level3_lower"),
-                    "removeDcOffset": rule.get("remove_dc_offset", False),
                 }
             )
 
@@ -139,7 +138,6 @@ class StatisticsService:
         window_max_time = None
         window_min = None
         window_min_time = None
-        average_sum = 0.0
         total_samples = 0
 
         for row in rows:
@@ -157,7 +155,6 @@ class StatisticsService:
             if window_min is None or value_min < window_min:
                 window_min = value_min
                 window_min_time = serialize_val(row["min_time"] or row["stat_time"])
-            average_sum += value_avg
             total_samples += sample_count
             series.append(
                 {
@@ -214,7 +211,6 @@ class StatisticsService:
                 "level2Lower": rule.get("level2_lower"),
                 "level3Upper": rule.get("level3_upper"),
                 "level3Lower": rule.get("level3_lower"),
-                "removeDcOffset": rule.get("remove_dc_offset", False),
             },
             "summary": {
                 "bucketCount": len(series),

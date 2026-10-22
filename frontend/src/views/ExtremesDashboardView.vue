@@ -270,8 +270,7 @@ const activeThresholds = reactive({
   level2Upper: null,
   level2Lower: null,
   level3Upper: null,
-  level3Lower: null,
-  removeDcOffset: false
+  level3Lower: null
 })
 
 const extremeSummary = reactive({

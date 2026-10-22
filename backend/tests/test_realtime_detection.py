@@ -92,7 +92,6 @@ def test_statistics_batch_supplies_create_by_and_create_time(monkeypatch) -> Non
             "key": key,
             "sensor_no_lower": "sensor-1",
             "channel": "x",
-            "remove_dc_offset": False,
         },
     )
     class StatisticsCursor:
@@ -234,7 +233,6 @@ def test_realtime_threshold_streak_continues_across_one_second_scans(
             "level1_lower": None,
             "level2_lower": None,
             "level3_lower": None,
-            "remove_dc_offset": False,
             "physical_min": -100.0,
             "physical_max": 100.0,
             "threshold_streak_direction": ALERT_DIRECTION_NONE,
@@ -247,7 +245,6 @@ def test_realtime_threshold_streak_continues_across_one_second_scans(
             "stuck_streak_count": 0,
             "stuck_condition_active": False,
             "offline_condition_active": False,
-            "realtime_dc_offset": None,
         },
     )
     cursor = RealtimeCursor()
@@ -346,7 +343,6 @@ def test_overlap_window_does_not_replay_an_already_processed_sample(
             "level1_lower": None,
             "level2_lower": None,
             "level3_lower": None,
-            "remove_dc_offset": False,
             "physical_min": -100.0,
             "physical_max": 100.0,
             "last_ts": previous_sample_time,
@@ -360,7 +356,6 @@ def test_overlap_window_does_not_replay_an_already_processed_sample(
             "stuck_streak_count": 0,
             "stuck_condition_active": False,
             "offline_condition_active": False,
-            "realtime_dc_offset": None,
         },
     )
     cursor = RealtimeCursor()
@@ -409,7 +404,6 @@ def test_scan_does_not_advance_watermark_when_commit_fails(
             "level1_lower": None,
             "level2_lower": None,
             "level3_lower": None,
-            "remove_dc_offset": False,
             "physical_min": -100.0,
             "physical_max": 100.0,
             "last_ts": None,
@@ -423,7 +417,6 @@ def test_scan_does_not_advance_watermark_when_commit_fails(
             "stuck_streak_count": 0,
             "stuck_condition_active": False,
             "offline_condition_active": False,
-            "realtime_dc_offset": None,
         },
     )
     cursor = RealtimeCursor()
@@ -562,7 +555,6 @@ def test_statistics_window_uses_one_batch_upsert(monkeypatch) -> None:
                 "key": key,
                 "sensor_no_lower": sensor_no,
                 "channel": channel,
-                "remove_dc_offset": False,
             },
         )
 

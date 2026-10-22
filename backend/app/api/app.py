@@ -48,6 +48,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         confirm_seconds=settings.detection_confirm_seconds,
         stuck_seconds=settings.detection_stuck_seconds,
         offline_seconds=settings.detection_offline_seconds,
+        persist_state=True,
+        rule_refresh_seconds=settings.detection_rule_refresh_seconds,
         # 五类预警的独立开关来自 backend/.env。开关只决定“是否写预警”，
         # 样本读取、连续命中计数和 t_stat_record 统计都不受开关影响。
         alert_type_switches={
@@ -74,6 +76,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         #                           online_status，避免重启后把正在上报的通道误判为离线；
         #   refresh_monitor_row_count() 刷新概览用的数据量。
         await asyncio.to_thread(engine_instance.initialize)
+        await asyncio.to_thread(detection_worker.initialize)
         # test 环境只跑单元测试和本地联调，不启动后台检测线程。
         if settings.detection_enabled and settings.environment != "test":
             # start() 拉起两条 daemon 线程：

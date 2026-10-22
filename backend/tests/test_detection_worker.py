@@ -76,7 +76,7 @@ def test_detection_worker_processes_latest_completed_minute(monkeypatch) -> None
     assert engine.period_types == ["1m"]
 
 
-def test_detection_worker_does_not_repeat_a_completed_window(monkeypatch) -> None:
+def test_detection_worker_chunks_alert_catchup(monkeypatch) -> None:
     engine = FakeEngine()
     worker = make_worker(engine)
     monkeypatch.setattr(worker, "_ensure_leader", lambda: True)
@@ -88,8 +88,39 @@ def test_detection_worker_does_not_repeat_a_completed_window(monkeypatch) -> Non
     assert len(engine.windows) == 1
     assert engine.alert_scans == [
         (datetime(2026, 10, 20, 15, 42, 29), datetime(2026, 10, 20, 15, 42, 30)),
-        (datetime(2026, 10, 20, 15, 42, 29), datetime(2026, 10, 20, 15, 42, 45)),
+        (datetime(2026, 10, 20, 15, 42, 29), datetime(2026, 10, 20, 15, 42, 35)),
+        (datetime(2026, 10, 20, 15, 42, 34), datetime(2026, 10, 20, 15, 42, 40)),
+        (datetime(2026, 10, 20, 15, 42, 39), datetime(2026, 10, 20, 15, 42, 45)),
     ]
+
+
+def test_alert_scan_persists_watermark_after_each_catchup_chunk(
+    monkeypatch,
+) -> None:
+    engine = FakeEngine()
+    worker = make_worker(engine)
+    monkeypatch.setattr(worker, "_ensure_leader", lambda: True)
+    monkeypatch.setattr(worker, "_ensure_statistics_leader", lambda: True)
+    persisted: list[tuple[str, datetime, datetime]] = []
+    monkeypatch.setattr(
+        worker,
+        "_persist_worker_watermark",
+        lambda name, processed, completed: persisted.append(
+            (name, processed, completed)
+        ),
+    )
+
+    worker.run_once(datetime(2026, 10, 20, 15, 42, 30))
+    worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 45))
+
+    assert [item[1] for item in persisted if item[0] == "alert"] == [
+        datetime(2026, 10, 20, 15, 42, 30),
+        datetime(2026, 10, 20, 15, 42, 35),
+        datetime(2026, 10, 20, 15, 42, 40),
+        datetime(2026, 10, 20, 15, 42, 45),
+    ]
+    assert sum(item[0] == "alert" for item in persisted) == 4
+    assert sum(item[0] == "statistics" for item in persisted) == 1
 
 
 def test_detection_worker_catches_up_a_bounded_number_of_windows(monkeypatch) -> None:

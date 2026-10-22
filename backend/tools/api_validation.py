@@ -148,7 +148,7 @@ def run(args: argparse.Namespace) -> int:
 
         # ---------- PUT threshold ----------
         if tid:
-            st0, before = http("GET", "/api/thresholds?sensorNo=wy-sj-01")
+            _, before = http("GET", "/api/thresholds?sensorNo=wy-sj-01")
             rule_before = next((r for r in (before or {}).get("items", [])
                                 if str(r["id"]) == tid), None) if isinstance(before, dict) else None
             l3u = rule_before.get("level3_upper") if rule_before else None

@@ -193,8 +193,6 @@ class ThresholdService:
             body.level3Lower,
             current_rule.get("level3_lower", -6.0),
         )
-        remove_dc = bool(current_rule.get("remove_dc_offset", False))
-
         # 保留当前规则，同时允许请求字段覆盖对应阈值。
         current_thresholds = {
             "level1_upper": float(
@@ -263,22 +261,17 @@ class ThresholdService:
             thresholds: Dict[str, float],
         ) -> Tuple[int, float, float]:
             """使用一套阈值评估一个统计桶。"""
-            if remove_dc:
-                # 振动数据按围绕均值的幅值进行评估。
-                amplitude = max(abs(value_max - value_avg), abs(value_min - value_avg))
-                eval_upper, eval_lower = amplitude, -amplitude
-            else:
-                eval_upper, eval_lower = value_max, value_min
+            eval_upper, eval_lower = value_max, value_min
             if eval_upper > thresholds["level1_upper"] or (
-                not remove_dc and eval_lower < thresholds["level1_lower"]
+                eval_lower < thresholds["level1_lower"]
             ):
                 return 1, eval_upper, eval_lower
             if eval_upper > thresholds["level2_upper"] or (
-                not remove_dc and eval_lower < thresholds["level2_lower"]
+                eval_lower < thresholds["level2_lower"]
             ):
                 return 2, eval_upper, eval_lower
             if eval_upper > thresholds["level3_upper"] or (
-                not remove_dc and eval_lower < thresholds["level3_lower"]
+                eval_lower < thresholds["level3_lower"]
             ):
                 return 3, eval_upper, eval_lower
             return 0, eval_upper, eval_lower
@@ -291,7 +284,6 @@ class ThresholdService:
         observed_min = None
         observed_max_time = None
         observed_min_time = None
-        average_sum = 0.0
 
         for row in rows:
             value_max = float(row["val_max"])
@@ -301,7 +293,6 @@ class ThresholdService:
                 if row["val_avg"] is not None
                 else (value_max + value_min) / 2.0
             )
-            average_sum += value_avg
             proposed_level, eval_upper, eval_lower = evaluate_point(
                 value_max,
                 value_min,
@@ -341,7 +332,6 @@ class ThresholdService:
         total_points = len(series)
         proposed_alerts = proposed_counts[1] + proposed_counts[2] + proposed_counts[3]
         current_alerts = current_counts[1] + current_counts[2] + current_counts[3]
-        dc_offset = round(average_sum / total_points, 5) if total_points > 0 else 0.0
         return {
             "sensorNo": sensor_no,
             "sensorName": current_rule.get("sensor_name") or sensor_no,
@@ -349,7 +339,6 @@ class ThresholdService:
             "channel": channel,
             "physicalQuantity": current_rule.get("physical_quantity") or channel,
             "unit": current_rule.get("unit") or "",
-            "removeDcOffset": remove_dc,
             "totalPoints": total_points,
             "elapsedMs": round((time.perf_counter() - started) * 1000, 2),
             "proposedThresholds": {
@@ -389,7 +378,6 @@ class ThresholdService:
                 "minVal": round(observed_min, 5) if observed_min is not None else 0.0,
                 "maxTime": observed_max_time,
                 "minTime": observed_min_time,
-                "dcOffset": dc_offset,
             },
             "series": series,
         }

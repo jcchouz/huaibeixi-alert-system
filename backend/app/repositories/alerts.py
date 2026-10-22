@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.domain.alert_types import (
@@ -340,8 +339,3 @@ class AlertRepository:
     def total_pages(total: int, page_size: int) -> int:
         """计算分页响应的总页数。"""
         return math.ceil(total / page_size) if page_size > 0 else 1
-
-    @staticmethod
-    def now_string() -> str:
-        """返回 API 响应使用的服务器时间格式。"""
-        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")

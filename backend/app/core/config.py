@@ -61,6 +61,28 @@ class Settings(BaseSettings):
         le=60,
         validation_alias="DETECTION_ALERT_OVERLAP_SECONDS",
     )
+    # 检测主节点检查阈值规则版本的周期。规则表触发器递增版本，其他实例
+    # 无需依赖处理修改请求的 API 实例即可重新加载阈值。
+    detection_rule_refresh_seconds: float = Field(
+        default=5.0,
+        ge=0.1,
+        le=300,
+        validation_alias="DETECTION_RULE_REFRESH_SECONDS",
+    )
+    # 主备切换或停机恢复时最多追溯多少秒，避免一次拉取无限历史。
+    detection_max_alert_catchup_seconds: int = Field(
+        default=300,
+        ge=1,
+        le=86400,
+        validation_alias="DETECTION_MAX_ALERT_CATCHUP_SECONDS",
+    )
+    # 追溯历史时按小窗口处理，限制单次 SQL 和 Python 内存占用。
+    detection_alert_catchup_chunk_seconds: int = Field(
+        default=5,
+        ge=1,
+        le=300,
+        validation_alias="DETECTION_ALERT_CATCHUP_CHUNK_SECONDS",
+    )
     # 统计窗口的落库延迟；实时预警扫描不使用该延迟。
     detection_lag_seconds: int = Field(
         default=5,

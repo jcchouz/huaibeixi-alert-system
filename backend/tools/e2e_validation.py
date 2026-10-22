@@ -91,10 +91,6 @@ DAQ_SENSOR = "zd-wg-01"
 # --------------------------------------------------------------------------- #
 # 辅助函数
 # --------------------------------------------------------------------------- #
-def seq_dt(i: int, win_start: datetime, n: int) -> datetime:
-    return win_start + timedelta(seconds=60.0 * i / n)
-
-
 def crc(key: str) -> int:
     return zlib.crc32(key.encode("utf-8")) & 0xFFFFFFFF
 
