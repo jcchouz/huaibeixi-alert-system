@@ -527,41 +527,41 @@ class AlertAnalyticsEngine:
                 # 合并数据库规则、派生元数据和默认检测参数。
                 d.update(
                     {
-                        "key": key,
-                        "sensor_no_lower": sno_l,
-                        "sensor_name": sname,
-                        "station_name": st_name,
-                        "station_code": st_code,
-                        "instrument_id": sm.get("instrument_id"),
-                        "instrument_name": sm.get("instrument_name") or "-",
-                        "range": sm.get("range") or "-",
-                        "frequency": str(frequency_text),
-                        "frequency_hz": frequency_hz,
-                        "sample_interval_ms": sample_interval_ms,
-                        "position": sm.get("position") or "-",
-                        "physical_quantity": physical_quantity,
-                        "unit": unit,
-                        "physical_min": range_min,
-                        "physical_max": range_max,
-                        "confirm_points": confirm_points,
-                        "stuck_points": stuck_points,
-                        "offline_points": offline_points,
-                        "condition_unit": self.condition_unit,
-                        "confirm_seconds": confirm_seconds,
-                        "stuck_seconds": stuck_seconds,
-                        "offline_seconds": offline_seconds,
-                        "offline_timeout_ms": offline_timeout_ms,
-                        "online_status": "ONLINE",
-                        "threshold_streak_count": 0,
-                        "threshold_streak_started_at": None,
-                        "threshold_condition_active": False,
-                        "threshold_condition_level": None,
-                        "oor_streak_count": 0,
-                        "oor_streak_started_at": None,
-                        "oor_condition_active": False,
-                        "stuck_streak_count": 0,
-                        "stuck_condition_active": False,
-                        "offline_condition_active": False,
+                        "key": key,                                             # 通道唯一标识，格式为“传感器编号:通道”
+                        "sensor_no_lower": sno_l,                               # 小写传感器编号，用于统一匹配
+                        "sensor_name": sname,                                   # 传感器显示名称
+                        "station_name": st_name,                                # 所属站点名称
+                        "station_code": st_code,                                # 所属站点编码
+                        "instrument_id": sm.get("instrument_id"),               # 采集仪主键
+                        "instrument_name": sm.get("instrument_name") or "-",    # 采集仪名称，空值使用占位符
+                        "range": sm.get("range") or "-",                        # 量程文本，空值使用占位符
+                        "frequency": str(frequency_text),                       # 采样频率文本
+                        "frequency_hz": frequency_hz,                           # 采样频率（Hz）
+                        "sample_interval_ms": sample_interval_ms,               # 采样间隔（毫秒）
+                        "position": sm.get("position") or "-",                  # 安装位置，空值使用占位符
+                        "physical_quantity": physical_quantity,                 # 物理量名称
+                        "unit": unit,                                           # 计量单位
+                        "physical_min": range_min,                              # 物理量程下限
+                        "physical_max": range_max,                              # 物理量程上限
+                        "confirm_points": confirm_points,                       # 通用连续确认点数
+                        "stuck_points": stuck_points,                           # 死值连续确认点数
+                        "offline_points": offline_points,                       # 离线连续确认点数
+                        "condition_unit": self.condition_unit,                  # 连续条件单位（seconds/points）
+                        "confirm_seconds": confirm_seconds,                     # 通用连续确认时长（秒）
+                        "stuck_seconds": stuck_seconds,                         # 死值连续确认时长（秒）
+                        "offline_seconds": offline_seconds,                     # 离线连续确认时长（秒）
+                        "offline_timeout_ms": offline_timeout_ms,               # 离线超时阈值（毫秒）
+                        "online_status": "ONLINE",                              # 初始在线状态
+                        "threshold_streak_count": 0,                            # 阈值连续命中计数
+                        "threshold_streak_started_at": None,                    # 阈值连续命中开始时间
+                        "threshold_condition_active": False,                    # 阈值预警条件是否已触发
+                        "threshold_condition_level": None,                      # 当前阈值预警等级
+                        "oor_streak_count": 0,                                  # 超量程连续命中计数
+                        "oor_streak_started_at": None,                          # 超量程连续命中开始时间
+                        "oor_condition_active": False,                          # 超量程预警条件是否已触发
+                        "stuck_streak_count": 0,                                # 死值连续命中计数
+                        "stuck_condition_active": False,                        # 死值预警条件是否已触发
+                        "offline_condition_active": False,                      # 离线预警条件是否已触发
                     }
                 )
                 persisted = persisted_states.get(key)
