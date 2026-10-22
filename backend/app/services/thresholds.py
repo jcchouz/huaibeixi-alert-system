@@ -334,7 +334,7 @@ class ThresholdService:
         return {
             "sensorNo": sensor_no,
             "sensorName": current_rule.get("sensor_name") or sensor_no,
-            "stationName": current_rule.get("station_name") or "未命名站点",
+            "stationName": current_rule.get("station_name") or self.engine.station_name,
             "channel": channel,
             "physicalQuantity": current_rule.get("physical_quantity") or channel,
             "unit": current_rule.get("unit") or "",

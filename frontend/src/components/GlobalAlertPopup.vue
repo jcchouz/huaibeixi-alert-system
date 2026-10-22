@@ -37,7 +37,7 @@
         <!-- Body Details -->
         <div class="alarm-toast-body">
           <div class="sensor-headline">
-            <span class="station-tag">{{ item.station_name || '未命名站点' }}</span>
+            <span class="station-tag">{{ item.station_name || '--' }}</span>
             <span class="sensor-title">{{ item.sensor_name || item.sensor_no }}</span>
             <span class="sensor-code mono-num">
               ({{ item.sensor_no }} / {{ item.channel || '默认通道' }})

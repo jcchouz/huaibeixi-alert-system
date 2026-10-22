@@ -55,6 +55,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         rule_refresh_seconds=settings.detection_rule_refresh_seconds,
         # 五类预警的独立开关来自 backend/.env。开关只决定“是否写预警”，
         # 样本读取、连续命中计数和 t_stat_record 统计都不受开关影响。
+        station_name=settings.station_name,
         alert_type_switches={
             # 监测值超过阈值。
             ALERT_TYPE_THRESHOLD: settings.detection_alert_threshold_enabled,

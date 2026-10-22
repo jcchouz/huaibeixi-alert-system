@@ -27,6 +27,11 @@ class Settings(BaseSettings):
         default="结构健康监测实时报警与统计分析系统 API",
         validation_alias="APP_NAME",
     )
+    station_name: str = Field(
+        default="玉环站",
+        min_length=1,
+        validation_alias="STATION_NAME",
+    )
     environment: Literal["development", "test", "staging", "production"] = Field(
         default="development",
         validation_alias="ENVIRONMENT",

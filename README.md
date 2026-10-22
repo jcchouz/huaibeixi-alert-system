@@ -44,7 +44,9 @@ backend/
    ```
 
 2. Create `backend/.env` and configure the database. Local development and
-   production both use this file. `backend/.env` is ignored by Git.
+   production both use this file. Set `STATION_NAME` to the station displayed
+   when the database station metadata has no name, for example
+   `STATION_NAME=玉环站`. `backend/.env` is ignored by Git.
 
 3. Start the backend, frontend and continuous data simulator:
 

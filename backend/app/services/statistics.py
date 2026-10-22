@@ -40,7 +40,7 @@ class StatisticsService:
             station_name = (
                 rule.get("station_name")
                 or sensor_meta.get("station_name")
-                or "未命名站点"
+                or self.engine.station_name
             )
             physical_quantity = rule.get("physical_quantity") or channel or "监测值"
             unit = rule.get("unit") or self.engine._infer_unit(physical_quantity, channel)
@@ -192,7 +192,7 @@ class StatisticsService:
         station_name = (
             rule.get("station_name")
             or sensor_meta.get("station_name")
-            or "未命名站点"
+            or self.engine.station_name
         )
         physical_quantity = rule.get("physical_quantity") or channel or "监测值"
         unit = rule.get("unit") or self.engine._infer_unit(physical_quantity, channel)

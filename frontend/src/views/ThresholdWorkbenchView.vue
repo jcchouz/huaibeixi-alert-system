@@ -485,7 +485,7 @@ const stationOptions = computed(() => {
   const names = new Set(
     rules.value
       .map((rule) => rule.station_name)
-      .filter((name) => name && name !== '未命名站点')
+      .filter(Boolean)
   )
   return [...names].sort((a, b) => a.localeCompare(b, 'zh-CN'))
 })

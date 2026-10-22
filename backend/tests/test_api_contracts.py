@@ -6,6 +6,7 @@ from app.api.app import create_app
 from app.api.deps import get_overview_service
 from app.core.config import Settings
 from app.domain.alert_types import ALERT_TYPE_STUCK, ALERT_TYPE_THRESHOLD
+from app.domain.engine import AlertAnalyticsEngine
 
 
 class FakeOverviewService:
@@ -30,6 +31,7 @@ def test_health_and_overview_are_open() -> None:
     assert app.state.engine.confirm_seconds == 3.0
     assert app.state.engine.stuck_seconds == 100.0
     assert app.state.engine.offline_seconds == 5.0
+    assert app.state.engine.station_name == "玉环站"
     app.dependency_overrides[get_overview_service] = lambda: FakeOverviewService()
     client = TestClient(app)
 
@@ -37,10 +39,37 @@ def test_health_and_overview_are_open() -> None:
     assert health.status_code == 200
     assert health.json()["status"] == "ok"
     assert health.json()["detection"]["running"] is False
+    assert health.json()["engine"]["stationName"] == "玉环站"
 
     response = client.get("/api/overview")
     assert response.status_code == 200
     assert response.json()["totalSensors"] == 1
+
+
+def test_station_name_is_configurable(monkeypatch) -> None:
+    monkeypatch.setenv("STATION_NAME", "测试站")
+
+    settings = Settings(_env_file=None, environment="test")
+    app = create_app(settings)
+
+    assert settings.station_name == "测试站"
+    assert app.state.engine.station_name == "测试站"
+    assert app.state.engine.get_status()["stationName"] == "测试站"
+
+
+def test_engine_enriches_missing_station_with_configured_name() -> None:
+    engine = AlertAnalyticsEngine(station_name="测试站")
+
+    alert = engine.enrich_alert_row(
+        {
+            "sensor_no": "sensor-01",
+            "channel": "channel-a",
+            "alert_type": ALERT_TYPE_THRESHOLD,
+            "alert_level": 1,
+        }
+    )
+
+    assert alert["station_name"] == "测试站"
 
 
 def test_alert_type_switches_are_wired_to_engine() -> None:

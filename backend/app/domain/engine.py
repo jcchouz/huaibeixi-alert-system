@@ -173,6 +173,7 @@ class AlertAnalyticsEngine:
         confirm_seconds: float = 3.0,
         stuck_seconds: float = 100.0,
         offline_seconds: float = 5.0,
+        station_name: str = "玉环站",
         alert_type_switches: Optional[Dict[str, bool]] = None,
         persist_state: bool = False,
         rule_refresh_seconds: float = 5.0,
@@ -194,6 +195,7 @@ class AlertAnalyticsEngine:
         self.confirm_seconds = max(0.001, float(confirm_seconds))
         self.stuck_seconds = max(0.001, float(stuck_seconds))
         self.offline_seconds = max(0.001, float(offline_seconds))
+        self.station_name = (station_name or "").strip() or "玉环站"
         self.persist_state = bool(persist_state)
         self.rule_refresh_seconds = max(0.1, float(rule_refresh_seconds))
         self.rule_version: Optional[int] = None
@@ -370,11 +372,12 @@ class AlertAnalyticsEngine:
                 """
                 SELECT ci.id, ci.number, ci.name, ci.model, ci.manufacturer, ci.box_id,
                        cb.name AS box_name, cb.station AS station_code,
-                       COALESCE(st.name, cb.name, '未命名站点') AS station_name
+                       COALESCE(NULLIF(BTRIM(st.name), ''), %s) AS station_name
                 FROM t_collect_instrument ci
                 LEFT JOIN t_collect_box cb ON ci.box_id = cb.id
                 LEFT JOIN t_station st ON cb.station = st.number
-                """
+                """,
+                (self.station_name,),
             )
             inst_map: Dict[str, Dict[str, Any]] = {}
             for r in cur.fetchall():
@@ -389,20 +392,20 @@ class AlertAnalyticsEngine:
                        s.instrument_id,
                        ci.name AS instrument_name,
                        cb.station AS station_code,
-                       st.name AS station_name
+                       COALESCE(NULLIF(BTRIM(st.name), ''), %s) AS station_name
                 FROM t_sensor s
                 LEFT JOIN t_collect_instrument ci ON s.instrument_id = ci.id
                 LEFT JOIN t_collect_box cb ON ci.box_id = cb.id
                 LEFT JOIN t_station st ON cb.station = st.number
-                """
+                """,
+                (self.station_name,),
             )
             s_meta: Dict[str, Dict[str, Any]] = {}
             for r in cur.fetchall():
                 sno_lower = (r["sensor_no"] or "").strip().lower()
                 sname = r["sensor_name"] or r["sensor_no"]
                 st_code = r["station_code"]
-                st_name = r["station_name"]
-                st_name = st_name or "未命名站点"
+                st_name = r["station_name"] or self.station_name
                 s_meta[sno_lower] = {
                     "sensor_id": r["sensor_id"],
                     "sensor_no": r["sensor_no"],
@@ -461,7 +464,7 @@ class AlertAnalyticsEngine:
                     or self._infer_unit(physical_quantity, ch)
                 )
                 sname = sm.get("sensor_name") or d["sensor_no"]
-                st_name = sm.get("station_name") or "未命名站点"
+                st_name = sm.get("station_name") or self.station_name
                 st_code = sm.get("station_code") or ""
                 range_min = d.get("range_min")
                 range_max = d.get("range_max")
@@ -969,7 +972,7 @@ class AlertAnalyticsEngine:
         if ch == "__DAQ__" or d.get("alert_type") == ALERT_TYPE_DAQ_OFFLINE:
             inst = self.instrument_meta.get(sno) or {}
             sensor_name = inst.get("name") or f"采集仪({sno[:8]})"
-            station_name = inst.get("station_name") or "未命名站点"
+            station_name = inst.get("station_name") or self.station_name
             physical_quantity = "采集仪连通状态"
             unit = "ms"
             position = inst.get("box_name") or "机柜层"
@@ -979,7 +982,7 @@ class AlertAnalyticsEngine:
                 d.get("station_name")
                 or rule.get("station_name")
                 or sm.get("station_name")
-                or "未命名站点"
+                or self.station_name
             )
             physical_quantity = d.get("physical_quantity") or rule.get("physical_quantity") or ch or "监测物理量"
             unit = d.get("unit") or rule.get("unit") or self._infer_unit(physical_quantity, ch)
@@ -2092,6 +2095,7 @@ class AlertAnalyticsEngine:
             "lastReloadTime": serialize_val(self.last_reload_time),
             "detectionMode": "realtime_sample_groups",
             "conditionUnit": self.condition_unit,
+            "stationName": self.station_name,
             "alertTypeSwitches": dict(self.alert_type_switches),
             "persistState": self.persist_state,
             "ruleVersion": self.rule_version,

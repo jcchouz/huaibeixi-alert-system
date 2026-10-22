@@ -263,7 +263,7 @@ const seriesData = ref([])
 const activeMeta = reactive({
   sensorNo: 'sensor-01',
   sensorName: '传感器',
-  stationName: '未命名站点',
+  stationName: '--',
   channel: 'channel-a',
   physicalQuantity: '应力',
   unit: 'MPa'
@@ -300,7 +300,7 @@ const stationOptions = computed(() => {
   const names = new Set(
     sensorOptions.value
       .map((sensor) => sensor.stationName)
-      .filter((name) => name && name !== '未命名站点')
+      .filter(Boolean)
   )
   return [...names].sort((a, b) => a.localeCompare(b, 'zh-CN'))
 })
@@ -388,7 +388,7 @@ async function fetchExtremesSeries() {
 
     activeMeta.sensorNo = res.sensorNo || sensorNo
     activeMeta.sensorName = res.sensorName || sensorNo
-    activeMeta.stationName = res.stationName || '未命名站点'
+    activeMeta.stationName = res.stationName || '--'
     activeMeta.channel = res.channel ?? channel
     activeMeta.physicalQuantity = res.physicalQuantity || '监测值'
     activeMeta.unit = res.unit || ''
