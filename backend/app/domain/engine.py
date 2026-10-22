@@ -196,6 +196,7 @@ class AlertAnalyticsEngine:
         self.stuck_seconds = max(0.001, float(stuck_seconds))
         self.offline_seconds = max(0.001, float(offline_seconds))
         self.station_name = (station_name or "").strip() or "玉环站"
+        self.station_code: Optional[str] = None
         self.persist_state = bool(persist_state)
         self.rule_refresh_seconds = max(0.1, float(rule_refresh_seconds))
         self.rule_version: Optional[int] = None
@@ -360,10 +361,32 @@ class AlertAnalyticsEngine:
                 logger.warning("Could not refresh monitor row count: %s", exc)
         return self.total_monitor_rows
 
+    def _resolve_station_code(self, cur: Any) -> str:
+        """Resolve the configured station name to its station code."""
+        cur.execute(
+            """
+            SELECT number
+            FROM t_station
+            WHERE BTRIM(name) = BTRIM(%s)
+            ORDER BY sort NULLS LAST, number
+            LIMIT 1
+            """,
+            (self.station_name,),
+        )
+        row = cur.fetchone()
+        station_code = str(row["number"] or "").strip() if row else ""
+        if not station_code:
+            raise RuntimeError(
+                f"Station {self.station_name!r} was not found in t_station"
+            )
+        return station_code
+
     def reload_thresholds(self) -> int:
         """热更新规则和元数据，并保留现有运行状态。"""
         with get_db_cursor() as cur:
             # 1. 加载采集仪与站点映射。
+            station_code = self._resolve_station_code(cur)
+            self.station_code = station_code
             persisted_states: Dict[str, Dict[str, Any]] = {}
             persisted_daq_states: Dict[str, bool] = {}
             if self.persist_state:
@@ -376,8 +399,9 @@ class AlertAnalyticsEngine:
                 FROM t_collect_instrument ci
                 LEFT JOIN t_collect_box cb ON ci.box_id = cb.id
                 LEFT JOIN t_station st ON cb.station = st.number
+                WHERE cb.station = %s
                 """,
-                (self.station_name,),
+                (self.station_name, station_code),
             )
             inst_map: Dict[str, Dict[str, Any]] = {}
             for r in cur.fetchall():
@@ -397,8 +421,9 @@ class AlertAnalyticsEngine:
                 LEFT JOIN t_collect_instrument ci ON s.instrument_id = ci.id
                 LEFT JOIN t_collect_box cb ON ci.box_id = cb.id
                 LEFT JOIN t_station st ON cb.station = st.number
+                WHERE cb.station = %s
                 """,
-                (self.station_name,),
+                (self.station_name, station_code),
             )
             s_meta: Dict[str, Dict[str, Any]] = {}
             for r in cur.fetchall():
@@ -443,10 +468,19 @@ class AlertAnalyticsEngine:
             # 4. 构建每轮检测使用的运行时规则表。
             cur.execute(
                 """
-                SELECT *
-                FROM t_alert_threshold
-                ORDER BY sensor_no ASC, channel ASC
-                """
+                SELECT at.*
+                FROM t_alert_threshold at
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM t_sensor s
+                    JOIN t_collect_instrument ci ON s.instrument_id = ci.id
+                    JOIN t_collect_box cb ON ci.box_id = cb.id
+                    WHERE LOWER(BTRIM(s.sensor_no)) = LOWER(BTRIM(at.sensor_no))
+                      AND cb.station = %s
+                )
+                ORDER BY at.sensor_no ASC, at.channel ASC
+                """,
+                (station_code,),
             )
             new_states: Dict[str, Dict[str, Any]] = {}
             for row in cur.fetchall():
@@ -2096,6 +2130,7 @@ class AlertAnalyticsEngine:
             "detectionMode": "realtime_sample_groups",
             "conditionUnit": self.condition_unit,
             "stationName": self.station_name,
+            "stationCode": self.station_code,
             "alertTypeSwitches": dict(self.alert_type_switches),
             "persistState": self.persist_state,
             "ruleVersion": self.rule_version,

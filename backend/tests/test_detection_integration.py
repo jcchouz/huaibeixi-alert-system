@@ -19,6 +19,10 @@ from app.repositories.detection_state import (
 
 pytestmark = pytest.mark.integration
 TEST_RUN_PREFIX = f"itest-det-{uuid.uuid4().hex[:10]}"
+TEST_STATION_NAME = f"{TEST_RUN_PREFIX}-station"
+TEST_STATION_CODE = f"{TEST_RUN_PREFIX}-code"
+TEST_BOX_ID = f"{TEST_RUN_PREFIX}-box"
+TEST_INSTRUMENT_ID = f"{TEST_RUN_PREFIX}-instrument"
 
 
 @pytest.fixture()
@@ -29,6 +33,7 @@ def db_conn() -> Iterator[Any]:
     conn = psycopg2.connect(dsn, cursor_factory=RealDictCursor)
     time_floor = database_time(conn) - timedelta(minutes=1)
     cleanup(conn, TEST_RUN_PREFIX, time_floor)
+    ensure_station_metadata(conn)
     try:
         yield conn
     finally:
@@ -76,6 +81,47 @@ def cleanup(conn: Any, prefix: str, time_floor: datetime) -> None:
             "DELETE FROM public.t_detection_worker_state WHERE worker_name LIKE %s",
             (pattern,),
         )
+        cur.execute(
+            "DELETE FROM public.t_collect_instrument WHERE id LIKE %s",
+            (pattern,),
+        )
+        cur.execute(
+            "DELETE FROM public.t_collect_box WHERE id LIKE %s",
+            (pattern,),
+        )
+        cur.execute(
+            "DELETE FROM public.t_station WHERE id LIKE %s",
+            (pattern,),
+        )
+    conn.commit()
+
+
+def ensure_station_metadata(conn: Any) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO public.t_station (id, name, number)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (id) DO NOTHING
+            """,
+            (f"{TEST_RUN_PREFIX}-station", TEST_STATION_NAME, TEST_STATION_CODE),
+        )
+        cur.execute(
+            """
+            INSERT INTO public.t_collect_box (id, number, name, station)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (id) DO NOTHING
+            """,
+            (TEST_BOX_ID, TEST_BOX_ID, TEST_BOX_ID, TEST_STATION_CODE),
+        )
+        cur.execute(
+            """
+            INSERT INTO public.t_collect_instrument (id, number, name, box_id)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (id) DO NOTHING
+            """,
+            (TEST_INSTRUMENT_ID, TEST_INSTRUMENT_ID, TEST_INSTRUMENT_ID, TEST_BOX_ID),
+        )
     conn.commit()
 
 
@@ -89,6 +135,20 @@ def insert_rule(
     level3_upper: float = 10.0,
 ) -> None:
     with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO public.t_sensor (
+                id, sensor_no, name, instrument_id, frequency
+            ) VALUES (%s, %s, %s, %s, '1')
+            ON CONFLICT (id) DO NOTHING
+            """,
+            (
+                f"{TEST_RUN_PREFIX}-sensor-{sensor_no}",
+                sensor_no,
+                sensor_no,
+                TEST_INSTRUMENT_ID,
+            ),
+        )
         cur.execute(
             """
             INSERT INTO public.t_alert_threshold (
@@ -147,6 +207,7 @@ def database_time(conn: Any) -> datetime:
 
 def make_engine() -> AlertAnalyticsEngine:
     return AlertAnalyticsEngine(
+        station_name=TEST_STATION_NAME,
         condition_unit="points",
         confirm_points=3,
         stuck_points=100,
