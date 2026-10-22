@@ -27,7 +27,7 @@ class RecordingCursor:
             "alert_category": 0,
             "alert_level": 1,
             "alert_status": 0,
-            "trigger_count": 1,
+            "end_time": None,
         }
 
 
@@ -47,7 +47,47 @@ def test_handled_alert_is_not_reused_for_a_new_incident() -> None:
     )
 
     dedup_sql = next(sql for sql, _ in cursor.executions if "SELECT id" in sql)
-    assert "alert_status = 0" in dedup_sql
-    assert "alert_status IN (0, 1)" not in dedup_sql
-    assert "direction" not in dedup_sql
-    assert any("INSERT INTO public.t_alert_record" in sql for sql, _ in cursor.executions)
+    assert "end_time IS NULL" in dedup_sql
+    assert "alert_status" not in dedup_sql
+    insert_sql = next(
+        sql
+        for sql, _ in cursor.executions
+        if "INSERT INTO public.t_alert_record" in sql
+    )
+    assert "trigger_count" not in insert_sql
+    assert "update_time" not in insert_sql
+    assert "end_time" in insert_sql
+
+
+def test_close_alert_incident_writes_recovery_time() -> None:
+    cursor = RecordingCursor()
+    engine = AlertAnalyticsEngine()
+    active_map = {
+        engine._alert_key("sensor-1", "x", ALERT_TYPE_THRESHOLD): {
+            "id": "open-alert",
+            "sensor_no": "sensor-1",
+            "channel": "x",
+            "alert_type": ALERT_TYPE_THRESHOLD,
+        }
+    }
+    recovered_at = datetime(2026, 10, 20, 12, 5, 0)
+
+    result = engine._close_alert_incident(
+        cursor,
+        active_map,
+        sensor_no="sensor-1",
+        channel="x",
+        alert_type=ALERT_TYPE_THRESHOLD,
+        end_time=recovered_at,
+    )
+
+    update_sql, update_params = next(
+        (sql, params)
+        for sql, params in cursor.executions
+        if "SET end_time" in sql
+    )
+    assert "update_time" not in update_sql
+    assert "trigger_count" not in update_sql
+    assert update_params == (recovered_at, "open-alert")
+    assert result is not None
+    assert not active_map

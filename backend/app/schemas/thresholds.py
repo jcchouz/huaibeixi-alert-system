@@ -22,8 +22,6 @@ class ThresholdUpdateRequest(BaseModel):
     level2Lower: Optional[float] = None
     level3Upper: Optional[float] = None
     level3Lower: Optional[float] = None
-    expected_interval_ms: Optional[int] = None
-    expectedIntervalMs: Optional[int] = None
     range_min: Optional[float] = None
     rangeMin: Optional[float] = None
     range_max: Optional[float] = None

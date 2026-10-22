@@ -26,20 +26,20 @@ class AlertRepository:
                 SELECT
                     COALESCE(MAX(seq), 0) AS max_seq,
                     COUNT(*) AS total_alerts,
-                    COUNT(*) FILTER (WHERE alert_status = 0) AS active_alerts,
+                    COUNT(*) FILTER (WHERE end_time IS NULL) AS active_alerts,
                     COUNT(*) FILTER (WHERE alert_status = 0) AS unacked_alerts,
                     COUNT(*) FILTER (WHERE alert_status = 1) AS acked_alerts,
-                    0 AS resolved_alerts,
+                    COUNT(*) FILTER (WHERE end_time IS NOT NULL) AS resolved_alerts,
                     0 AS suppressed_alerts,
-                    COUNT(*) FILTER (WHERE alert_level = 1 AND alert_status = 0) AS active_l1,
-                    COUNT(*) FILTER (WHERE alert_level = 2 AND alert_status = 0) AS active_l2,
-                    COUNT(*) FILTER (WHERE alert_level = 3 AND alert_status = 0) AS active_l3,
+                    COUNT(*) FILTER (WHERE alert_level = 1 AND end_time IS NULL) AS active_l1,
+                    COUNT(*) FILTER (WHERE alert_level = 2 AND end_time IS NULL) AS active_l2,
+                    COUNT(*) FILTER (WHERE alert_level = 3 AND end_time IS NULL) AS active_l3,
                     COUNT(*) FILTER (WHERE alert_level = 1) AS total_l1,
                     COUNT(*) FILTER (WHERE alert_level = 2) AS total_l2,
                     COUNT(*) FILTER (WHERE alert_level = 3) AS total_l3,
                     COUNT(DISTINCT sensor_no) FILTER (
                         WHERE alert_type IN (%s, %s)
-                          AND alert_status = 0
+                          AND end_time IS NULL
                     ) AS offline_alert_count
                 FROM public.t_alert_record
                 """,
@@ -52,7 +52,7 @@ class AlertRepository:
                 """
                 SELECT alert_type,
                        COUNT(*) AS total_count,
-                       COUNT(*) FILTER (WHERE alert_status = 0) AS active_count
+                       COUNT(*) FILTER (WHERE end_time IS NULL) AS active_count
                 FROM public.t_alert_record
                 GROUP BY alert_type
                 ORDER BY total_count DESC
@@ -195,7 +195,7 @@ class AlertRepository:
                 FROM public.t_alert_record
                 WHERE {where_sql}
                 ORDER BY
-                    alert_status ASC,
+                    (end_time IS NULL) DESC,
                     alert_level ASC,
                     seq DESC
                 LIMIT %s OFFSET %s
@@ -235,7 +235,6 @@ class AlertRepository:
                     handle_phone = %s,
                     handle_time = NOW(),
                     handle_opinion = %s,
-                    update_time = NOW(),
                     seq = nextval('public.seq_alert_record')
                 WHERE id = %s
                 RETURNING *
@@ -271,7 +270,6 @@ class AlertRepository:
                     handle_by = %s,
                     handle_phone = %s,
                     handle_time = NOW(),
-                    update_time = NOW(),
                     seq = nextval('public.seq_alert_record')
                 WHERE {' AND '.join(where_clauses)}
                 RETURNING id
@@ -299,11 +297,11 @@ class AlertRepository:
                 INSERT INTO public.t_alert_record (
                     id, sensor_no, threshold_id, trigger_val, create_time,
                     alert_status, channel, seq, alert_type, alert_category,
-                    alert_level, trigger_count, update_time
+                    alert_level, end_time
                 ) VALUES (
                     %s, %s, %s, %s, NOW(),
                     0, %s, nextval('public.seq_alert_record'), %s, %s,
-                    %s, 1, NOW()
+                    %s, NULL
                 )
                 RETURNING *
                 """,

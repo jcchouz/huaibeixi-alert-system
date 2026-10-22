@@ -93,14 +93,12 @@ def insert_rule(
             """
             INSERT INTO public.t_alert_threshold (
                 id, sensor_no, physical_quantity, channel,
-                expected_interval_ms,
                 level1_upper, level1_lower,
                 level2_upper, level2_lower,
                 level3_upper, level3_lower,
                 range_min, range_max
             ) VALUES (
                 %s, %s, 'test', %s,
-                100,
                 %s, NULL,
                 %s, NULL,
                 %s, NULL,
@@ -186,7 +184,7 @@ def test_threshold_lifecycle_persists_state_and_handles_recurrence(db_conn: Any)
     with db_conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, alert_level, trigger_count, seq
+            SELECT id, alert_level, seq, end_time
             FROM public.t_alert_record
             WHERE LOWER(sensor_no) = %s AND channel = %s
               AND alert_type = %s
@@ -196,7 +194,7 @@ def test_threshold_lifecycle_persists_state_and_handles_recurrence(db_conn: Any)
         first_alert = cur.fetchone()
     assert first_alert is not None
     assert first_alert["alert_level"] == 3
-    assert first_alert["trigger_count"] == 1
+    assert first_alert["end_time"] is None
 
     restarted = make_engine()
     restarted.initialize()
@@ -217,6 +215,16 @@ def test_threshold_lifecycle_persists_state_and_handles_recurrence(db_conn: Any)
         normal_time + timedelta(milliseconds=50),
     )
     assert engine.channel_states.get(key)["threshold_condition_active"] is False
+    with db_conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT end_time
+            FROM public.t_alert_record
+            WHERE id = %s
+            """,
+            (first_alert["id"],),
+        )
+        assert cur.fetchone()["end_time"] is not None
 
     recurrence_base = base + timedelta(milliseconds=700)
     insert_samples(
@@ -238,7 +246,7 @@ def test_threshold_lifecycle_persists_state_and_handles_recurrence(db_conn: Any)
         cur.execute(
             """
             SELECT COUNT(*) AS cnt,
-                   MAX(trigger_count) AS trigger_count,
+                   COUNT(*) FILTER (WHERE end_time IS NULL) AS open_count,
                    MAX(seq) AS seq
             FROM public.t_alert_record
             WHERE LOWER(sensor_no) = %s AND channel = %s
@@ -247,8 +255,8 @@ def test_threshold_lifecycle_persists_state_and_handles_recurrence(db_conn: Any)
             (sensor_no, channel, ALERT_TYPE_THRESHOLD),
         )
         recurring = cur.fetchone()
-    assert recurring["cnt"] == 1
-    assert recurring["trigger_count"] >= 2
+    assert recurring["cnt"] == 2
+    assert recurring["open_count"] == 1
     assert recurring["seq"] >= first_alert["seq"]
 
 

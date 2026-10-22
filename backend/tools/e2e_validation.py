@@ -143,19 +143,27 @@ def load_rules() -> List[Dict[str, Any]]:
     with get_db_cursor() as cur:
         cur.execute(
             """
-            SELECT *
-            FROM public.t_alert_threshold
-            ORDER BY sensor_no, channel
+            SELECT t.*, s.frequency AS sensor_frequency
+            FROM public.t_alert_threshold AS t
+            LEFT JOIN public.t_sensor AS s
+              ON LOWER(s.sensor_no) = LOWER(t.sensor_no)
+            ORDER BY t.sensor_no, t.channel
             """
         )
         return [dict(r) for r in cur.fetchall()]
 
 
+def rule_interval_ms(rule: Dict[str, Any]) -> int:
+    frequency_hz = AlertAnalyticsEngine._parse_frequency_hz(
+        rule.get("sensor_frequency")
+    )
+    return max(1, int(round(1000.0 / frequency_hz)))
+
+
 def nominal_rate(rules: List[Dict[str, Any]]) -> float:
     total = 0.0
     for r in rules:
-        iv = int(r.get("expected_interval_ms") or 1000)
-        total += 1000.0 / max(1, iv)
+        total += 1000.0 / rule_interval_ms(r)
     return total
 
 
@@ -172,8 +180,7 @@ def build_window_rows(
         spec = ANOMALIES.get(rule_key(rule), {}).get(win_idx)
         if spec and spec.get("mode") == "skip":
             continue
-        iv = int(rule.get("expected_interval_ms") or 1000)
-        hz = 1000.0 / max(1, iv)
+        hz = 1000.0 / rule_interval_ms(rule)
         n = max(1, int(round(hz * WINDOW_SECONDS * scale)))
         for off, val in window_points(rule, n, spec):
             rows.append((sensor, ch, float(val), win_start + timedelta(seconds=off)))
@@ -271,7 +278,7 @@ def phase_precheck(args: argparse.Namespace) -> bool:
     rows_per_window = 0
     for win_idx in range(args.windows):
         n = sum(
-            max(1, int(round((1000.0 / max(1, int(r.get('expected_interval_ms') or 1000)))
+            max(1, int(round((1000.0 / rule_interval_ms(r))
                              * WINDOW_SECONDS * scale)))
             for r in rules
             if not (ANOMALIES.get(rule_key(r), {}).get(win_idx, {}).get("mode") == "skip")
@@ -408,30 +415,24 @@ def phase_verify(args: argparse.Namespace) -> bool:
             )
         )
 
-    for key, status, level in expected_list:
+    for key, _status, level in expected_list:
         row = alerts.get(key)
         if row is None:
             c.check(False, f"alert {key} exists", "not found")
             continue
         c.check(
-            int(row["alert_status"]) == status,
-            f"alert {key} status == {status}",
-            f"got {row['alert_status']} (level {row['alert_level']}, tc {row['trigger_count']})",
+            row["end_time"] is None,
+            f"alert {key} is open",
+            f"end_time={row['end_time']}",
         )
         c.check(int(row["alert_level"]) == level, f"alert {key} level == {level}", f"got {row['alert_level']}")
 
-    # 校验级别升级和连续命中次数。
-    row = alerts.get("wy-sj-01:x:阈值超限")
-    if row:
-        c.check(int(row["trigger_count"]) >= 3, "wy-sj-01/x 阈值超限 debounced across windows",
-                f"trigger_count={row['trigger_count']}")
-
     row = alerts.get("zd-wg-01:x:传感器离线")
     if row:
-        c.check(int(row["alert_status"]) == 0, "zd-wg-01/x 传感器离线 remains active")
+        c.check(row["end_time"] is None, "zd-wg-01/x 传感器离线 remains active")
     row = alerts.get("zd-wg-01:y:传感器离线")
     if row:
-        c.check(int(row["alert_status"]) == 0, "zd-wg-01/y 传感器离线 remains active")
+        c.check(row["end_time"] is None, "zd-wg-01/y 传感器离线 remains active")
     daq_key = next(
         (
             k
@@ -442,9 +443,7 @@ def phase_verify(args: argparse.Namespace) -> bool:
     )
     row = alerts.get(daq_key) if daq_key else None
     if row:
-        c.check(int(row["alert_status"]) == 0, "采集仪离线 remains active")
-        c.check(int(row["trigger_count"]) >= 2, "采集仪离线 aggregated over >=2 windows",
-                f"trigger_count={row['trigger_count']}")
+        c.check(row["end_time"] is None, "采集仪离线 remains active")
 
     # 校验一分钟统计结果。
     with get_db_cursor() as cur:

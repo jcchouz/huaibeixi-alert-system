@@ -76,7 +76,6 @@ REQUIRED_COLUMNS = {
     "t_alert_threshold": {
         "sensor_no",
         "channel",
-        "expected_interval_ms",
     },
 }
 

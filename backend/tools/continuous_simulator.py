@@ -200,7 +200,19 @@ def parse_args() -> argparse.Namespace:
     """解析模拟器运行参数。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--max-seconds", type=int, default=0, help="0 means run forever")
-    return parser.parse_args()
+    parser.add_argument(
+        "--timestamp-lead-seconds",
+        type=float,
+        default=0.0,
+        help=(
+            "generate sample timestamps this many seconds ahead of wall time; "
+            "use a positive value when the detector runs with overlap=0"
+        ),
+    )
+    args = parser.parse_args()
+    if args.timestamp_lead_seconds < 0:
+        parser.error("--timestamp-lead-seconds must be zero or greater")
+    return args
 
 
 def main() -> int:
@@ -244,7 +256,9 @@ def main() -> int:
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
 
-    simulation_start = database_now().replace(microsecond=0)
+    simulation_start = database_now().replace(microsecond=0) + timedelta(
+        seconds=args.timestamp_lead_seconds
+    )
     next_tick = time.monotonic()
     second_index = 0
     total_rows = 0

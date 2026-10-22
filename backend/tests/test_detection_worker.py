@@ -187,6 +187,22 @@ def test_alert_scan_windows_reuse_a_short_overlap(monkeypatch) -> None:
     ]
 
 
+def test_alert_scan_windows_can_disable_overlap(monkeypatch) -> None:
+    engine = FakeEngine()
+    worker = make_worker(engine)
+    worker.alert_overlap_seconds = 0
+    monkeypatch.setattr(worker, "_ensure_leader", lambda: True)
+    monkeypatch.setattr(worker, "_ensure_statistics_leader", lambda: True)
+
+    assert worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 30)) is not None
+    assert worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 31)) is not None
+
+    assert engine.alert_scans == [
+        (datetime(2026, 10, 20, 15, 42, 29), datetime(2026, 10, 20, 15, 42, 30)),
+        (datetime(2026, 10, 20, 15, 42, 30), datetime(2026, 10, 20, 15, 42, 31)),
+    ]
+
+
 def test_run_once_scans_alerts_without_waiting_for_statistics_leadership(
     monkeypatch,
 ) -> None:

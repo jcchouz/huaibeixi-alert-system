@@ -18,9 +18,6 @@ from psycopg2.extras import execute_values
 from app.core.serialization import serialize_row, serialize_val
 from app.domain.alert_types import (
     ALERT_CATEGORY_LABELS,
-    ALERT_DIRECTION_LOWER,
-    ALERT_DIRECTION_NONE,
-    ALERT_DIRECTION_UPPER,
     ALERT_TYPE_DAQ_OFFLINE,
     ALERT_TYPE_OFFLINE,
     ALERT_TYPE_OOR,
@@ -236,7 +233,61 @@ class AlertAnalyticsEngine:
         """加载规则、初始化水位并刷新监测数据总量。"""
         self.reload_thresholds()
         self.bootstrap_last_seen()
+        self.reconcile_open_alerts()
         self.refresh_monitor_row_count()
+
+    def reconcile_open_alerts(self) -> int:
+        """Close persisted open alerts whose condition already recovered."""
+
+        if not self.persist_state:
+            return 0
+        closed = 0
+        with get_db_cursor(commit=True) as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM public.t_alert_record
+                WHERE end_time IS NULL
+                """
+            )
+            for row in cur.fetchall():
+                sensor_no = str(row["sensor_no"] or "").strip().lower()
+                channel = str(row.get("channel") or "").strip()
+                alert_type = normalize_alert_type(row["alert_type"]) or row["alert_type"]
+                if alert_type == ALERT_TYPE_DAQ_OFFLINE:
+                    condition_active = bool(
+                        self._daq_condition_active.get(sensor_no)
+                    )
+                else:
+                    state = self.channel_states.get(
+                        self.make_key(sensor_no, channel)
+                    )
+                    if state is None:
+                        continue
+                    state_field = {
+                        ALERT_TYPE_THRESHOLD: "threshold_condition_active",
+                        ALERT_TYPE_OFFLINE: "offline_condition_active",
+                        ALERT_TYPE_STUCK: "stuck_condition_active",
+                        ALERT_TYPE_OOR: "oor_condition_active",
+                    }.get(alert_type)
+                    if state_field is None:
+                        continue
+                    condition_active = bool(state.get(state_field))
+                if condition_active:
+                    continue
+                cur.execute(
+                    """
+                    UPDATE public.t_alert_record
+                    SET end_time = LOCALTIMESTAMP
+                    WHERE id = %s
+                      AND end_time IS NULL
+                    """,
+                    (row["id"],),
+                )
+                closed += int(cur.rowcount or 0)
+        if closed:
+            logger.info("Closed %d recovered alert incidents during reconciliation.", closed)
+        return closed
 
     def bootstrap_last_seen(self) -> None:
         """初始化最后上报时间，确保重启后仍能判断离线。"""
@@ -427,10 +478,7 @@ class AlertAnalyticsEngine:
                         physical_quantity,
                         ch,
                     )
-                frequency_text = (
-                    sm.get("frequency")
-                    or self._hz_from_interval(d.get("expected_interval_ms"))
-                )
+                frequency_text = sm.get("frequency") or "1"
                 frequency_hz = self._parse_frequency_hz(frequency_text)
                 sample_interval_ms = 1000.0 / frequency_hz
                 confirm_points = self.confirm_points
@@ -459,7 +507,6 @@ class AlertAnalyticsEngine:
                         "frequency": str(frequency_text),
                         "frequency_hz": frequency_hz,
                         "sample_interval_ms": sample_interval_ms,
-                        "expected_interval_ms": max(1, int(round(sample_interval_ms))),
                         "position": sm.get("position") or "-",
                         "physical_quantity": physical_quantity,
                         "unit": unit,
@@ -475,12 +522,10 @@ class AlertAnalyticsEngine:
                         "offline_timeout_ms": offline_timeout_ms,
                         "online_status": "ONLINE",
                         "threshold_streak_count": 0,
-                        "threshold_streak_direction": ALERT_DIRECTION_NONE,
                         "threshold_streak_started_at": None,
                         "threshold_condition_active": False,
                         "threshold_condition_level": None,
                         "oor_streak_count": 0,
-                        "oor_streak_direction": ALERT_DIRECTION_NONE,
                         "oor_streak_started_at": None,
                         "oor_condition_active": False,
                         "stuck_streak_count": 0,
@@ -536,17 +581,6 @@ class AlertAnalyticsEngine:
         return True
 
     @staticmethod
-    def _hz_from_interval(interval_ms: Optional[int]) -> str:
-        """将期望采样间隔转换为数据库频率格式。"""
-        if not interval_ms or interval_ms <= 0:
-            return "1"
-        if interval_ms >= 60000:
-            return "1/60"
-        if interval_ms >= 1000:
-            return str(round(1000 / interval_ms, 2)).rstrip("0").rstrip(".")
-        return str(int(1000 / interval_ms))
-
-    @staticmethod
     def _parse_frequency_hz(value: Any) -> float:
         """解析 ``t_sensor.frequency``，例如 ``100`` 或 ``1/60``。"""
         text = str(value or "").strip().lower().removesuffix("hz").strip()
@@ -583,7 +617,6 @@ class AlertAnalyticsEngine:
         self,
         samples: List[Tuple[datetime, float]],
         rule: Dict[str, Any],
-        previous_direction: Any,
         previous_count: Any,
         target_points: int,
         target_seconds: Optional[float] = None,
@@ -591,7 +624,6 @@ class AlertAnalyticsEngine:
         previous_sample_time: Any = None,
         max_gap_ms: Optional[float] = None,
     ) -> Tuple[
-        str,
         int,
         Optional[datetime],
         bool,
@@ -616,11 +648,6 @@ class AlertAnalyticsEngine:
         ``(level, value, limit, fire_time)``。调用方再用 active 的状态变化
         和级别是否升级决定要不要写 t_alert_record。
         """
-        direction = (
-            str(previous_direction)
-            if previous_direction in (ALERT_DIRECTION_UPPER, ALERT_DIRECTION_LOWER)
-            else ALERT_DIRECTION_NONE
-        )
         count = max(0, int(previous_count or 0))
         started_at = self._parse_maybe_dt(previous_started_at)
         active = False
@@ -639,7 +666,6 @@ class AlertAnalyticsEngine:
                 and (sample_time - last_sample_time).total_seconds() * 1000.0
                 > max_gap_ms
             ):
-                direction = ALERT_DIRECTION_NONE
                 count = 0
                 started_at = None
                 run_best_level = None
@@ -647,13 +673,12 @@ class AlertAnalyticsEngine:
                 run_best_limit = None
                 run_best_time = None
             last_sample_time = sample_time
-            level, sample_direction, eval_value, limit = self._sample_level(
+            level, eval_value, limit = self._sample_level(
                 rule,
                 value,
             )
-            if level is None or sample_direction == ALERT_DIRECTION_NONE:
+            if level is None:
                 # 正常样本会清空所有阈值连续命中状态。
-                direction = ALERT_DIRECTION_NONE
                 count = 0
                 started_at = None
                 run_best_level = None
@@ -661,18 +686,9 @@ class AlertAnalyticsEngine:
                 run_best_limit = None
                 run_best_time = None
                 continue
-            if sample_direction == direction:
-                count += 1
-                if started_at is None:
-                    started_at = sample_time
-            else:
-                direction = sample_direction
-                count = 1
+            count += 1
+            if started_at is None:
                 started_at = sample_time
-                run_best_level = None
-                run_best_value = None
-                run_best_limit = None
-                run_best_time = None
             if run_best_level is None or level < run_best_level:
                 # 记录本轮连续命中中出现的最严重级别。
                 run_best_level = level
@@ -696,34 +712,23 @@ class AlertAnalyticsEngine:
                     run_best_time or sample_time,
                 )
 
-        return direction, count, started_at, active, snapshot
+        return count, started_at, active, snapshot
 
     @staticmethod
-    def _out_of_range_direction(
+    def _is_out_of_range(
         rule: Dict[str, Any],
         value: float,
-    ) -> str:
+    ) -> bool:
         physical_max = rule.get("physical_max")
         physical_min = rule.get("physical_min")
         upper_exceeded = physical_max is not None and value > float(physical_max)
         lower_exceeded = physical_min is not None and value < float(physical_min)
-        if upper_exceeded and lower_exceeded:
-            return (
-                ALERT_DIRECTION_LOWER
-                if float(physical_min) - value > value - float(physical_max)
-                else ALERT_DIRECTION_UPPER
-            )
-        if lower_exceeded:
-            return ALERT_DIRECTION_LOWER
-        if upper_exceeded:
-            return ALERT_DIRECTION_UPPER
-        return ALERT_DIRECTION_NONE
+        return bool(upper_exceeded or lower_exceeded)
 
     def _evaluate_out_of_range_streak(
         self,
         samples: List[Tuple[datetime, float]],
         rule: Dict[str, Any],
-        previous_direction: Any,
         previous_count: Any,
         target_points: int,
         target_seconds: Optional[float] = None,
@@ -731,18 +736,12 @@ class AlertAnalyticsEngine:
         previous_sample_time: Any = None,
         max_gap_ms: Optional[float] = None,
     ) -> Tuple[
-        str,
         int,
         Optional[datetime],
         bool,
         Optional[Tuple[float, datetime]],
     ]:
         """判断连续超出物理量程的样本。"""
-        direction = (
-            str(previous_direction)
-            if previous_direction in (ALERT_DIRECTION_UPPER, ALERT_DIRECTION_LOWER)
-            else ALERT_DIRECTION_NONE
-        )
         count = max(0, int(previous_count or 0))
         started_at = self._parse_maybe_dt(previous_started_at)
         active = False
@@ -756,24 +755,16 @@ class AlertAnalyticsEngine:
                 and (sample_time - last_sample_time).total_seconds() * 1000.0
                 > max_gap_ms
             ):
-                direction = ALERT_DIRECTION_NONE
                 count = 0
                 started_at = None
             last_sample_time = sample_time
-            sample_direction = self._out_of_range_direction(rule, value)
-            if sample_direction == ALERT_DIRECTION_NONE:
+            if not self._is_out_of_range(rule, value):
                 # 样本回到物理量程内时清零连续状态。
-                direction = ALERT_DIRECTION_NONE
                 count = 0
                 started_at = None
                 continue
-            if sample_direction == direction:
-                count += 1
-                if started_at is None:
-                    started_at = sample_time
-            else:
-                direction = sample_direction
-                count = 1
+            count += 1
+            if started_at is None:
                 started_at = sample_time
             duration_reached = (
                 started_at is not None
@@ -786,7 +777,7 @@ class AlertAnalyticsEngine:
                 active = True
                 snapshot = (value, sample_time)
 
-        return direction, count, started_at, active, snapshot
+        return count, started_at, active, snapshot
 
     @staticmethod
     def _evaluate_stuck_streak(
@@ -1049,12 +1040,11 @@ class AlertAnalyticsEngine:
     ) -> Dict[str, Any]:
         """新增或刷新未处理预警事件。
 
-        同键（sensor_no + channel + alert_type）且 ``alert_status = 0``
+        同键（sensor_no + channel + alert_type）且 ``end_time IS NULL``
         的记录视为同一条活动事件：
 
         - 已存在：执行 UPDATE，seq 重新取号、alert_level 取更严重的一侧
-          （``LEAST``，1 级最严重）、``trigger_count`` 加 1、刷新 update_time，
-          不新增行；
+          （``LEAST``，1 级最严重），不新增行；
         - 不存在：INSERT 一条 status=0 的新事件，并分配新的轮询 seq。
 
         查询使用 ``FOR UPDATE`` 兜住并发实例同时写入的情况；
@@ -1070,7 +1060,7 @@ class AlertAnalyticsEngine:
             WHERE LOWER(sensor_no) = %s
               AND COALESCE(channel, '') = %s
               AND alert_type = %s
-              AND alert_status = 0
+              AND end_time IS NULL
             ORDER BY seq DESC
             LIMIT 1
             FOR UPDATE
@@ -1087,9 +1077,7 @@ class AlertAnalyticsEngine:
                     alert_category = %s,
                     threshold_id = COALESCE(%s, threshold_id),
                     alert_level = LEAST(alert_level, %s),
-                    trigger_val = %s,
-                    trigger_count = trigger_count + 1,
-                    update_time = NOW()
+                    trigger_val = %s
                 WHERE id = %s
                 RETURNING *
                 """,
@@ -1102,13 +1090,11 @@ class AlertAnalyticsEngine:
                 INSERT INTO public.t_alert_record (
                     id, seq, sensor_no, channel, threshold_id,
                     alert_type, alert_category, alert_level,
-                    trigger_val, create_time, trigger_count,
-                    alert_status, update_time
+                    trigger_val, create_time, alert_status, end_time
                 ) VALUES (
                     %s, nextval('public.seq_alert_record'), %s, %s, %s,
                     %s, %s, %s,
-                    %s, %s, 1,
-                    0, NOW()
+                    %s, %s, 0, NULL
                 )
                 RETURNING *
                 """,
@@ -1127,6 +1113,53 @@ class AlertAnalyticsEngine:
         row = cur.fetchone()
         enriched = self.enrich_alert_row(row)
         return enriched
+
+    def _close_alert_incident(
+        self,
+        cur: Any,
+        active_map: Dict[Tuple[str, str, str], Dict[str, Any]],
+        *,
+        sensor_no: str,
+        channel: str,
+        alert_type: str,
+        end_time: datetime,
+    ) -> Optional[Dict[str, Any]]:
+        """Close the open alert incident when its condition recovers."""
+
+        key = self._alert_key(sensor_no, channel, alert_type)
+        existing = active_map.pop(key, None)
+        alert_id = existing.get("id") if existing else None
+        if alert_id is None:
+            cur.execute(
+                """
+                SELECT id
+                FROM public.t_alert_record
+                WHERE LOWER(sensor_no) = %s
+                  AND COALESCE(channel, '') = %s
+                  AND alert_type = %s
+                  AND end_time IS NULL
+                ORDER BY seq DESC
+                LIMIT 1
+                FOR UPDATE
+                """,
+                (sensor_no.lower(), channel or "", alert_type),
+            )
+            row = cur.fetchone()
+            alert_id = row["id"] if row else None
+        if alert_id is None:
+            return None
+        cur.execute(
+            """
+            UPDATE public.t_alert_record
+            SET end_time = %s
+            WHERE id = %s
+              AND end_time IS NULL
+            RETURNING *
+            """,
+            (end_time, alert_id),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
 
     @staticmethod
     def _parse_maybe_dt(value: Any) -> Optional[datetime]:
@@ -1168,22 +1201,22 @@ class AlertAnalyticsEngine:
         rule: Dict[str, Any],
         eval_upper: float,
         eval_lower: float,
-    ) -> Tuple[Optional[int], str, Optional[float], Optional[float]]:
+    ) -> Tuple[Optional[int], Optional[float], Optional[float]]:
         """返回单个评估值命中的最严重阈值级别。"""
         for level in (1, 2, 3):
             upper = rule.get(f"level{level}_upper")
             if upper is not None and eval_upper > float(upper):
-                return level, ALERT_DIRECTION_UPPER, eval_upper, float(upper)
+                return level, eval_upper, float(upper)
             lower = rule.get(f"level{level}_lower")
             if lower is not None and eval_lower < float(lower):
-                return level, ALERT_DIRECTION_LOWER, eval_lower, float(lower)
-        return None, ALERT_DIRECTION_NONE, None, None
+                return level, eval_lower, float(lower)
+        return None, None, None
 
     def _sample_level(
         self,
         rule: Dict[str, Any],
         value: float,
-    ) -> Tuple[Optional[int], str, Optional[float], Optional[float]]:
+    ) -> Tuple[Optional[int], Optional[float], Optional[float]]:
         """评估单个样本，并对振动通道去除直流分量。"""
         return self._level_for(rule, value, value)
 
@@ -1211,7 +1244,7 @@ class AlertAnalyticsEngine:
             """
             SELECT *
             FROM public.t_alert_record
-            WHERE alert_status = 0
+            WHERE end_time IS NULL
             """
         )
         active: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
@@ -1302,6 +1335,21 @@ class AlertAnalyticsEngine:
         instrument_id = (rule.get("instrument_id") or "").strip()
         if instrument_id:
             offline_by_instrument.setdefault(instrument_id, set()).add(key)
+
+        for alert_type, state_field in (
+            (ALERT_TYPE_THRESHOLD, "threshold_condition_active"),
+            (ALERT_TYPE_STUCK, "stuck_condition_active"),
+            (ALERT_TYPE_OOR, "oor_condition_active"),
+        ):
+            if bool(rule.get(state_field)):
+                self._close_alert_incident(
+                    cur,
+                    active_map,
+                    sensor_no=rule["sensor_no_lower"],
+                    channel=rule.get("channel") or "",
+                    alert_type=alert_type,
+                    end_time=window_end,
+                )
 
         if not bool(rule.get("offline_condition_active")):
             # 同一个连续离线周期只创建一个离线事件。
@@ -1579,7 +1627,6 @@ class AlertAnalyticsEngine:
                 # 上下文（上一轮方向、计数、起点、上一轮最后样本时间）
                 # 全部来自 channel_states，因此连续命中可以跨扫描轮次累计。
                 (
-                    threshold_direction,
                     threshold_count,
                     threshold_started_at,
                     threshold_active,
@@ -1587,7 +1634,6 @@ class AlertAnalyticsEngine:
                 ) = self._evaluate_threshold_streak(
                     samples,
                     rule,
-                    rule.get("threshold_streak_direction"),
                     rule.get("threshold_streak_count"),
                     confirm_points,
                     target_seconds=confirm_seconds,
@@ -1604,7 +1650,6 @@ class AlertAnalyticsEngine:
                     "last_ts": serialize_val(samples[-1][0]),
                     "last_val": round(samples[-1][1], 5),
                     "online_status": "ONLINE",
-                    "threshold_streak_direction": threshold_direction,
                     "threshold_streak_count": threshold_count,
                     "threshold_streak_started_at": serialize_val(
                         threshold_started_at
@@ -1612,13 +1657,13 @@ class AlertAnalyticsEngine:
                     "threshold_condition_active": bool(threshold_active),
                     "threshold_condition_level": None,
                 }
+                previous_threshold_active = bool(
+                    rule.get("threshold_condition_active")
+                )
                 if threshold_snapshot is not None:
                     # snapshot 是本段连续命中里最严重的 (级别, 实测值, 阈值, 触发时间)。
                     level, value, limit, fire_time = threshold_snapshot
                     previous_condition_level = rule.get("threshold_condition_level")
-                    previous_condition_active = bool(
-                        rule.get("threshold_condition_active")
-                    )
                     previous_condition_level_value = (
                         int(previous_condition_level)
                         if previous_condition_level is not None
@@ -1645,7 +1690,7 @@ class AlertAnalyticsEngine:
                     #   3. 本轮级别比上一轮更严重（数字更小）。
                     # 持续同级别超限不会重复写库，避免每秒扫描产生新行。
                     if (
-                        not previous_condition_active
+                        not previous_threshold_active
                         or previous_condition_level_value is None
                         or level < previous_condition_level_value
                     ):
@@ -1661,11 +1706,19 @@ class AlertAnalyticsEngine:
                             alert_level=level,
                             trigger_val=value,
                             fire_time=fire_time,
-                            force_refresh=not previous_condition_active,
+                            force_refresh=not previous_threshold_active,
                         )
+                if previous_threshold_active and not threshold_active:
+                    self._close_alert_incident(
+                        cur,
+                        active_map,
+                        sensor_no=sensor_no,
+                        channel=channel,
+                        alert_type=ALERT_TYPE_THRESHOLD,
+                        end_time=window_end,
+                    )
 
                 (
-                    oor_direction,
                     oor_count,
                     oor_started_at,
                     oor_active,
@@ -1673,7 +1726,6 @@ class AlertAnalyticsEngine:
                 ) = self._evaluate_out_of_range_streak(
                     samples,
                     rule,
-                    rule.get("oor_streak_direction"),
                     rule.get("oor_streak_count"),
                     confirm_points,
                     target_seconds=confirm_seconds,
@@ -1683,16 +1735,16 @@ class AlertAnalyticsEngine:
                 )
                 state_updates.update(
                     {
-                        "oor_streak_direction": oor_direction,
                         "oor_streak_count": oor_count,
                         "oor_streak_started_at": serialize_val(oor_started_at),
                         "oor_condition_active": bool(oor_active),
                     }
                 )
+                previous_oor_active = bool(rule.get("oor_condition_active"))
                 if oor_snapshot is not None:
                     oor_value, fire_time = oor_snapshot
                     state_updates["oor_last_value"] = oor_value
-                    if not bool(rule.get("oor_condition_active")):
+                    if not previous_oor_active:
                         self._apply_condition(
                             cur,
                             active_map,
@@ -1707,6 +1759,15 @@ class AlertAnalyticsEngine:
                             fire_time=fire_time,
                             force_refresh=True,
                         )
+                if previous_oor_active and not oor_active:
+                    self._close_alert_incident(
+                        cur,
+                        active_map,
+                        sensor_no=sensor_no,
+                        channel=channel,
+                        alert_type=ALERT_TYPE_OOR,
+                        end_time=window_end,
+                    )
 
                 (
                     stuck_count,
@@ -1732,9 +1793,10 @@ class AlertAnalyticsEngine:
                         "stuck_condition_active": bool(stuck_active),
                     }
                 )
+                previous_stuck_active = bool(rule.get("stuck_condition_active"))
                 if stuck_snapshot is not None:
                     stuck_value, fire_time = stuck_snapshot
-                    if not bool(rule.get("stuck_condition_active")):
+                    if not previous_stuck_active:
                         self._apply_condition(
                             cur,
                             active_map,
@@ -1749,6 +1811,15 @@ class AlertAnalyticsEngine:
                             fire_time=fire_time,
                             force_refresh=True,
                         )
+                if previous_stuck_active and not stuck_active:
+                    self._close_alert_incident(
+                        cur,
+                        active_map,
+                        sensor_no=sensor_no,
+                        channel=channel,
+                        alert_type=ALERT_TYPE_STUCK,
+                        end_time=window_end,
+                    )
 
                 last_sample_time = samples[-1][0]
                 silence_ms = (window_end - last_sample_time).total_seconds() * 1000.0
@@ -1792,17 +1863,38 @@ class AlertAnalyticsEngine:
                         fire_time=window_end,
                         force_refresh=True,
                     )
+                if previous_offline_active and not currently_offline:
+                    self._close_alert_incident(
+                        cur,
+                        active_map,
+                        sensor_no=sensor_no,
+                        channel=channel,
+                        alert_type=ALERT_TYPE_OFFLINE,
+                        end_time=window_end,
+                    )
                 if currently_offline:
+                    for alert_type, state_field in (
+                        (ALERT_TYPE_THRESHOLD, "threshold_condition_active"),
+                        (ALERT_TYPE_STUCK, "stuck_condition_active"),
+                        (ALERT_TYPE_OOR, "oor_condition_active"),
+                    ):
+                        if bool(rule.get(state_field)):
+                            self._close_alert_incident(
+                                cur,
+                                active_map,
+                                sensor_no=sensor_no,
+                                channel=channel,
+                                alert_type=alert_type,
+                                end_time=window_end,
+                            )
                     state_updates.update(
                         {
                             "online_status": "OFFLINE",
                             "stuck_since": None,
                             "stuck_streak_count": 0,
                             "threshold_streak_count": 0,
-                            "threshold_streak_direction": ALERT_DIRECTION_NONE,
                             "threshold_streak_started_at": None,
                             "oor_streak_count": 0,
-                            "oor_streak_direction": ALERT_DIRECTION_NONE,
                             "oor_streak_started_at": None,
                             "threshold_condition_active": False,
                             "threshold_condition_level": None,
@@ -1840,6 +1932,15 @@ class AlertAnalyticsEngine:
                     offline_keys = offline_by_instrument.get(instrument_id, set())
                     total_channels = int(instrument_totals.get(instrument_id, 0))
                     if total_channels <= 0 or len(offline_keys) < total_channels:
+                        if self._daq_condition_active.get(instrument_id):
+                            self._close_alert_incident(
+                                cur,
+                                active_map,
+                                sensor_no=instrument_id,
+                                channel="__DAQ__",
+                                alert_type=ALERT_TYPE_DAQ_OFFLINE,
+                                end_time=window_end,
+                            )
                         daq_condition_updates[instrument_id] = False
                         continue
                     if self._daq_condition_active.get(instrument_id):

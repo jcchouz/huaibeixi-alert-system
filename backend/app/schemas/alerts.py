@@ -61,7 +61,7 @@ class AlertRecord(BaseModel):
     alert_level: Optional[int] = None
     alert_status: Optional[int] = None
     create_time: Optional[str] = None
-    update_time: Optional[str] = None
+    end_time: Optional[str] = None
     handle_by: Optional[str] = None
     handle_phone: Optional[str] = None
     handle_time: Optional[str] = None

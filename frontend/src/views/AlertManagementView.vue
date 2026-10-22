@@ -119,12 +119,13 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="最后更新" width="150" align="center">
+        <el-table-column label="恢复时间" width="150" align="center">
           <template #default="{ row }">
-            <div class="time-stack mono-num">
-              <span>{{ datePart(row.update_time) }}</span>
-              <span class="time-sub">{{ timePart(row.update_time) }}</span>
+            <div v-if="row.end_time" class="time-stack mono-num">
+              <span>{{ datePart(row.end_time) }}</span>
+              <span class="time-sub">{{ timePart(row.end_time) }}</span>
             </div>
+            <span v-else>-</span>
           </template>
         </el-table-column>
         <el-table-column label="处理人" width="100" align="center">

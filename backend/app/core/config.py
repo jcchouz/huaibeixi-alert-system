@@ -54,9 +54,9 @@ class Settings(BaseSettings):
         le=60,
         validation_alias="DETECTION_INTERVAL_SECONDS",
     )
-    # 实时扫描向前回看的时间，覆盖外部事务提交延迟；重复样本按 last_ts 去重。
+    # 实时扫描可选向前回看的时间，用于覆盖外部事务提交延迟；当前写入按时间顺序提交。
     detection_alert_overlap_seconds: int = Field(
-        default=5,
+        default=0,
         ge=0,
         le=60,
         validation_alias="DETECTION_ALERT_OVERLAP_SECONDS",

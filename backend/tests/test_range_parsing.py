@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from app.domain.alert_types import ALERT_DIRECTION_NONE, ALERT_DIRECTION_UPPER
 from app.domain.engine import AlertAnalyticsEngine
 
 
@@ -73,18 +72,16 @@ def test_threshold_seconds_uses_sample_timestamps() -> None:
         for index in range(4)
     ]
 
-    direction, count, started_at, active, snapshot = (
+    count, started_at, active, snapshot = (
         engine._evaluate_threshold_streak(
             samples,
             rule,
-            previous_direction=ALERT_DIRECTION_NONE,
             previous_count=0,
             target_points=3,
             target_seconds=3,
         )
     )
 
-    assert direction == ALERT_DIRECTION_UPPER
     assert count == 4
     assert started_at == first_ts
     assert active is True
@@ -104,15 +101,13 @@ def test_points_and_seconds_condition_units_use_different_thresholds() -> None:
         for index in range(3)
     ]
 
-    _, _, _, points_active, _ = engine._evaluate_threshold_streak(
+    _, _, points_active, _ = engine._evaluate_threshold_streak(
         three_samples,
         rule,
-        previous_direction=ALERT_DIRECTION_NONE,
         previous_count=0,
         target_points=3,
     )
     (
-        direction,
         count,
         started_at,
         seconds_active,
@@ -120,7 +115,6 @@ def test_points_and_seconds_condition_units_use_different_thresholds() -> None:
     ) = engine._evaluate_threshold_streak(
         three_samples,
         rule,
-        previous_direction=ALERT_DIRECTION_NONE,
         previous_count=0,
         target_points=3,
         target_seconds=3,
@@ -129,10 +123,9 @@ def test_points_and_seconds_condition_units_use_different_thresholds() -> None:
     assert points_active is True
     assert seconds_active is False
 
-    _, _, _, seconds_active, _ = engine._evaluate_threshold_streak(
+    _, _, seconds_active, _ = engine._evaluate_threshold_streak(
         [(first_ts + timedelta(seconds=3), 7.0)],
         rule,
-        previous_direction=direction,
         previous_count=count,
         target_points=3,
         target_seconds=3,
@@ -175,18 +168,16 @@ def test_out_of_range_seconds_uses_elapsed_duration() -> None:
         for index in range(4)
     ]
 
-    direction, count, started_at, active, snapshot = (
+    count, started_at, active, snapshot = (
         engine._evaluate_out_of_range_streak(
             samples,
             {"physical_min": -10.0, "physical_max": 10.0},
-            previous_direction=ALERT_DIRECTION_NONE,
             previous_count=0,
             target_points=3,
             target_seconds=3,
         )
     )
 
-    assert direction == ALERT_DIRECTION_UPPER
     assert count == 4
     assert started_at == first_ts
     assert active is True
@@ -207,32 +198,28 @@ def test_threshold_streak_continues_across_windows() -> None:
         (first_ts + timedelta(seconds=2), 7.0),
     ]
 
-    direction, count, started_at, active, snapshot = engine._evaluate_threshold_streak(
+    count, started_at, active, snapshot = engine._evaluate_threshold_streak(
         samples,
         rule,
-        previous_direction=ALERT_DIRECTION_NONE,
         previous_count=0,
         target_points=3,
     )
 
-    assert direction == ALERT_DIRECTION_UPPER
     assert count == 1
     assert active is False
     assert snapshot is None
 
-    direction, count, started_at, active, snapshot = engine._evaluate_threshold_streak(
+    count, started_at, active, snapshot = engine._evaluate_threshold_streak(
         [
             (first_ts + timedelta(seconds=3), 7.1),
             (first_ts + timedelta(seconds=4), 7.2),
         ],
         rule,
-        previous_direction=direction,
         previous_count=count,
         target_points=3,
         previous_started_at=started_at,
     )
 
-    assert direction == ALERT_DIRECTION_UPPER
     assert count == 3
     assert active is True
     assert snapshot is not None
@@ -271,17 +258,15 @@ def test_missing_sample_groups_break_threshold_streak() -> None:
     }
     previous_ts = datetime(2026, 10, 19, 10, 0, 0)
 
-    direction, count, started_at, active, snapshot = engine._evaluate_threshold_streak(
+    count, started_at, active, snapshot = engine._evaluate_threshold_streak(
         [(previous_ts + timedelta(seconds=2), 7.0)],
         rule,
-        previous_direction=ALERT_DIRECTION_UPPER,
         previous_count=2,
         target_points=3,
         previous_sample_time=previous_ts,
         max_gap_ms=1500,
     )
 
-    assert direction == ALERT_DIRECTION_UPPER
     assert count == 1
     assert active is False
     assert snapshot is None

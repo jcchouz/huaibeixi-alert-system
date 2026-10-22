@@ -121,7 +121,6 @@ class ThresholdService:
             "level2_lower": pick(body.level2_lower, body.level2Lower),
             "level3_upper": pick(body.level3_upper, body.level3Upper),
             "level3_lower": pick(body.level3_lower, body.level3Lower),
-            "expected_interval_ms": pick(body.expected_interval_ms, body.expectedIntervalMs),
         }
 
         with get_db_cursor(commit=True) as cur:
@@ -418,11 +417,6 @@ class ThresholdService:
                 body.level3_lower,
                 body.level3Lower,
                 row["level3_lower"],
-            ),
-            "expected_interval_ms": pick(
-                body.expected_interval_ms,
-                body.expectedIntervalMs,
-                row["expected_interval_ms"],
             ),
             "range_min": pick(
                 body.range_min,

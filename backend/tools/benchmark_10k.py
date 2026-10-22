@@ -37,7 +37,6 @@ except Exception:
 
 from app.core.config import Settings
 from app.domain.alert_types import (
-    ALERT_DIRECTION_NONE,
     ALERT_TYPE_DAQ_OFFLINE,
     ALERT_TYPE_OFFLINE,
     ALERT_TYPE_OOR,
@@ -481,7 +480,6 @@ def build_runtime_rules(
             "frequency": str(round(per_channel_rate, 6)),
             "frequency_hz": per_channel_rate,
             "sample_interval_ms": sample_interval_ms,
-            "expected_interval_ms": max(1, int(round(sample_interval_ms))),
             "condition_unit": "points",
             "confirm_points": 3,
             "stuck_points": 100,
@@ -492,12 +490,10 @@ def build_runtime_rules(
             "offline_timeout_ms": max(1.0, sample_interval_ms * 5),
             "online_status": "ONLINE",
             "threshold_streak_count": 0,
-            "threshold_streak_direction": ALERT_DIRECTION_NONE,
             "threshold_streak_started_at": None,
             "threshold_condition_active": False,
             "threshold_condition_level": None,
             "oor_streak_count": 0,
-            "oor_streak_direction": ALERT_DIRECTION_NONE,
             "oor_streak_started_at": None,
             "oor_condition_active": False,
             "stuck_streak_count": 0,

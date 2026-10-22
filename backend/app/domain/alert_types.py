@@ -14,11 +14,6 @@ ALERT_TYPE_OOR = "超物理量程"
 # 非阈值类预警统一使用最高严重级别。
 NON_THRESHOLD_ALERT_LEVEL = 1
 
-# 阈值和物理量程预警使用的超限方向。
-ALERT_DIRECTION_UPPER = "上限超限"
-ALERT_DIRECTION_LOWER = "下限超限"
-ALERT_DIRECTION_NONE = "无方向"
-
 # 预警过滤和展示使用的分类值。
 ALERT_CATEGORY_DATA = 0
 ALERT_CATEGORY_DEVICE = 1

@@ -294,7 +294,7 @@ def count_active_alerts(
             WHERE LOWER(sensor_no) = LOWER(%s)
               AND COALESCE(channel, '') = %s
               AND alert_type = %s
-              AND alert_status = 0
+              AND end_time IS NULL
             """,
             (sensor_no, channel, ALERT_TYPE_THRESHOLD),
         )
@@ -307,11 +307,14 @@ def acknowledge_existing(conn: psycopg2.extensions.connection, sensor_no: str, c
         cur.execute(
             """
             UPDATE public.t_alert_record
-            SET alert_status = 1, update_time = NOW()
+            SET alert_status = 1,
+                handle_by = 'inject_threshold',
+                handle_time = NOW(),
+                end_time = NOW()
             WHERE LOWER(sensor_no) = LOWER(%s)
               AND COALESCE(channel, '') = %s
               AND alert_type = %s
-              AND alert_status = 0
+              AND end_time IS NULL
             """,
             (sensor_no, channel, ALERT_TYPE_THRESHOLD),
         )
@@ -353,8 +356,8 @@ def verify_alerts(
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT seq, alert_level, alert_status, trigger_val, trigger_count,
-                   create_time, update_time
+            SELECT seq, alert_level, alert_status, trigger_val,
+                   create_time, end_time
             FROM public.t_alert_record
             WHERE LOWER(sensor_no) = LOWER(%s)
               AND COALESCE(channel, '') = %s
@@ -378,12 +381,12 @@ def verify_alerts(
 
     print("[inject] 最近阈值告警：")
     for row in rows:
-        seq, level, status, trigger_val, trigger_count, create_time, update_time = row
+        seq, level, status, trigger_val, create_time, end_time = row
         status_text = "未处理" if int(status) == 0 else "已处理"
         print(
             f"  seq={seq} level={level} status={status_text} "
-            f"trigger_val={trigger_val} trigger_count={trigger_count} "
-            f"create_time={create_time} update_time={update_time}"
+            f"trigger_val={trigger_val} "
+            f"create_time={create_time} end_time={end_time}"
         )
 
 

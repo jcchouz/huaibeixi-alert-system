@@ -27,7 +27,7 @@
               {{ formatSeverityBadge(item.alert_level) }}
             </span>
             <span class="type-pill">{{ formatAlertType(item.alert_type) }}</span>
-            <span v-if="item.isUpgrade || (item.trigger_count && item.trigger_count > 1)" class="upgrade-pill">
+            <span v-if="item.isUpgrade" class="upgrade-pill">
               ⚡ 动态升级/持续刷新 (#{{ item.seq }})
             </span>
           </div>
@@ -57,18 +57,12 @@
               </span>
             </div>
             <div class="metric-cell">
-              <span class="m-label">触发次数</span>
-              <span class="m-val mono-num">{{ item.trigger_count || 1 }} 次</span>
-            </div>
-            <div class="metric-cell">
               <span class="m-label">首次触发</span>
               <span class="m-val mono-num">{{ formatDateTimeWithMs(item.create_time) }}</span>
             </div>
             <div class="metric-cell">
-              <span class="m-label">最后更新</span>
-              <span class="m-val mono-num">
-                {{ formatDateTimeWithMs(item.update_time || item.create_time) }}
-              </span>
+              <span class="m-label">恢复时间</span>
+              <span class="m-val mono-num">{{ item.end_time ? formatDateTimeWithMs(item.end_time) : '-' }}</span>
             </div>
           </div>
 
@@ -216,7 +210,7 @@ function processIncomingAlert(alertObj, options = { forcePopup: false }) {
   const enrichedPopup = {
     ...alertObj,
     popupKey: `${alertObj.id || alertObj.sensor_no}-${seq}-${Date.now()}`,
-    isUpgrade: existingIdx >= 0 || Number(alertObj.trigger_count || 1) > 1,
+    isUpgrade: existingIdx >= 0,
     acking: false
   }
 
@@ -456,15 +450,6 @@ defineExpose({
   font-size: 11px;
   font-weight: 600;
   padding: 1px 7px;
-  border-radius: 4px;
-}
-
-.upgrade-pill {
-  background: rgba(168, 85, 247, 0.2);
-  color: #d8b4fe;
-  border: 1px solid rgba(168, 85, 247, 0.45);
-  font-size: 11px;
-  padding: 1px 6px;
   border-radius: 4px;
 }
 
