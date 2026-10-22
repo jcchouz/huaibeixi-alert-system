@@ -234,9 +234,13 @@ class AlertAnalyticsEngine:
     # ------------------------------------------------------------------
     def initialize(self) -> None:
         """加载规则、初始化水位并刷新监测数据总量。"""
+        # 先重建规则和通道状态，后续水位恢复及告警核对都依赖这份最新元数据。
         self.reload_thresholds()
+        # 用数据库时间恢复各通道上次上报时间，避免重启后离线状态跳变。
         self.bootstrap_last_seen()
+        # 关闭条件已恢复、但 end_time 尚未落库的遗留告警。
         self.reconcile_open_alerts()
+        # 通过数据库元数据刷新数据量，供概览使用，避免扫描 t_monitor。
         self.refresh_monitor_row_count()
 
     def reconcile_open_alerts(self) -> int:
