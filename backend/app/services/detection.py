@@ -1,4 +1,9 @@
-"""实时预警扫描和完整统计窗口处理的后台 Worker。"""
+"""实时预警扫描和完整统计窗口处理的后台 Worker。
+
+实时预警线程直接处理 t_monitor 原始采样点，不等待统计窗口结束；统计线程
+只负责生成已经到期的完整 t_stat_record 窗口。两条链路相互独立，并分别通过
+PostgreSQL advisory lock 选主，避免多个后端实例重复处理。
+"""
 
 from __future__ import annotations
 
@@ -26,7 +31,7 @@ STATISTICS_ADVISORY_LOCK_KEY = 0x53544154
 
 
 class AlertDetectionWorker:
-    """独立运行实时预警检测和统计窗口生成。"""
+    """运行实时预警和统计窗口两条独立后台链路。"""
 
     def __init__(
         self,
@@ -52,8 +57,12 @@ class AlertDetectionWorker:
         self._stop_event = threading.Event()
         self._alert_thread: Optional[threading.Thread] = None
         self._statistics_thread: Optional[threading.Thread] = None
+
+        # advisory lock 是会话级锁，必须各自持有独立且持续打开的数据库连接。
         self._lock_connection: Optional[Any] = None
         self._statistics_lock_connection: Optional[Any] = None
+
+        # 状态锁保护共享字段，链路锁防止手动调用与后台线程同时处理同一链路。
         self._state_lock = threading.Lock()
         self._alert_cycle_lock = threading.Lock()
         self._statistics_cycle_lock = threading.Lock()
@@ -132,9 +141,10 @@ class AlertDetectionWorker:
         logger.info("Alert detection worker stopped.")
 
     def initialize(self) -> None:
-        """Restore persisted alert and statistics watermarks before startup."""
+        """启动前恢复告警扫描和统计窗口的持久化水位。"""
 
         if self.settings.environment == "test":
+            # 测试环境使用注入时钟和内存状态，不访问真实水位表。
             return
         with get_db_cursor() as cur:
             alert_state = load_worker_watermark(cur, "alert")
@@ -159,6 +169,7 @@ class AlertDetectionWorker:
     ) -> None:
         if self.settings.environment == "test":
             return
+        # 水位单独提交，使进程重启后可以从最后完成的处理边界继续。
         with get_db_cursor(commit=True) as cur:
             save_worker_watermark(
                 cur,
@@ -168,6 +179,7 @@ class AlertDetectionWorker:
             )
 
     def _refresh_rules(self) -> None:
+        # 引擎支持热更新时再刷新，便于规则开关修改后无需重启 Worker。
         refresh = getattr(self.engine, "refresh_rules_if_changed", None)
         if refresh is not None:
             refresh()
@@ -183,7 +195,11 @@ class AlertDetectionWorker:
         return []
 
     def scan_alerts_once(self, current_time: datetime) -> Optional[Dict[str, Any]]:
-        """Scan from the persisted watermark, bounded into small chunks."""
+        """从持久化水位开始扫描实时预警，并限制单次追赶的历史范围。
+
+        每次扫描都会向前短回看一段重叠区间，以覆盖外部写入事务的提交延迟。
+        重叠产生的重复样本由检索引擎依据原始采样时间去重。
+        """
 
         with self._alert_cycle_lock:
             self._refresh_rules()
@@ -193,6 +209,7 @@ class AlertDetectionWorker:
 
             started = time.perf_counter()
             if last_alert_scan_at is None:
+                # 首次启动没有历史水位，只处理一个最小扫描区间，避免读取全部历史。
                 window_start = current_time - timedelta(
                     seconds=max(
                         self.interval_seconds,
@@ -219,6 +236,7 @@ class AlertDetectionWorker:
                 )
             else:
                 scan_cursor = last_alert_scan_at
+                # 长时间停机后只追赶允许的最近一段历史，避免启动时长时间阻塞。
                 earliest = current_time - timedelta(
                     seconds=self.max_alert_catchup_seconds
                 )
@@ -243,6 +261,7 @@ class AlertDetectionWorker:
                         self.interval_seconds * 5,
                     ),
                 )
+                # 将大段追赶拆成小块逐段提交，控制单次扫描的数据量和耗时。
                 while scan_cursor < current_time:
                     chunk_end = min(
                         current_time,
@@ -251,6 +270,7 @@ class AlertDetectionWorker:
                     window_start = scan_cursor - timedelta(
                         seconds=self.alert_overlap_seconds
                     )
+                    # 即使区间内没有采样点也照常扫描，使通道离线判定继续推进。
                     result = self.engine.scan_realtime_alerts(
                         window_start,
                         chunk_end,
@@ -291,6 +311,7 @@ class AlertDetectionWorker:
         current_time: datetime,
     ) -> List[Dict[str, Any]]:
         """查找已到期的完整窗口，并按顺序逐个持久化。"""
+        # 只处理落库延迟之后已经闭合的窗口，避免统计到仍在写入的数据。
         eligible_end = self.latest_eligible_window_end(current_time)
         with self._state_lock:
             last_window_end = self._last_window_end
@@ -325,6 +346,7 @@ class AlertDetectionWorker:
         results: List[Dict[str, Any]] = []
         for window_end in window_ends:
             window_start = window_end - timedelta(minutes=self.window_minutes)
+            # 一个窗口成功后立即推进水位，异常时下次只重试尚未完成的窗口。
             result = self.engine.record_statistics_window(
                 window_start,
                 window_end,
@@ -355,6 +377,7 @@ class AlertDetectionWorker:
 
     def latest_eligible_window_end(self, now: datetime) -> datetime:
         """应用落库延迟和统计周期后，返回最近完整窗口结束时间。"""
+        # 先减去允许的落库延迟，再按自然日锚点对齐到完整窗口边界。
         cutoff = now - timedelta(seconds=self.lag_seconds)
         day_start = cutoff.replace(hour=0, minute=0, second=0, microsecond=0)
         elapsed_minutes = int((cutoff - day_start).total_seconds() // 60)
@@ -450,7 +473,11 @@ class AlertDetectionWorker:
             self._stop_event.wait(wait_seconds)
 
     def _ensure_leader(self) -> bool:
-        """持有实时预警链路的 PostgreSQL advisory lock。"""
+        """尝试持有实时预警链路的会话级 PostgreSQL advisory lock。
+
+        锁连接仅用于选主，检测业务使用其他数据库连接。只要本连接不关闭，
+        会话级锁就会持续有效，业务事务提交不会释放该锁。
+        """
         if (
             self._lock_connection is not None
             and not self._lock_connection.closed
@@ -461,6 +488,7 @@ class AlertDetectionWorker:
         try:
             if self._lock_connection is None or self._lock_connection.closed:
                 self._lock_connection = psycopg2.connect(self.settings.dsn)
+                # 使用自动提交，避免选主锁被挂在一个长期未结束的事务中。
                 self._lock_connection.autocommit = True
             with self._lock_connection.cursor() as cur:
                 cur.execute(
@@ -498,10 +526,11 @@ class AlertDetectionWorker:
         except Exception:
             logger.debug("Could not release alert detection leader lock", exc_info=True)
         finally:
+            # 即使显式解锁失败，关闭专用连接也会释放会话级 advisory lock。
             self._close_lock_connection()
 
     def _ensure_statistics_leader(self) -> bool:
-        """持有统计链路的 PostgreSQL advisory lock。"""
+        """尝试持有统计链路的会话级 PostgreSQL advisory lock。"""
         if (
             self._statistics_lock_connection is not None
             and not self._statistics_lock_connection.closed
@@ -517,6 +546,7 @@ class AlertDetectionWorker:
                 self._statistics_lock_connection = psycopg2.connect(
                     self.settings.dsn
                 )
+                # 统计选主连接同样保持自动提交，并由独立会话持有锁。
                 self._statistics_lock_connection.autocommit = True
             with self._statistics_lock_connection.cursor() as cur:
                 cur.execute(
@@ -559,6 +589,7 @@ class AlertDetectionWorker:
                 exc_info=True,
             )
         finally:
+            # 关闭会话即可释放统计选主锁；显式解锁仅用于尽快让出主节点。
             self._close_statistics_lock_connection()
 
     def _close_lock_connection(self) -> None:
