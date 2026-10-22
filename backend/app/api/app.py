@@ -41,22 +41,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # 连续命中条件有两套单位，由 condition_unit 决定用哪一组：
         #   seconds -> confirm_seconds / stuck_seconds / offline_seconds；
         #   points  -> confirm_points / stuck_points / offline_points。
+        # points 模式使用采样点个数：确认预警、传感器死值、通道离线所需点数。
         confirm_points=settings.detection_confirm_points,
         stuck_points=settings.detection_stuck_points,
         offline_points=settings.detection_offline_points,
+        # seconds 模式使用持续时间，单位为秒，适合频率不同的通道统一判定。
         condition_unit=settings.detection_condition_unit,
         confirm_seconds=settings.detection_confirm_seconds,
         stuck_seconds=settings.detection_stuck_seconds,
         offline_seconds=settings.detection_offline_seconds,
+        # 检测状态跨扫描轮次保存；规则元数据按指定周期自动刷新。
         persist_state=True,
         rule_refresh_seconds=settings.detection_rule_refresh_seconds,
         # 五类预警的独立开关来自 backend/.env。开关只决定“是否写预警”，
         # 样本读取、连续命中计数和 t_stat_record 统计都不受开关影响。
         alert_type_switches={
+            # 监测值超过阈值。
             ALERT_TYPE_THRESHOLD: settings.detection_alert_threshold_enabled,
+            # 单个传感器通道离线。
             ALERT_TYPE_OFFLINE: settings.detection_alert_offline_enabled,
+            # 采集仪整体离线。
             ALERT_TYPE_DAQ_OFFLINE: settings.detection_alert_daq_offline_enabled,
+            # 传感器持续输出相同值，判定为死值。
             ALERT_TYPE_STUCK: settings.detection_alert_stuck_enabled,
+            # 监测值超出传感器物理量程。
             ALERT_TYPE_OOR: settings.detection_alert_oor_enabled,
         },
     )
