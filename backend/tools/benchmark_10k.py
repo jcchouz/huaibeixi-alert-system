@@ -346,7 +346,7 @@ def build_parser() -> argparse.ArgumentParser:
 def make_connection(settings: Settings) -> Any:
     return psycopg2.connect(
         settings.dsn,
-        application_name="huaibeixi_benchmark_10k",
+        application_name="alert_analysis_benchmark_10k",
     )
 
 

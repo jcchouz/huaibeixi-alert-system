@@ -140,7 +140,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/", include_in_schema=False)
     def service_root() -> dict[str, str]:
         return {
-            "service": "huaibeixi-alert-backend",
+            "service": "alert-analysis-backend",
             "version": settings.service_version,
             "docs": "/docs",
             "health": f"{api_prefix}/health",

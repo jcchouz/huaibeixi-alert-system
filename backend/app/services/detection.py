@@ -19,10 +19,10 @@ from app.repositories.detection_state import (
     save_worker_watermark,
 )
 
-logger = logging.getLogger("huaibeixi.detection")
+logger = logging.getLogger("alert_analysis.detection")
 
-ALERT_ADVISORY_LOCK_KEY = 0x48425844
-STATISTICS_ADVISORY_LOCK_KEY = 0x48425845
+ALERT_ADVISORY_LOCK_KEY = 0x414C5254
+STATISTICS_ADVISORY_LOCK_KEY = 0x53544154
 
 
 class AlertDetectionWorker:

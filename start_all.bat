@@ -13,7 +13,7 @@ set "WITH_SIMULATOR=1"
 if /I "%~1"=="--no-simulator" set "WITH_SIMULATOR=0"
 
 echo ======================================================================
-echo   Huaibeixi SHM Alert System - Local Launcher
+echo   Alert Analysis System - Local Launcher
 echo ======================================================================
 echo   Frontend : %FRONTEND_URL%
 echo   Backend  : %BACKEND_URL%/docs
@@ -44,7 +44,7 @@ if "%BACKEND_ALREADY_RUNNING%"=="1" (
     echo [1/3] Backend is already ready; reusing port 8090.
 ) else (
     echo [1/3] Starting backend on port 8090...
-    start "Huaibeixi-Backend-8090" /D "%BACKEND_DIR%" cmd /k "run_backend.bat"
+    start "alert-analysis-backend-8090" /D "%BACKEND_DIR%" cmd /k "run_backend.bat"
     echo Waiting for backend readiness...
     powershell -NoProfile -ExecutionPolicy Bypass -Command "$deadline=(Get-Date).AddSeconds(90); while((Get-Date)-lt $deadline){try{$r=Invoke-WebRequest -UseBasicParsing -Uri '%BACKEND_URL%/api/ready' -TimeoutSec 2; if($r.StatusCode -eq 200){exit 0}}catch{}; Start-Sleep -Seconds 1}; exit 1"
     if errorlevel 1 goto :backend_not_ready
@@ -64,7 +64,7 @@ if "%FRONTEND_ALREADY_RUNNING%"=="1" (
     echo [2/3] Frontend is already ready; reusing port 5174.
 ) else (
     echo [2/3] Starting frontend on port 5174...
-    start "Huaibeixi-Frontend-5174" /D "%FRONTEND_DIR%" cmd /k "run_frontend.bat"
+    start "alert-analysis-frontend-5174" /D "%FRONTEND_DIR%" cmd /k "run_frontend.bat"
     echo Waiting for frontend...
     powershell -NoProfile -ExecutionPolicy Bypass -Command "$deadline=(Get-Date).AddSeconds(45); while((Get-Date)-lt $deadline){try{$r=Invoke-WebRequest -UseBasicParsing -Uri '%FRONTEND_URL%' -TimeoutSec 2; if($r.StatusCode -eq 200){exit 0}}catch{}; Start-Sleep -Seconds 1}; exit 1"
     if errorlevel 1 goto :frontend_not_ready
@@ -79,7 +79,7 @@ if "%WITH_SIMULATOR%"=="0" (
 
 echo.
 echo [3/3] Starting local t_monitor data source...
-start "Huaibeixi-Simulator" /D "%BACKEND_DIR%" cmd /k "run_simulator.bat"
+start "Alert-Analysis-Simulator" /D "%BACKEND_DIR%" cmd /k "run_simulator.bat"
 
 :started
 echo.

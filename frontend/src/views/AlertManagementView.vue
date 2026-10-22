@@ -192,7 +192,7 @@
     <el-dialog v-model="createVisible" class="responsive-dialog" title="新增预警" width="480px">
       <el-form :model="createForm" label-width="90px">
         <el-form-item label="传感器编号">
-          <el-input v-model="createForm.sensor_no" placeholder="例如 stn-12-b" />
+          <el-input v-model="createForm.sensor_no" placeholder="例如 sensor-01" />
         </el-form-item>
         <el-form-item label="通道">
           <el-input v-model="createForm.channel" placeholder="例如 stress，可留空" />
@@ -307,8 +307,8 @@ const summary = reactive({
   handled: 0
 })
 const createForm = reactive({
-  sensor_no: 'stn-12-b',
-  channel: 'stress',
+  sensor_no: 'sensor-01',
+  channel: 'channel-a',
   alert_type: '阈值超限',
   alert_level: 1,
   trigger_val: -11.2

@@ -40,7 +40,7 @@ class StatisticsService:
             station_name = (
                 rule.get("station_name")
                 or sensor_meta.get("station_name")
-                or ("玉环站" if "_YH" in sensor_name else "淮北西站")
+                or "未命名站点"
             )
             physical_quantity = rule.get("physical_quantity") or channel or "监测值"
             unit = rule.get("unit") or self.engine._infer_unit(physical_quantity, channel)
@@ -88,7 +88,7 @@ class StatisticsService:
         limit: int,
     ) -> Dict[str, Any]:
         """返回极值时间序列和区间汇总。"""
-        sensor_no = (sensor_no or "stn-12-b").strip().lower()
+        sensor_no = (sensor_no or "sensor-01").strip().lower()
         period_type = "1m"
         with get_db_cursor() as cur:
             # 调用方未指定通道时，自动解析默认通道。
@@ -192,7 +192,7 @@ class StatisticsService:
         station_name = (
             rule.get("station_name")
             or sensor_meta.get("station_name")
-            or ("玉环站" if "_YH" in sensor_name else "淮北西站")
+            or "未命名站点"
         )
         physical_quantity = rule.get("physical_quantity") or channel or "监测值"
         unit = rule.get("unit") or self.engine._infer_unit(physical_quantity, channel)

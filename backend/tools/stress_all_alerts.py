@@ -411,7 +411,7 @@ def generate_batch(
 def fetch_json(url: str, timeout: float) -> dict[str, Any]:
     request = urllib.request.Request(
         url,
-        headers={"Accept": "application/json", "User-Agent": "huaibeixi-stress-test"},
+        headers={"Accept": "application/json", "User-Agent": "alert-analysis-stress-test"},
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
         payload = json.loads(response.read().decode("utf-8"))
@@ -1116,7 +1116,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         conn = psycopg2.connect(
             settings.dsn,
-            application_name="huaibeixi_stress_all_alerts",
+            application_name="alert_analysis_stress_all_alerts",
         )
         if settings.environment == "production" and not args.allow_production:
             raise StressTestError(

@@ -11,7 +11,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
-logger = logging.getLogger("huaibeixi.request")
+logger = logging.getLogger("alert_analysis.request")
 
 REQUEST_COUNT = Counter(
     "http_requests_total",

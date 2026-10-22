@@ -2,7 +2,7 @@
 chcp 65001 >nul
 cd /d "%~dp0"
 set PYTHONIOENCODING=utf-8
-echo Starting Huaibeixi Structural Health Monitoring Alert & Analytics Backend on port 8090...
+echo Starting Structural Health Monitoring Alert & Analytics Backend on port 8090...
 set PATH=C:\msys64\ucrt64\bin;%PATH%
 if /I "%ENVIRONMENT%"=="production" (
     set RELOAD_FLAG=

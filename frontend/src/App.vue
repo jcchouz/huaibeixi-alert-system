@@ -4,7 +4,7 @@
       <div class="brand">
         <span class="brand-mark"><el-icon><DataAnalysis /></el-icon></span>
         <div>
-          <strong>淮北西站健康监测平台</strong>
+          <strong>结构健康监测平台</strong>
           <small>结构监测数据分析与预警管理</small>
         </div>
       </div>

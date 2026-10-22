@@ -29,7 +29,7 @@
       </div>
     </div>
 
-    <!-- 2. Filter Toolbar & 208 Rules Table -->
+    <!-- 2. Filter Toolbar & Rules Table -->
     <div class="shm-card">
       <div class="filter-bar">
         <div class="filter-left">
@@ -40,8 +40,12 @@
             size="small"
             style="width: 145px"
           >
-            <el-option label="玉环站" value="玉环站" />
-            <el-option label="淮北西站" value="淮北西站" />
+            <el-option
+              v-for="station in stationOptions"
+              :key="station"
+              :label="station"
+              :value="station"
+            />
           </el-select>
 
           <el-select
@@ -61,7 +65,7 @@
 
           <el-input
             v-model="filters.keyword"
-            placeholder="搜索传感器编号 / 名称 / 通道 (如 stn-12-b, accl-01)..."
+            placeholder="搜索传感器编号 / 名称 / 通道 (如 sensor-01, channel-a)..."
             clearable
             size="small"
             style="width: 280px"
@@ -87,7 +91,7 @@
       >
         <el-table-column prop="station_name" label="站点" width="88" align="center">
           <template #default="{ row }">
-            <el-tag size="small" :type="row.station_name === '玉环站' ? 'primary' : 'success'" effect="plain">
+            <el-tag size="small" type="primary" effect="plain">
               {{ row.station_name }}
             </el-tag>
           </template>
@@ -377,9 +381,8 @@
           <div class="sim-field">
             <label>历史试算时段选择</label>
             <el-select v-model="simForm.timeWindow" size="small" style="width: 100%" @change="runDryRunSimulation">
-              <el-option label="🔥 峰值吞吐时段 (2026-09-28 12:00 ~ 15:00)" value="PEAK_928" />
-              <el-option label="⚡ 掉线与波动时段 (2026-09-30 15:00 ~ 18:00)" value="DROP_930" />
-              <el-option label="📊 全量历史样本窗口 (2026-09-21 ~ 09-30)" value="ALL" />
+              <el-option label="最近 24 小时" value="LAST_24H" />
+              <el-option label="全部可用数据" value="ALL" />
             </el-select>
           </div>
 
@@ -478,7 +481,16 @@ const page = ref(1)
 const pageSize = ref(25)
 
 // Stats
-const allRulesCount = computed(() => rules.value.length || 208)
+const stationOptions = computed(() => {
+  const names = new Set(
+    rules.value
+      .map((rule) => rule.station_name)
+      .filter((name) => name && name !== '未命名站点')
+  )
+  return [...names].sort((a, b) => a.localeCompare(b, 'zh-CN'))
+})
+
+const allRulesCount = computed(() => rules.value.length)
 const highFreqRulesCount = computed(() => rules.value.filter((r) => Number(r.frequency_hz || 1) >= 1).length)
 
 const filteredRules = computed(() => {
@@ -517,7 +529,7 @@ async function fetchThresholds() {
     rules.value = Array.isArray(res.items) ? res.items : []
     physicalQuantityOptions.value = Array.isArray(res.physicalQuantities) ? res.physicalQuantities : []
   } catch (err) {
-    ElMessage.error(`加载208条阈值规则失败: ${err?.message || ''}`)
+    ElMessage.error(`加载阈值规则失败: ${err?.message || ''}`)
   } finally {
     loading.value = false
   }
@@ -654,10 +666,10 @@ let simChart = null
 
 const simForm = reactive({
   ruleId: '',
-  ruleKey: 'stn-12-b:stress',
-  sensor_no: 'stn-12-b',
-  channel: 'stress',
-  timeWindow: 'PEAK_928',
+  ruleKey: '',
+  sensor_no: '',
+  channel: '',
+  timeWindow: 'LAST_24H',
   level1_upper: 12.0,
   level1_lower: -11.2,
   level2_upper: 9.5,
@@ -667,7 +679,7 @@ const simForm = reactive({
 })
 
 function openSimulatorDialog(targetRow = null) {
-  const row = targetRow || rules.value.find((r) => r.key === 'stn-12-b:stress') || rules.value[0]
+  const row = targetRow || rules.value[0]
   if (row) {
     simForm.ruleId = row.id
     simForm.ruleKey = row.key
@@ -723,14 +735,14 @@ function onSimRuleSelect(key) {
 async function runDryRunSimulation() {
   simLoading.value = true
   try {
-    let start_time = '2026-09-28 12:00:00'
-    let end_time = '2026-09-28 15:00:00'
-    if (simForm.timeWindow === 'DROP_930') {
-      start_time = '2026-09-30 15:00:00'
-      end_time = '2026-09-30 18:00:00'
-    } else if (simForm.timeWindow === 'ALL') {
-      start_time = '2026-09-21 00:00:00'
-      end_time = '2026-09-30 23:59:59'
+    const end = new Date()
+    const start = new Date(end)
+    start.setDate(start.getDate() - 1)
+    let start_time = start.toISOString()
+    let end_time = end.toISOString()
+    if (simForm.timeWindow === 'ALL') {
+      start_time = ''
+      end_time = ''
     }
 
     const res = await simulateThresholdApi({

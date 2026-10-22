@@ -18,7 +18,7 @@ def health_check(
     """不访问数据库，返回进程存活以及引擎和 Worker 状态。"""
     response = {
         "status": "ok",
-        "service": "huaibeixi-alert-backend",
+        "service": "alert-analysis-backend",
         "engine": engine.get_status(),
     }
     worker = getattr(request.app.state, "detection_worker", None)
@@ -41,7 +41,7 @@ def readiness_check(
         raise HTTPException(status_code=503, detail="数据库尚未就绪") from exc
     response = {
         "status": "ready",
-        "service": "huaibeixi-alert-backend",
+        "service": "alert-analysis-backend",
         "engine": engine.get_status(),
     }
     worker = getattr(request.app.state, "detection_worker", None)

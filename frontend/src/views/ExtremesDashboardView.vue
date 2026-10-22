@@ -4,11 +4,16 @@
     <div class="shm-card control-bar">
       <div class="ctrl-left">
         <div class="ctrl-group">
-          <span class="ctrl-label">所属桥梁站点</span>
+          <span class="ctrl-label">所属站点</span>
           <el-radio-group v-model="stationFilter" size="small" @change="onStationChange">
             <el-radio-button value="ALL">全部站点</el-radio-button>
-            <el-radio-button value="玉环站">玉环站</el-radio-button>
-            <el-radio-button value="淮北西站">淮北西站</el-radio-button>
+            <el-radio-button
+              v-for="station in stationOptions"
+              :key="station"
+              :value="station"
+            >
+              {{ station }}
+            </el-radio-button>
           </el-radio-group>
         </div>
 
@@ -48,9 +53,9 @@
             style="width: 245px"
             @change="onTimePresetChange"
           >
-            <el-option label="全量归档区间 (2026-09-21 ~ 09-30)" value="ALL" />
-            <el-option label="吞吐峰值日 (2026-09-28 00:00 ~ 23:59)" value="2026-09-28" />
-            <el-option label="峰值核心段 (2026-09-28 12:00 ~ 16:00)" value="2026-09-28-PEAK" />
+            <el-option label="全部可用数据" value="ALL" />
+            <el-option label="最近 24 小时" value="LAST_24H" />
+            <el-option label="最近 7 天" value="LAST_7D" />
           </el-select>
         </div>
       </div>
@@ -172,7 +177,7 @@
       >
         <el-table-column prop="stationName" label="站点" width="95" align="center">
           <template #default="{ row }">
-            <el-tag size="small" :type="row.stationName === '玉环站' ? 'primary' : 'success'" effect="plain">
+            <el-tag size="small" type="primary" effect="plain">
               {{ row.stationName }}
             </el-tag>
           </template>
@@ -246,7 +251,7 @@ import { getStatSensorsApi, getStatExtremesApi } from '../api'
 
 const loading = ref(false)
 const stationFilter = ref('ALL')
-const selectedSensorKey = ref('stn-12-b:stress')
+const selectedSensorKey = ref('sensor-01:channel-a')
 const periodType = ref('1m')
 const selectedTimePreset = ref('ALL')
 const showThresholdLines = ref(true)
@@ -256,10 +261,10 @@ const sensorOptions = ref([])
 const seriesData = ref([])
 
 const activeMeta = reactive({
-  sensorNo: 'stn-12-b',
-  sensorName: '光纤光栅应变计_25_YH',
-  stationName: '玉环站',
-  channel: 'stress',
+  sensorNo: 'sensor-01',
+  sensorName: '传感器',
+  stationName: '未命名站点',
+  channel: 'channel-a',
   physicalQuantity: '应力',
   unit: 'MPa'
 })
@@ -289,6 +294,15 @@ let chartInstance = null
 const filteredSensorOptions = computed(() => {
   if (stationFilter.value === 'ALL') return sensorOptions.value
   return sensorOptions.value.filter((s) => s.stationName === stationFilter.value)
+})
+
+const stationOptions = computed(() => {
+  const names = new Set(
+    sensorOptions.value
+      .map((sensor) => sensor.stationName)
+      .filter((name) => name && name !== '未命名站点')
+  )
+  return [...names].sort((a, b) => a.localeCompare(b, 'zh-CN'))
 })
 
 const displayedSensorTable = computed(() => {
@@ -346,19 +360,23 @@ function handleSelectSensorRow(row) {
 }
 
 function resolveTimeRangeParams() {
-  if (selectedTimePreset.value === '2026-09-28') {
-    return { startTime: '2026-09-28 00:00:00', endTime: '2026-09-28 23:59:59' }
+  if (selectedTimePreset.value === 'ALL') {
+    return {}
   }
-  if (selectedTimePreset.value === '2026-09-28-PEAK') {
-    return { startTime: '2026-09-28 12:00:00', endTime: '2026-09-28 16:00:00' }
+  const end = new Date()
+  const start = new Date(end)
+  if (selectedTimePreset.value === 'LAST_24H') {
+    start.setDate(start.getDate() - 1)
+  } else if (selectedTimePreset.value === 'LAST_7D') {
+    start.setDate(start.getDate() - 7)
   }
-  return {}
+  return { startTime: start.toISOString(), endTime: end.toISOString() }
 }
 
 async function fetchExtremesSeries() {
   loading.value = true
   try {
-    const [sensorNo, channel = ''] = (selectedSensorKey.value || 'stn-12-b:stress').split(':')
+    const [sensorNo, channel = ''] = (selectedSensorKey.value || 'sensor-01:channel-a').split(':')
     const timeParams = resolveTimeRangeParams()
     const res = await getStatExtremesApi({
       sensorNo,
@@ -370,7 +388,7 @@ async function fetchExtremesSeries() {
 
     activeMeta.sensorNo = res.sensorNo || sensorNo
     activeMeta.sensorName = res.sensorName || sensorNo
-    activeMeta.stationName = res.stationName || '玉环站'
+    activeMeta.stationName = res.stationName || '未命名站点'
     activeMeta.channel = res.channel ?? channel
     activeMeta.physicalQuantity = res.physicalQuantity || '监测值'
     activeMeta.unit = res.unit || ''

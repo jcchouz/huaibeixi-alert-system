@@ -405,7 +405,7 @@ def validate_cli(
 def make_connection(settings: Settings) -> Any:
     return psycopg2.connect(
         settings.dsn,
-        application_name="huaibeixi_realtime_load_test",
+        application_name="alert_analysis_realtime_load_test",
     )
 
 
@@ -751,7 +751,7 @@ def normalize_health_url(url: str) -> str:
 def fetch_json(url: str, timeout_seconds: float) -> dict[str, Any]:
     request = urllib.request.Request(
         url,
-        headers={"Accept": "application/json", "User-Agent": "huaibeixi-load-test/1.0"},
+        headers={"Accept": "application/json", "User-Agent": "alert-analysis-load-test/1.0"},
     )
     with urllib.request.urlopen(  # noqa: B310
         request,

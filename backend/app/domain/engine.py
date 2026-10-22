@@ -36,7 +36,7 @@ from app.repositories.detection_state import (
     state_rows_for_persistence,
 )
 
-logger = logging.getLogger("huaibeixi.engine")
+logger = logging.getLogger("alert_analysis.engine")
 
 # 在数据库内一次性聚合一个 t_monitor 窗口。
 #   s_no / ch            -> 分组键，传感器编号统一转小写
@@ -370,7 +370,7 @@ class AlertAnalyticsEngine:
                 """
                 SELECT ci.id, ci.number, ci.name, ci.model, ci.manufacturer, ci.box_id,
                        cb.name AS box_name, cb.station AS station_code,
-                       COALESCE(st.name, CASE WHEN cb.station = 'YHZ' THEN '玉环站' ELSE '淮北西站' END) AS station_name
+                       COALESCE(st.name, cb.name, '未命名站点') AS station_name
                 FROM t_collect_instrument ci
                 LEFT JOIN t_collect_box cb ON ci.box_id = cb.id
                 LEFT JOIN t_station st ON cb.station = st.number
@@ -402,13 +402,7 @@ class AlertAnalyticsEngine:
                 sname = r["sensor_name"] or r["sensor_no"]
                 st_code = r["station_code"]
                 st_name = r["station_name"]
-                if not st_name:
-                    if "_YH" in sname or sno_lower.startswith(("stn-", "wlg-", "wea-", "accl-", "disp-", "phtar-", "wprs-", "temp-", "phdm-")):
-                        st_code = "YHZ"
-                        st_name = "玉环站"
-                    else:
-                        st_code = "HBXZ"
-                        st_name = "淮北西站"
+                st_name = st_name or "未命名站点"
                 s_meta[sno_lower] = {
                     "sensor_id": r["sensor_id"],
                     "sensor_no": r["sensor_no"],
@@ -467,8 +461,8 @@ class AlertAnalyticsEngine:
                     or self._infer_unit(physical_quantity, ch)
                 )
                 sname = sm.get("sensor_name") or d["sensor_no"]
-                st_name = sm.get("station_name") or ("玉环站" if "_YH" in sname or sno_l.startswith(("stn-", "wlg-", "wea-", "accl-", "disp-", "phtar-", "wprs-", "temp-")) else "淮北西站")
-                st_code = sm.get("station_code") or ("YHZ" if st_name == "玉环站" else "HBXZ")
+                st_name = sm.get("station_name") or "未命名站点"
+                st_code = sm.get("station_code") or ""
                 range_min = d.get("range_min")
                 range_max = d.get("range_max")
                 if range_min is None or range_max is None:
@@ -975,13 +969,18 @@ class AlertAnalyticsEngine:
         if ch == "__DAQ__" or d.get("alert_type") == ALERT_TYPE_DAQ_OFFLINE:
             inst = self.instrument_meta.get(sno) or {}
             sensor_name = inst.get("name") or f"采集仪({sno[:8]})"
-            station_name = inst.get("station_name") or "玉环站"
+            station_name = inst.get("station_name") or "未命名站点"
             physical_quantity = "采集仪连通状态"
             unit = "ms"
             position = inst.get("box_name") or "机柜层"
         else:
             sensor_name = d.get("sensor_name") or rule.get("sensor_name") or sm.get("sensor_name") or sno
-            station_name = d.get("station_name") or rule.get("station_name") or sm.get("station_name") or ("玉环站" if "_YH" in str(sensor_name) else "淮北西站")
+            station_name = (
+                d.get("station_name")
+                or rule.get("station_name")
+                or sm.get("station_name")
+                or "未命名站点"
+            )
             physical_quantity = d.get("physical_quantity") or rule.get("physical_quantity") or ch or "监测物理量"
             unit = d.get("unit") or rule.get("unit") or self._infer_unit(physical_quantity, ch)
             position = sm.get("position") or rule.get("position") or "-"

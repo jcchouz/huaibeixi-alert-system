@@ -27,7 +27,7 @@ def list_stat_sensors(
 
 @router.get("/extremes", response_model=ExtremesResponse)
 def get_stat_extremes(
-    sensorNo: str = Query("stn-12-b"),
+    sensorNo: str = Query("sensor-01"),
     sensor_no: Optional[str] = Query(None),
     channel: Optional[str] = Query(None),
     periodType: str = Query("1m"),
@@ -41,7 +41,7 @@ def get_stat_extremes(
 ) -> Dict[str, Any]:
     """返回指定传感器和通道的极值序列和汇总。"""
     return service.extremes(
-        sensor_no=pick(sensor_no, sensorNo, "stn-12-b"),
+        sensor_no=pick(sensor_no, sensorNo, "sensor-01"),
         channel=channel,
         period_type=pick(period_type, periodType, "1m"),
         start_time=pick(start_time, startTime),

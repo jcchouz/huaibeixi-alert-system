@@ -243,7 +243,7 @@ def run(args: argparse.Namespace) -> int:
             print(f"[api]   stat sensors={len(items)} sample="
                   f"{json.dumps(items[0], ensure_ascii=False, default=str)[:180]}")
 
-        st, ext = http("GET", "/api/stats/extremes?sensorNo=stn-12-b&periodType=1m&limit=50")
+        st, ext = http("GET", "/api/stats/extremes?sensorNo=sensor-01&periodType=1m&limit=50")
         has_series = isinstance(ext, dict) and (ext.get("items") or ext.get("points") or ext.get("series"))
         c.check(st == 200 and bool(has_series), "GET /api/stats/extremes returns 1m series",
                 f"{st} {str(ext)[:150]}")

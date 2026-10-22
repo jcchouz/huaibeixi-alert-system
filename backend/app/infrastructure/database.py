@@ -13,7 +13,7 @@ from psycopg2 import pool
 
 from app.core.config import get_settings
 
-logger = logging.getLogger("huaibeixi.database")
+logger = logging.getLogger("alert_analysis.database")
 
 _pool_lock = threading.Lock()
 _connection_pool: Optional[pool.ThreadedConnectionPool] = None

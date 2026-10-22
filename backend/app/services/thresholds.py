@@ -148,7 +148,7 @@ class ThresholdService:
     def simulate(self, body: ThresholdSimulateRequest) -> Dict[str, Any]:
         """使用历史统计对比当前阈值和拟调整阈值。"""
         started = time.perf_counter()
-        sensor_no = (pick(body.sensor_no, body.sensorNo, "stn-12-b") or "stn-12-b").strip().lower()
+        sensor_no = (pick(body.sensor_no, body.sensorNo, "sensor-01") or "sensor-01").strip().lower()
         channel = (body.channel or "").strip()
         key = self.engine.make_key(sensor_no, channel)
         current_rule = self.engine.channel_states.get(key)
@@ -334,7 +334,7 @@ class ThresholdService:
         return {
             "sensorNo": sensor_no,
             "sensorName": current_rule.get("sensor_name") or sensor_no,
-            "stationName": current_rule.get("station_name") or "玉环站",
+            "stationName": current_rule.get("station_name") or "未命名站点",
             "channel": channel,
             "physicalQuantity": current_rule.get("physical_quantity") or channel,
             "unit": current_rule.get("unit") or "",
