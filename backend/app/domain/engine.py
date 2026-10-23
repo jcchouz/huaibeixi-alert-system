@@ -1636,6 +1636,8 @@ class AlertAnalyticsEngine:
                 confirm_points = max(1, int(rule.get("confirm_points") or 3))
                 stuck_points = max(1, int(rule.get("stuck_points") or 100))
                 condition_unit = rule.get("condition_unit", "points")
+                # points 模式直接使用规则中的连续点数；seconds 模式则把
+                # 持续时间传给评估函数，由评估函数结合采样周期换算点数。
                 confirm_seconds = (
                     float(rule.get("confirm_seconds") or self.confirm_seconds)
                     if condition_unit == "seconds"
@@ -1758,6 +1760,8 @@ class AlertAnalyticsEngine:
                         end_time=window_end,
                     )
 
+                # 超量程按连续命中判定：首次满足确认条件时创建事件，
+                # 持续满足时复用同一事件，条件恢复后才关闭。
                 (
                     oor_count,
                     oor_started_at,
@@ -1809,6 +1813,8 @@ class AlertAnalyticsEngine:
                         end_time=window_end,
                     )
 
+                # 死值判定同样维护跨扫描轮次的连续状态，避免同一个
+                # 持续不变的数值反复插入预警记录。
                 (
                     stuck_count,
                     stuck_last_value,
@@ -1864,6 +1870,8 @@ class AlertAnalyticsEngine:
                 last_sample_time = samples[-1][0]
                 silence_ms = (window_end - last_sample_time).total_seconds() * 1000.0
                 offline_timeout_ms = self._offline_timeout_ms(rule)
+                # 通道离线既可能表现为窗口末尾长时间没有新样本，也可能表现为
+                # 窗口内或跨窗口边界的采样间隔过大；两者使用同一个离线阈值。
                 boundary_gap_ms = (
                     (samples[0][0] - previous_last_seen).total_seconds() * 1000.0
                     if previous_last_seen is not None
@@ -1945,6 +1953,8 @@ class AlertAnalyticsEngine:
 
                 pending_state_updates.setdefault(key, {}).update(state_updates)
 
+            # 条件状态、统计数据、通道/采集仪预警在同一事务中落库。
+            # 只有该事务成功提交后，函数末尾才会把新状态发布到内存。
             if self.persist_state:
                 state_rows = state_rows_for_persistence(
                     rules_by_key,
