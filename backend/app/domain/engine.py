@@ -11,15 +11,30 @@ import time
 import uuid
 from collections import Counter
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from psycopg2.extras import execute_values
 
 from app.core.serialization import serialize_row, serialize_val
+from app.domain.alert_rules import (
+    AlertRuleRegistry,
+    DaqOfflineRule,
+    OfflineAlertRule,
+    OutOfRangeAlertRule,
+    StuckAlertRule,
+    ThresholdAlertRule,
+)
+from app.domain.alert_rules.base import (
+    AlertRule,
+    RuleContext,
+    RuleEvaluation,
+    max_sample_gap_ms,
+    parse_datetime,
+    serialize_runtime_datetime,
+)
 from app.domain.alert_types import (
     ALERT_CATEGORY_LABELS,
     ALERT_TYPE_DAQ_OFFLINE,
-    ALERT_TYPE_OFFLINE,
     ALERT_TYPE_OOR,
     ALERT_TYPE_STUCK,
     ALERT_TYPE_THRESHOLD,
@@ -189,6 +204,7 @@ class AlertAnalyticsEngine:
         station_name: str = "玉环站",
         alert_type_switches: Optional[Dict[str, bool]] = None,
         rule_refresh_seconds: float = 5.0,
+        channel_rules: Optional[Iterable[AlertRule]] = None,
     ) -> None:
         # 检测、接口补充信息和总览统计共用这些元数据。
         self.channel_states = ConcurrentDict()
@@ -217,6 +233,12 @@ class AlertAnalyticsEngine:
         self._active_alert_cache: Optional[
             Dict[Tuple[str, str, str], Dict[str, Any]]
         ] = None
+        self._threshold_rule = ThresholdAlertRule()
+        self._out_of_range_rule = OutOfRangeAlertRule()
+        self._stuck_rule = StuckAlertRule()
+        self._offline_rule = OfflineAlertRule()
+        self._daq_offline_rule = DaqOfflineRule()
+        self.channel_rule_registry = AlertRuleRegistry(channel_rules)
 
     @staticmethod
     def make_key(sensor_no: str, channel: Optional[str]) -> str:
@@ -591,96 +613,23 @@ class AlertAnalyticsEngine:
         bool,
         Optional[Tuple[int, float, float, datetime]],
     ]:
-        """结合历史状态判断连续阈值超限方向。
-
-        ``previous_*`` 来自上一轮扫描保存在 channel_states 的状态，
-        ``samples`` 是本轮新到达的样本（按时间升序），因此连续命中
-        可以跨扫描轮次累计；后端重启后这些状态清零，需重新累计。
-
-        逐点处理规则：
-          - 与上一点间隔超过 ``max_gap_ms`` -> 视为采集中断，本段连续命中作废；
-          - 样本未命中任何级别 -> 方向、计数和起点全部清零；
-          - 方向与上一点相同 -> ``count += 1``，起点保持首次命中的时间；
-          - 方向翻转 -> 以当前点作为新一段的起点，count 重新从 1 开始；
-          - 同时记录这一段里最严重（level 数字最小）的命中，供写告警使用。
-
-        达到 ``target_seconds`` 即置 ``active=True``。返回这一段连续命中中
-        最严重的一次快照
-        ``(level, value, limit, fire_time)``。调用方再用 active 的状态变化
-        和级别是否升级决定要不要写 t_alert_record。
-        """
-        count = max(0, int(previous_count or 0))
-        started_at = self._parse_maybe_dt(previous_started_at)
-        active = False
-        snapshot: Optional[Tuple[int, float, float, datetime]] = None
-        run_best_level: Optional[int] = None
-        run_best_value: Optional[float] = None
-        run_best_limit: Optional[float] = None
-        run_best_time: Optional[datetime] = None
-        last_sample_time = self._parse_maybe_dt(previous_sample_time)
-
-        for sample_time, value in samples:
-            # 采样中断时结束当前连续命中，不能继续累计。
-            if (
-                max_gap_ms is not None
-                and last_sample_time is not None
-                and (sample_time - last_sample_time).total_seconds() * 1000.0
-                > max_gap_ms
-            ):
-                count = 0
-                started_at = None
-                run_best_level = None
-                run_best_value = None
-                run_best_limit = None
-                run_best_time = None
-            last_sample_time = sample_time
-            level, eval_value, limit = self._sample_level(
-                rule,
-                value,
-            )
-            if level is None:
-                # 正常样本会清空所有阈值连续命中状态。
-                count = 0
-                started_at = None
-                run_best_level = None
-                run_best_value = None
-                run_best_limit = None
-                run_best_time = None
-                continue
-            count += 1
-            if started_at is None:
-                started_at = sample_time
-            if run_best_level is None or level < run_best_level:
-                # 记录本轮连续命中中出现的最严重级别。
-                run_best_level = level
-                run_best_value = eval_value
-                run_best_limit = float(limit or eval_value)
-                run_best_time = sample_time
-            if (
-                started_at is not None
-                and (sample_time - started_at).total_seconds() >= target_seconds
-            ):
-                # 达到配置条件后返回最严重的一次命中快照。
-                active = True
-                snapshot = (
-                    run_best_level or level,
-                    run_best_value if run_best_value is not None else eval_value,
-                    run_best_limit if run_best_limit is not None else eval_value,
-                    run_best_time or sample_time,
-                )
-
-        return count, started_at, active, snapshot
+        """兼容旧调用入口，实际逻辑由 ThresholdAlertRule 提供。"""
+        return self._threshold_rule.evaluate_streak(
+            samples,
+            rule,
+            previous_count,
+            target_seconds,
+            previous_started_at=previous_started_at,
+            previous_sample_time=previous_sample_time,
+            max_gap_ms=max_gap_ms,
+        )
 
     @staticmethod
     def _is_out_of_range(
         rule: Dict[str, Any],
         value: float,
     ) -> bool:
-        physical_max = rule.get("physical_max")
-        physical_min = rule.get("physical_min")
-        upper_exceeded = physical_max is not None and value > float(physical_max)
-        lower_exceeded = physical_min is not None and value < float(physical_min)
-        return bool(upper_exceeded or lower_exceeded)
+        return OutOfRangeAlertRule.is_out_of_range(rule, value)
 
     def _evaluate_out_of_range_streak(
         self,
@@ -697,39 +646,16 @@ class AlertAnalyticsEngine:
         bool,
         Optional[Tuple[float, datetime]],
     ]:
-        """判断连续超出物理量程的样本。"""
-        count = max(0, int(previous_count or 0))
-        started_at = self._parse_maybe_dt(previous_started_at)
-        active = False
-        snapshot: Optional[Tuple[float, datetime]] = None
-        last_sample_time = self._parse_maybe_dt(previous_sample_time)
-
-        for sample_time, value in samples:
-            if (
-                max_gap_ms is not None
-                and last_sample_time is not None
-                and (sample_time - last_sample_time).total_seconds() * 1000.0
-                > max_gap_ms
-            ):
-                count = 0
-                started_at = None
-            last_sample_time = sample_time
-            if not self._is_out_of_range(rule, value):
-                # 样本回到物理量程内时清零连续状态。
-                count = 0
-                started_at = None
-                continue
-            count += 1
-            if started_at is None:
-                started_at = sample_time
-            if (
-                started_at is not None
-                and (sample_time - started_at).total_seconds() >= target_seconds
-            ):
-                active = True
-                snapshot = (value, sample_time)
-
-        return count, started_at, active, snapshot
+        """兼容旧调用入口，实际逻辑由 OutOfRangeAlertRule 提供。"""
+        return self._out_of_range_rule.evaluate_streak(
+            samples,
+            rule,
+            previous_count,
+            target_seconds,
+            previous_started_at=previous_started_at,
+            previous_sample_time=previous_sample_time,
+            max_gap_ms=max_gap_ms,
+        )
 
     @staticmethod
     def _evaluate_stuck_streak(
@@ -741,42 +667,16 @@ class AlertAnalyticsEngine:
         previous_sample_time: Any = None,
         max_gap_ms: Optional[float] = None,
     ) -> Tuple[int, Optional[float], Optional[datetime], bool, Optional[Tuple[float, datetime]]]:
-        """判断相同读数是否连续达到配置的持续秒数。"""
-        count = max(0, int(previous_count or 0))
-        last_value = (
-            float(previous_value) if previous_value is not None else None
+        """兼容旧调用入口，实际逻辑由 StuckAlertRule 提供。"""
+        return StuckAlertRule.evaluate_streak(
+            samples,
+            previous_value,
+            previous_count,
+            previous_since,
+            target_seconds,
+            previous_sample_time=previous_sample_time,
+            max_gap_ms=max_gap_ms,
         )
-        since = AlertAnalyticsEngine._parse_maybe_dt(previous_since)
-        active = False
-        snapshot: Optional[Tuple[float, datetime]] = None
-        last_sample_time = AlertAnalyticsEngine._parse_maybe_dt(previous_sample_time)
-
-        for sample_time, value in samples:
-            if (
-                max_gap_ms is not None
-                and last_sample_time is not None
-                and (sample_time - last_sample_time).total_seconds() * 1000.0
-                > max_gap_ms
-            ):
-                count = 0
-                last_value = None
-                since = None
-            last_sample_time = sample_time
-            if last_value is not None and abs(value - last_value) <= 1e-9:
-                # 使用极小误差，把数据库浮点舍入差异视为相同值。
-                count += 1
-            else:
-                count = 1
-                since = sample_time
-            last_value = value
-            if (
-                since is not None
-                and (sample_time - since).total_seconds() >= target_seconds
-            ):
-                active = True
-                snapshot = (value, sample_time)
-
-        return count, last_value, since, active, snapshot
 
     @classmethod
     def _parse_physical_range(
@@ -1116,29 +1016,12 @@ class AlertAnalyticsEngine:
     @staticmethod
     def _parse_maybe_dt(value: Any) -> Optional[datetime]:
         """解析数据库、JSON 或序列化状态中的日期时间。"""
-        if value is None:
-            return None
-        if isinstance(value, datetime):
-            return value
-        if isinstance(value, str):
-            text = value.strip()
-            if not text:
-                return None
-            try:
-                return datetime.fromisoformat(text.replace("Z", "+00:00").replace("T", " "))
-            except ValueError:
-                pass
-            for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-                try:
-                    return datetime.strptime(text, fmt)
-                except ValueError:
-                    continue
-        return None
+        return parse_datetime(value)
 
     @staticmethod
     def _serialize_runtime_dt(value: datetime) -> str:
         """保留运行时时间戳的完整微秒精度，供下一轮严格去重。"""
-        return value.isoformat(sep=" ", timespec="microseconds")
+        return serialize_runtime_datetime(value)
 
     @staticmethod
     def _alert_key(
@@ -1160,14 +1043,7 @@ class AlertAnalyticsEngine:
         eval_lower: float,
     ) -> Tuple[Optional[int], Optional[float], Optional[float]]:
         """返回单个评估值命中的最严重阈值级别。"""
-        for level in (1, 2, 3):
-            upper = rule.get(f"level{level}_upper")
-            if upper is not None and eval_upper > float(upper):
-                return level, eval_upper, float(upper)
-            lower = rule.get(f"level{level}_lower")
-            if lower is not None and eval_lower < float(lower):
-                return level, eval_lower, float(lower)
-        return None, None, None
+        return self._threshold_rule.level_for(rule, eval_upper, eval_lower)
 
     def _sample_level(
         self,
@@ -1175,18 +1051,12 @@ class AlertAnalyticsEngine:
         value: float,
     ) -> Tuple[Optional[int], Optional[float], Optional[float]]:
         """直接使用原始样本值评估阈值级别。"""
-        return self._level_for(rule, value, value)
+        return self._threshold_rule.sample_level(rule, value)
 
     @staticmethod
     def _max_sample_gap_ms(samples: List[Tuple[datetime, float]]) -> float:
         """返回相邻样本之间的最大时间间隔。"""
-        return max(
-            (
-                (current[0] - previous[0]).total_seconds() * 1000.0
-                for previous, current in zip(samples, samples[1:], strict=False)
-            ),
-            default=0.0,
-        )
+        return max_sample_gap_ms(samples)
 
     def _load_active_alerts(self, cur: Any) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
         """按传感器、通道和预警类型加载未处理预警。
@@ -1266,6 +1136,45 @@ class AlertAnalyticsEngine:
         triggered.append(alert)
         return alert
 
+    def _apply_rule_evaluation(
+        self,
+        cur: Any,
+        active_map: Dict[Tuple[str, str, str], Dict[str, Any]],
+        triggered: List[Dict[str, Any]],
+        *,
+        rule: Dict[str, Any],
+        sensor_no: str,
+        channel: str,
+        evaluation: RuleEvaluation,
+        window_end: datetime,
+    ) -> None:
+        """Persist one rule evaluation through the shared incident writer."""
+        trigger = evaluation.trigger
+        if trigger is not None:
+            self._apply_condition(
+                cur,
+                active_map,
+                triggered,
+                rule=rule,
+                sensor_no=sensor_no,
+                channel=channel,
+                alert_type=evaluation.alert_type,
+                active=True,
+                alert_level=trigger.level,
+                trigger_val=trigger.value,
+                fire_time=trigger.fire_time,
+                force_refresh=not evaluation.previous_active,
+            )
+        if evaluation.previous_active and not evaluation.active:
+            self._close_alert_incident(
+                cur,
+                active_map,
+                sensor_no=sensor_no,
+                channel=channel,
+                alert_type=evaluation.alert_type,
+                end_time=window_end,
+            )
+
     def _apply_offline_if_due(
         self,
         cur: Any,
@@ -1280,12 +1189,18 @@ class AlertAnalyticsEngine:
     ) -> bool:
         """超过离线超时时间仍无样本时创建离线预警。"""
         last_seen = self._parse_maybe_dt(rule.get("last_ts"))
-        silence_ms = (
-            float("inf")
-            if last_seen is None
-            else (window_end - last_seen).total_seconds() * 1000.0
+        evaluation = self._offline_rule.evaluate(
+            RuleContext(
+                rule=rule,
+                samples=[],
+                previous_last_seen=last_seen,
+                window_end=window_end,
+                confirm_seconds=self.confirm_seconds,
+                stuck_seconds=self.stuck_seconds,
+                offline_timeout_ms=self._offline_timeout_ms(rule),
+            )
         )
-        if silence_ms < self._offline_timeout_ms(rule):
+        if not evaluation.active:
             return False
 
         # 记录离线通道，供后续采集仪级离线聚合使用。
@@ -1308,39 +1223,17 @@ class AlertAnalyticsEngine:
                     end_time=window_end,
                 )
 
-        if not bool(rule.get("offline_condition_active")):
-            # 同一个连续离线周期只创建一个离线事件。
-            self._apply_condition(
-                cur,
-                active_map,
-                triggered,
-                rule=rule,
-                sensor_no=rule["sensor_no_lower"],
-                channel=rule.get("channel") or "",
-                alert_type=ALERT_TYPE_OFFLINE,
-                active=True,
-                alert_level=NON_THRESHOLD_ALERT_LEVEL,
-                trigger_val=0.0,
-                fire_time=window_end,
-                force_refresh=True,
-            )
-        pending_state_updates.setdefault(key, {}).update(
-            {
-                # 离线状态会覆盖阈值、量程和死值连续状态。
-                "online_status": "OFFLINE",
-                "stuck_since": None,
-                "stuck_streak_count": 0,
-                "threshold_streak_count": 0,
-                "threshold_streak_started_at": None,
-                "oor_streak_count": 0,
-                "oor_streak_started_at": None,
-                "threshold_condition_active": False,
-                "threshold_condition_level": None,
-                "stuck_condition_active": False,
-                "oor_condition_active": False,
-                "offline_condition_active": True,
-            }
+        self._apply_rule_evaluation(
+            cur,
+            active_map,
+            triggered,
+            rule=rule,
+            sensor_no=rule["sensor_no_lower"],
+            channel=rule.get("channel") or "",
+            evaluation=evaluation,
+            window_end=window_end,
         )
+        pending_state_updates.setdefault(key, {}).update(evaluation.state_updates)
         return True
 
     @classmethod
@@ -1570,6 +1463,7 @@ class AlertAnalyticsEngine:
                 stuck_seconds = float(
                     rule.get("stuck_seconds") or self.stuck_seconds
                 )
+                offline_timeout_ms = self._offline_timeout_ms(rule)
                 samples = samples_by_key.get(key, [])
                 if not samples:
                     if new_samples_only:
@@ -1586,269 +1480,23 @@ class AlertAnalyticsEngine:
                         continue
                     samples = [(last_ts, val_avg)]
 
-                # 依次评估阈值、物理量程和传感器死值条件。
-                # 上下文（上一轮方向、计数、起点、上一轮最后样本时间）
-                # 全部来自 channel_states，因此连续命中可以跨扫描轮次累计。
-                (
-                    threshold_count,
-                    threshold_started_at,
-                    threshold_active,
-                    threshold_snapshot,
-                ) = self._evaluate_threshold_streak(
-                    samples,
-                    rule,
-                    rule.get("threshold_streak_count"),
-                    confirm_seconds,
-                    previous_started_at=rule.get("threshold_streak_started_at"),
-                    previous_sample_time=previous_last_seen,
-                    # 相邻样本间隔超过 1.5 个采样周期视为断流，
-                    # 不再把断流两侧的点算作同一段连续命中。
-                    max_gap_ms=float(rule.get("sample_interval_ms") or 1000) * 1.5,
+                context = RuleContext(
+                    rule=rule,
+                    samples=samples,
+                    previous_last_seen=previous_last_seen,
+                    window_end=window_end,
+                    confirm_seconds=confirm_seconds,
+                    stuck_seconds=stuck_seconds,
+                    offline_timeout_ms=offline_timeout_ms,
                 )
-                # 本轮待发布的通道状态。先写入 pending_state_updates，
-                # 事务提交成功后才真正更新 channel_states。
+                offline_evaluation = self._offline_rule.evaluate(context)
                 state_updates: Dict[str, Any] = {
-                    # last_ts 是下一轮去重的依据，必须取本轮最后一个样本时间。
                     "last_ts": self._serialize_runtime_dt(samples[-1][0]),
                     "last_val": round(samples[-1][1], 5),
                     "online_status": "ONLINE",
-                    "threshold_streak_count": threshold_count,
-                    "threshold_streak_started_at": (
-                        self._serialize_runtime_dt(threshold_started_at)
-                        if threshold_started_at is not None
-                        else None
-                    ),
-                    "threshold_condition_active": bool(threshold_active),
-                    "threshold_condition_level": None,
                 }
-                previous_threshold_active = bool(
-                    rule.get("threshold_condition_active")
-                )
-                if threshold_snapshot is not None:
-                    # snapshot 是本段连续命中里最严重的 (级别, 实测值, 阈值, 触发时间)。
-                    level, value, limit, fire_time = threshold_snapshot
-                    previous_condition_level = rule.get("threshold_condition_level")
-                    previous_condition_level_value = (
-                        int(previous_condition_level)
-                        if previous_condition_level is not None
-                        else None
-                    )
-                    # 记录本段连续命中已经达到过的最严重级别，
-                    # 级别从 3 升到 1 时才会再次写库。
-                    active_condition_level = (
-                        level
-                        if previous_condition_level_value is None
-                        else min(previous_condition_level_value, level)
-                    )
-                    state_updates.update(
-                        {
-                            "threshold_last_level": level,
-                            "threshold_last_value": value,
-                            "threshold_last_limit": limit,
-                            "threshold_condition_level": active_condition_level,
-                        }
-                    )
-                    # 只有以下三种情况才写预警：
-                    #   1. 上一轮还没处于命中态（本段第一次达到确认条件）；
-                    #   2. 上一轮没有记录级别（升级判定缺少基准）；
-                    #   3. 本轮级别比上一轮更严重（数字更小）。
-                    # 持续同级别超限不会重复写库，避免每秒扫描产生新行。
-                    if (
-                        not previous_threshold_active
-                        or previous_condition_level_value is None
-                        or level < previous_condition_level_value
-                    ):
-                        self._apply_condition(
-                            cur,
-                            active_map,
-                            triggered_alerts,
-                            rule=rule,
-                            sensor_no=sensor_no,
-                            channel=channel,
-                            alert_type=ALERT_TYPE_THRESHOLD,
-                            active=threshold_active,
-                            alert_level=level,
-                            trigger_val=value,
-                            fire_time=fire_time,
-                            force_refresh=not previous_threshold_active,
-                        )
-                if previous_threshold_active and not threshold_active:
-                    self._close_alert_incident(
-                        cur,
-                        active_map,
-                        sensor_no=sensor_no,
-                        channel=channel,
-                        alert_type=ALERT_TYPE_THRESHOLD,
-                        end_time=window_end,
-                    )
-
-                # 超量程按连续命中判定：首次满足确认条件时创建事件，
-                # 持续满足时复用同一事件，条件恢复后才关闭。
-                (
-                    oor_count,
-                    oor_started_at,
-                    oor_active,
-                    oor_snapshot,
-                ) = self._evaluate_out_of_range_streak(
-                    samples,
-                    rule,
-                    rule.get("oor_streak_count"),
-                    confirm_seconds,
-                    previous_started_at=rule.get("oor_streak_started_at"),
-                    previous_sample_time=previous_last_seen,
-                    max_gap_ms=float(rule.get("sample_interval_ms") or 1000) * 1.5,
-                )
-                state_updates.update(
-                    {
-                        "oor_streak_count": oor_count,
-                        "oor_streak_started_at": (
-                            self._serialize_runtime_dt(oor_started_at)
-                            if oor_started_at is not None
-                            else None
-                        ),
-                        "oor_condition_active": bool(oor_active),
-                    }
-                )
-                previous_oor_active = bool(rule.get("oor_condition_active"))
-                if oor_snapshot is not None:
-                    oor_value, fire_time = oor_snapshot
-                    state_updates["oor_last_value"] = oor_value
-                    if not previous_oor_active:
-                        self._apply_condition(
-                            cur,
-                            active_map,
-                            triggered_alerts,
-                            rule=rule,
-                            sensor_no=sensor_no,
-                            channel=channel,
-                            alert_type=ALERT_TYPE_OOR,
-                            active=oor_active,
-                            alert_level=NON_THRESHOLD_ALERT_LEVEL,
-                            trigger_val=oor_value,
-                            fire_time=fire_time,
-                            force_refresh=True,
-                        )
-                if previous_oor_active and not oor_active:
-                    self._close_alert_incident(
-                        cur,
-                        active_map,
-                        sensor_no=sensor_no,
-                        channel=channel,
-                        alert_type=ALERT_TYPE_OOR,
-                        end_time=window_end,
-                    )
-
-                # 死值判定同样维护跨扫描轮次的连续状态，避免同一个
-                # 持续不变的数值反复插入预警记录。
-                (
-                    stuck_count,
-                    stuck_last_value,
-                    stuck_since,
-                    stuck_active,
-                    stuck_snapshot,
-                ) = self._evaluate_stuck_streak(
-                    samples,
-                    rule.get("stuck_last_value"),
-                    rule.get("stuck_streak_count"),
-                    rule.get("stuck_since"),
-                    stuck_seconds,
-                    previous_sample_time=previous_last_seen,
-                    max_gap_ms=float(rule.get("sample_interval_ms") or 1000) * 1.5,
-                )
-                state_updates.update(
-                    {
-                        "stuck_streak_count": stuck_count,
-                        "stuck_last_value": stuck_last_value,
-                        "stuck_since": (
-                            self._serialize_runtime_dt(stuck_since)
-                            if stuck_since is not None
-                            else None
-                        ),
-                        "stuck_condition_active": bool(stuck_active),
-                    }
-                )
-                previous_stuck_active = bool(rule.get("stuck_condition_active"))
-                if stuck_snapshot is not None:
-                    stuck_value, fire_time = stuck_snapshot
-                    if not previous_stuck_active:
-                        self._apply_condition(
-                            cur,
-                            active_map,
-                            triggered_alerts,
-                            rule=rule,
-                            sensor_no=sensor_no,
-                            channel=channel,
-                            alert_type=ALERT_TYPE_STUCK,
-                            active=stuck_active,
-                            alert_level=NON_THRESHOLD_ALERT_LEVEL,
-                            trigger_val=stuck_value,
-                            fire_time=fire_time,
-                            force_refresh=True,
-                        )
-                if previous_stuck_active and not stuck_active:
-                    self._close_alert_incident(
-                        cur,
-                        active_map,
-                        sensor_no=sensor_no,
-                        channel=channel,
-                        alert_type=ALERT_TYPE_STUCK,
-                        end_time=window_end,
-                    )
-
-                last_sample_time = samples[-1][0]
-                silence_ms = (window_end - last_sample_time).total_seconds() * 1000.0
-                offline_timeout_ms = self._offline_timeout_ms(rule)
-                # 通道离线既可能表现为窗口末尾长时间没有新样本，也可能表现为
-                # 窗口内或跨窗口边界的采样间隔过大；两者使用同一个离线阈值。
-                boundary_gap_ms = (
-                    (samples[0][0] - previous_last_seen).total_seconds() * 1000.0
-                    if previous_last_seen is not None
-                    else 0.0
-                )
-                largest_gap_ms = max(
-                    boundary_gap_ms,
-                    self._max_sample_gap_ms(samples),
-                )
-                currently_offline = silence_ms >= offline_timeout_ms
-                offline_condition_hit = (
-                    currently_offline or largest_gap_ms >= offline_timeout_ms
-                )
-                previous_offline_active = bool(
-                    rule.get("offline_condition_active")
-                )
-                state_updates["offline_condition_active"] = bool(currently_offline)
-                if currently_offline:
-                    instrument_id = (rule.get("instrument_id") or "").strip()
-                    if instrument_id:
-                        offline_by_instrument.setdefault(
-                            instrument_id,
-                            set(),
-                        ).add(key)
-                if offline_condition_hit and not previous_offline_active:
-                    self._apply_condition(
-                        cur,
-                        active_map,
-                        triggered_alerts,
-                        rule=rule,
-                        sensor_no=sensor_no,
-                        channel=channel,
-                        alert_type=ALERT_TYPE_OFFLINE,
-                        active=True,
-                        alert_level=NON_THRESHOLD_ALERT_LEVEL,
-                        trigger_val=0.0,
-                        fire_time=window_end,
-                        force_refresh=True,
-                    )
-                if previous_offline_active and not currently_offline:
-                    self._close_alert_incident(
-                        cur,
-                        active_map,
-                        sensor_no=sensor_no,
-                        channel=channel,
-                        alert_type=ALERT_TYPE_OFFLINE,
-                        end_time=window_end,
-                    )
-                if currently_offline:
+                if offline_evaluation.suppress_other_alerts:
+                    state_updates.update(offline_evaluation.state_updates)
                     for alert_type, state_field in (
                         (ALERT_TYPE_THRESHOLD, "threshold_condition_active"),
                         (ALERT_TYPE_STUCK, "stuck_condition_active"),
@@ -1863,21 +1511,38 @@ class AlertAnalyticsEngine:
                                 alert_type=alert_type,
                                 end_time=window_end,
                             )
-                    state_updates.update(
-                        {
-                            "online_status": "OFFLINE",
-                            "stuck_since": None,
-                            "stuck_streak_count": 0,
-                            "threshold_streak_count": 0,
-                            "threshold_streak_started_at": None,
-                            "oor_streak_count": 0,
-                            "oor_streak_started_at": None,
-                            "threshold_condition_active": False,
-                            "threshold_condition_level": None,
-                            "stuck_condition_active": False,
-                            "oor_condition_active": False,
-                        }
-                    )
+                else:
+                    for evaluation in self.channel_rule_registry.evaluate(context):
+                        state_updates.update(evaluation.state_updates)
+                        self._apply_rule_evaluation(
+                            cur,
+                            active_map,
+                            triggered_alerts,
+                            rule=rule,
+                            sensor_no=sensor_no,
+                            channel=channel,
+                            evaluation=evaluation,
+                            window_end=window_end,
+                        )
+                    state_updates.update(offline_evaluation.state_updates)
+
+                if offline_evaluation.active:
+                    instrument_id = (rule.get("instrument_id") or "").strip()
+                    if instrument_id:
+                        offline_by_instrument.setdefault(
+                            instrument_id,
+                            set(),
+                        ).add(key)
+                self._apply_rule_evaluation(
+                    cur,
+                    active_map,
+                    triggered_alerts,
+                    rule=rule,
+                    sensor_no=sensor_no,
+                    channel=channel,
+                    evaluation=offline_evaluation,
+                    window_end=window_end,
+                )
 
                 pending_state_updates.setdefault(key, {}).update(state_updates)
 
@@ -1902,29 +1567,33 @@ class AlertAnalyticsEngine:
                 for instrument_id in sorted(instrument_totals):
                     offline_keys = offline_by_instrument.get(instrument_id, set())
                     total_channels = int(instrument_totals.get(instrument_id, 0))
-                    if total_channels <= 0 or len(offline_keys) < total_channels:
-                        if self._daq_condition_active.get(instrument_id):
-                            self._close_alert_incident(
-                                cur,
-                                active_map,
-                                sensor_no=instrument_id,
-                                channel="__DAQ__",
-                                alert_type=ALERT_TYPE_DAQ_OFFLINE,
-                                end_time=window_end,
-                            )
-                        daq_condition_updates[instrument_id] = False
-                        continue
-                    if self._daq_condition_active.get(instrument_id):
-                        continue
                     daq_key = self._alert_key(
                         instrument_id,
                         "__DAQ__",
                         ALERT_TYPE_DAQ_OFFLINE,
                     )
-                    if (
-                        daq_key in active_map
-                        and instrument_id not in self._daq_state_known
-                    ):
+                    evaluation = self._daq_offline_rule.evaluate(
+                        total_channels=total_channels,
+                        offline_channels=offline_keys,
+                        previous_active=bool(
+                            self._daq_condition_active.get(instrument_id)
+                        ),
+                        active_alert_exists=daq_key in active_map,
+                        state_known=instrument_id in self._daq_state_known,
+                    )
+                    if evaluation.should_close:
+                        self._close_alert_incident(
+                            cur,
+                            active_map,
+                            sensor_no=instrument_id,
+                            channel="__DAQ__",
+                            alert_type=ALERT_TYPE_DAQ_OFFLINE,
+                            end_time=window_end,
+                        )
+                    if not evaluation.active:
+                        daq_condition_updates[instrument_id] = False
+                        continue
+                    if not evaluation.should_create:
                         daq_condition_updates[instrument_id] = True
                         continue
                     daq_alert = self._upsert_alert_incident(

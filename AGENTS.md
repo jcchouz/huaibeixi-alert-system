@@ -25,7 +25,9 @@
 - 保持“外部数据写入”和“后端检测分析”解耦。
 - 不得把前端或测试 API 引入生产检测的关键路径。
 - 修改检测逻辑时，优先保证 `t_monitor` 无数据时仍能持续判定通道离线。
+- 新增预警类型应实现 `AlertRule` 协议并注册到 `AlertRuleRegistry`，不得把具体判定逻辑继续堆进 `_run_detection_window()`。
 - 所有压测和模拟必须使用 `t_sensor`、`t_sensor_channel`、`t_alert_threshold` 中已有的真实传感器编号和通道，不得创建 `benchall-*`、`bench10k-*` 或其他临时传感器写入 `t_monitor`、`t_alert_record`、`t_stat_record`。
+- 每次压测必须模拟当前真实规则可产生的最大数量预警，并同时运行实时预警和统计线程；只测试正常数据、少量预警或关闭预警写库的结果不能作为压测结论。
 - 每次测试完成后保留测试数据，不自动清理 `t_monitor`、`t_alert_record` 或 `t_stat_record`；必须记录测试时间范围、使用的真实传感器和通道，便于后续查询与人工处理。
 
 ## 备注

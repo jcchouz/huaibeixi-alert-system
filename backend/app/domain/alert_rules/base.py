@@ -1,0 +1,90 @@
+"""Shared contracts and utilities for alert rules."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Protocol, Tuple
+
+
+def parse_datetime(value: Any) -> Optional[datetime]:
+    """Parse database, JSON or serialized runtime datetime values."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00").replace("T", " "))
+        except ValueError:
+            pass
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+    return None
+
+
+def serialize_runtime_datetime(value: datetime) -> str:
+    """Keep full microsecond precision for strict sample de-duplication."""
+    return value.isoformat(sep=" ", timespec="microseconds")
+
+
+def max_sample_gap_ms(samples: List[Tuple[datetime, float]]) -> float:
+    """Return the largest gap between adjacent samples."""
+    return max(
+        (
+            (current[0] - previous[0]).total_seconds() * 1000.0
+            for previous, current in zip(samples, samples[1:], strict=False)
+        ),
+        default=0.0,
+    )
+
+
+@dataclass(frozen=True)
+class AlertTrigger:
+    """Alert data needed to create or refresh one incident."""
+
+    alert_type: str
+    level: int
+    value: float
+    limit: float
+    fire_time: datetime
+
+
+@dataclass
+class RuleEvaluation:
+    """Pure evaluation result returned by one alert rule."""
+
+    alert_type: str
+    active: bool
+    previous_active: bool
+    state_updates: Dict[str, Any] = field(default_factory=dict)
+    trigger: Optional[AlertTrigger] = None
+    suppress_other_alerts: bool = False
+
+
+@dataclass(frozen=True)
+class RuleContext:
+    """Input shared by per-channel alert rules."""
+
+    rule: Dict[str, Any]
+    samples: List[Tuple[datetime, float]]
+    previous_last_seen: Optional[datetime]
+    window_end: datetime
+    confirm_seconds: float
+    stuck_seconds: float
+    offline_timeout_ms: float
+
+
+class AlertRule(Protocol):
+    """Protocol implemented by each per-channel alert rule."""
+
+    alert_type: str
+
+    def evaluate(self, context: RuleContext) -> RuleEvaluation:
+        """Evaluate one channel window without writing to the database."""
