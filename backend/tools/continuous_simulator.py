@@ -54,7 +54,6 @@ class ChannelPlan:
     base_value: float
     amplitude: float
     phase: float
-    dc_offset: float
 
 
 def load_channel_plans() -> list[ChannelPlan]:
@@ -114,11 +113,6 @@ def load_channel_plans() -> list[ChannelPlan]:
 
         # 为指定测试通道选择固定的预警场景。
         scenario = "normal"
-        dc_offset = 0.0
-        if is_acceleration:
-            dc_offset = 9.80665
-            base_value = 0.0
-            amplitude = 0.25
         if key in THRESHOLD_CHANNELS:
             scenario = "threshold"
             base_value = float(level3_upper or 10.0) * 1.35
@@ -145,7 +139,6 @@ def load_channel_plans() -> list[ChannelPlan]:
                 base_value=base_value,
                 amplitude=amplitude,
                 phase=phase,
-                dc_offset=dc_offset,
             )
         )
     return plans
@@ -168,7 +161,7 @@ def channel_value(plan: ChannelPlan, elapsed_seconds: float) -> float:
         math.sin(plan.phase + t * 2.0 * math.pi * 0.8)
         + 0.35 * math.sin(plan.phase * 0.7 + t * 2.0 * math.pi * 3.2)
     )
-    return plan.dc_offset + plan.base_value + plan.amplitude * wave
+    return plan.base_value + plan.amplitude * wave
 
 
 def insert_rows(rows: list[tuple[str, str, float, datetime]]) -> None:

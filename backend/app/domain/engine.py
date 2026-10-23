@@ -1257,7 +1257,7 @@ class AlertAnalyticsEngine:
         rule: Dict[str, Any],
         value: float,
     ) -> Tuple[Optional[int], Optional[float], Optional[float]]:
-        """评估单个样本，并对振动通道去除直流分量。"""
+        """直接使用原始样本值评估阈值级别。"""
         return self._level_for(rule, value, value)
 
     @staticmethod
@@ -1663,7 +1663,6 @@ class AlertAnalyticsEngine:
                         )
                         continue
                     samples = [(last_ts, val_avg)]
-                # 实时扫描使用最近统计均值作为直流分量基准。
 
                 # 依次评估阈值、物理量程和传感器死值条件。
                 # 上下文（上一轮方向、计数、起点、上一轮最后样本时间）

@@ -256,7 +256,6 @@ class ThresholdService:
         def evaluate_point(
             value_max: float,
             value_min: float,
-            value_avg: float,
             thresholds: Dict[str, float],
         ) -> Tuple[int, float, float]:
             """使用一套阈值评估一个统计桶。"""
@@ -295,13 +294,11 @@ class ThresholdService:
             proposed_level, eval_upper, eval_lower = evaluate_point(
                 value_max,
                 value_min,
-                value_avg,
                 proposed_thresholds,
             )
             current_level, _, _ = evaluate_point(
                 value_max,
                 value_min,
-                value_avg,
                 current_thresholds,
             )
             proposed_counts[proposed_level] += 1

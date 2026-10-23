@@ -128,8 +128,6 @@ def upgrade() -> None:
           '连续正常恢复点数，达到该点数后确认告警恢复';
         COMMENT ON COLUMN public.t_alert_threshold.hysteresis IS
           '迟滞回差，恢复到阈值加减回差范围内才判定为正常';
-        COMMENT ON COLUMN public.t_alert_threshold.remove_dc_offset IS
-          '是否去除滑动均值直流分量，true表示按交流幅值判断告警';
         COMMENT ON COLUMN public.t_alert_threshold.ext_params IS
           '算法扩展参数JSON，例如物理量程、严格采样间隔和变化率参数';
         COMMENT ON COLUMN public.t_alert_threshold.version IS

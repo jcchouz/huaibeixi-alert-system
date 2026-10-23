@@ -42,7 +42,6 @@ def upgrade() -> None:
           ADD COLUMN IF NOT EXISTS confirm_points INTEGER NOT NULL DEFAULT 3,
           ADD COLUMN IF NOT EXISTS recover_points INTEGER NOT NULL DEFAULT 3,
           ADD COLUMN IF NOT EXISTS hysteresis NUMERIC(15,5) NOT NULL DEFAULT 0,
-          ADD COLUMN IF NOT EXISTS remove_dc_offset BOOLEAN NOT NULL DEFAULT false,
           ADD COLUMN IF NOT EXISTS ext_params JSONB NOT NULL DEFAULT '{}'::jsonb,
           ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1,
           ADD COLUMN IF NOT EXISTS update_by VARCHAR(64),
