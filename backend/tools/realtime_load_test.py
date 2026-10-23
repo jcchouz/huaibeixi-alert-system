@@ -178,8 +178,6 @@ class WorkerObserver:
             "url": self.url,
             "available": self.available,
             "running": last.get("running"),
-            "alertLeader": last.get("leader"),
-            "statisticsLeader": last.get("statisticsLeader"),
             "alertCycleDelta": max(0, last_alert_cycles - first_alert_cycles),
             "firstPolledAlertScanAt": (
                 first_scan.isoformat(sep=" ", timespec="milliseconds")
@@ -920,7 +918,6 @@ def preflight(
             print(
                 "[preflight] worker health: "
                 f"running={worker_status.get('running')} "
-                f"alertLeader={worker_status.get('leader')} "
                 f"alertCycles={worker_status.get('alertCycles')} "
                 f"lastScanElapsedMs={(worker_status.get('lastAlertResult') or {}).get('elapsedMs')}",
                 flush=True,

@@ -8,7 +8,7 @@
 
 * ``backend/.env`` 中 ``DETECTION_ALERT_THRESHOLD_ENABLED=true``，
   其余 ``DETECTION_ALERT_*_ENABLED=false``；
-* 后端已启动，并且当前实例持有实时预警选主锁；
+* 后端已启动，且检测 Worker 正在运行；
 * 不要同时运行 ``continuous_simulator.py``，避免同通道数据混在一起。
 
 典型用法：
@@ -373,7 +373,7 @@ def verify_alerts(
     if not rows:
         print(
             "[inject] 未发现本次注入产生的阈值告警。请检查：\n"
-            "  1. 后端是否已重启并加载了新的 .env（/api/health 里 leader=true）；\n"
+            "  1. 后端是否已重启并加载了新的 .env（/api/health 里 running=true）；\n"
             "  2. 是否有同一通道的未处理告警（重复测试请加 --ack-existing）；\n"
             "  3. 注入期间后端是否持续运行。"
         )

@@ -57,19 +57,16 @@ CLEANUP_TABLES = (
     "t_alert_record",
     "t_stat_record",
     "t_monitor",
-    "t_detection_channel_state",
 )
 CLEANUP_TIME_COLUMNS = {
     "t_monitor": "time",
     "t_alert_record": "create_time",
     "t_stat_record": "stat_time",
-    "t_detection_channel_state": "updated_at",
 }
 REQUIRED_COLUMNS = {
     "t_monitor": {"sensor_no", "channel", "value", "time"},
     "t_alert_record": {"sensor_no"},
     "t_stat_record": {"sensor_no"},
-    "t_detection_channel_state": {"sensor_no", "updated_at"},
 }
 PREFIX_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]*-$")
 
@@ -480,14 +477,10 @@ def build_runtime_rules(
             "frequency": str(round(per_channel_rate, 6)),
             "frequency_hz": per_channel_rate,
             "sample_interval_ms": sample_interval_ms,
-            "condition_unit": "points",
-            "confirm_points": 3,
-            "stuck_points": 100,
-            "offline_points": 5,
-            "confirm_seconds": None,
-            "stuck_seconds": None,
-            "offline_seconds": None,
-            "offline_timeout_ms": max(1.0, sample_interval_ms * 5),
+            "confirm_seconds": 3.0,
+            "stuck_seconds": 100.0,
+            "offline_seconds": 5.0,
+            "offline_timeout_ms": 5_000.0,
             "online_status": "ONLINE",
             "threshold_streak_count": 0,
             "threshold_streak_started_at": None,
@@ -570,11 +563,6 @@ def run_benchmark(
     from app.domain.engine import AlertAnalyticsEngine
 
     engine = AlertAnalyticsEngine(
-        condition_unit="points",
-        confirm_points=3,
-        stuck_points=100,
-        offline_points=5,
-        persist_state=True,
         alert_type_switches={
             ALERT_TYPE_THRESHOLD: True,
             ALERT_TYPE_OFFLINE: False,
@@ -614,10 +602,19 @@ def run_benchmark(
         one_started = time.perf_counter()
         scan_result = engine.scan_realtime_alerts(window_start, scan_end)
         scan_cursor = scan_end
-        scan_latencies.append(time.perf_counter() - one_started)
+        scan_latency = time.perf_counter() - one_started
+        scan_latencies.append(scan_latency)
         queried_rows += int(scan_result.get("rawPointsProcessed") or 0)
         triggered += int(scan_result.get("triggeredAlertsCount") or 0)
         engine_elapsed_ms += float(scan_result.get("elapsedMs") or 0.0)
+        print(
+            f"[scan] window={index + 1}/{len(scan_offsets)} "
+            f"range={window_start.isoformat(sep=' ', timespec='seconds')}.."
+            f"{scan_end.isoformat(sep=' ', timespec='seconds')} "
+            f"latency={scan_latency:.3f}s "
+            f"rows={scan_result.get('rawPointsProcessed', 0)}",
+            flush=True,
+        )
     scan_seconds = max(time.perf_counter() - scan_started, 0.001)
     analysis_rate = plan.total_rows / scan_seconds
     query_rate = queried_rows / scan_seconds

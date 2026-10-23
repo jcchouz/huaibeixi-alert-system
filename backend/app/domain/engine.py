@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from psycopg2.extras import execute_values
@@ -28,15 +28,31 @@ from app.domain.alert_types import (
     normalize_alert_type,
 )
 from app.infrastructure.database import get_db_cursor
-from app.repositories.detection_state import (
-    RUNTIME_STATE_FIELDS,
-    load_channel_states,
-    load_rule_version,
-    persist_channel_states,
-    state_rows_for_persistence,
-)
+from app.repositories.detection_state import load_rule_version
 
 logger = logging.getLogger("alert_analysis.engine")
+
+RUNTIME_STATE_FIELDS: Tuple[str, ...] = (
+    "last_ts",
+    "last_val",
+    "online_status",
+    "threshold_streak_count",
+    "threshold_streak_started_at",
+    "threshold_last_level",
+    "threshold_last_value",
+    "threshold_last_limit",
+    "oor_streak_count",
+    "oor_streak_started_at",
+    "oor_last_value",
+    "stuck_streak_count",
+    "stuck_last_value",
+    "stuck_since",
+    "threshold_condition_active",
+    "threshold_condition_level",
+    "oor_condition_active",
+    "stuck_condition_active",
+    "offline_condition_active",
+)
 
 # 在数据库内一次性聚合一个 t_monitor 窗口。
 #   s_no / ch            -> 分组键，传感器编号统一转小写
@@ -86,6 +102,7 @@ SELECT
 FROM public.t_monitor
 WHERE time >= %s AND time < %s
   AND value IS NOT NULL
+  AND (LOWER(sensor_no), COALESCE(channel, '')) IN ({targets})
 ORDER BY time ASC
 """
 
@@ -166,16 +183,11 @@ class AlertAnalyticsEngine:
     def __init__(
         self,
         *,
-        confirm_points: int = 3,
-        stuck_points: int = 100,
-        offline_points: int = 5,
-        condition_unit: str = "seconds",
         confirm_seconds: float = 3.0,
         stuck_seconds: float = 100.0,
         offline_seconds: float = 5.0,
         station_name: str = "玉环站",
         alert_type_switches: Optional[Dict[str, bool]] = None,
-        persist_state: bool = False,
         rule_refresh_seconds: float = 5.0,
     ) -> None:
         # 检测、接口补充信息和总览统计共用这些元数据。
@@ -186,18 +198,12 @@ class AlertAnalyticsEngine:
         self._daq_state_known: Set[str] = set()
         self.total_monitor_rows: int = 398059510
         self.last_reload_time: Optional[datetime] = None
-        self.confirm_points = max(1, int(confirm_points))
-        self.stuck_points = max(1, int(stuck_points))
-        self.offline_points = max(1, int(offline_points))
-        if condition_unit not in {"points", "seconds"}:
-            raise ValueError("condition_unit must be 'points' or 'seconds'")
-        self.condition_unit = condition_unit
         self.confirm_seconds = max(0.001, float(confirm_seconds))
         self.stuck_seconds = max(0.001, float(stuck_seconds))
         self.offline_seconds = max(0.001, float(offline_seconds))
         self.station_name = (station_name or "").strip() or "玉环站"
         self.station_code: Optional[str] = None
-        self.persist_state = bool(persist_state)
+        self.detection_started_at: Optional[datetime] = None
         self.rule_refresh_seconds = max(0.1, float(rule_refresh_seconds))
         self.rule_version: Optional[int] = None
         self._last_rule_check_monotonic = 0.0
@@ -233,116 +239,58 @@ class AlertAnalyticsEngine:
     # 元数据初始化和热更新
     # ------------------------------------------------------------------
     def initialize(self) -> None:
-        """加载规则、初始化水位并刷新监测数据总量。"""
-        # 先重建规则和通道状态，后续水位恢复及告警核对都依赖这份最新元数据。
+        """加载规则和元数据，不恢复任何上次进程的运行状态。"""
         self.reload_thresholds()
-        # 用数据库时间恢复各通道上次上报时间，避免重启后离线状态跳变。
-        self.bootstrap_last_seen()
-        # 关闭条件已恢复、但 end_time 尚未落库的遗留告警。
-        self.reconcile_open_alerts()
-        # 通过数据库元数据刷新数据量，供概览使用，避免扫描 t_monitor。
         self.refresh_monitor_row_count()
 
-    def reconcile_open_alerts(self) -> int:
-        """Close persisted open alerts whose condition already recovered."""
+    def begin_detection_session(self, started_at: datetime) -> None:
+        """以启动时间为新基线重置内存状态。
 
-        if not self.persist_state:
-            return 0
-        closed = 0
+        启动前未结束的预警统一在启动边界结束，避免旧事件与本次启动后的
+        连续命中状态、去重缓存发生关联。
+        """
         with get_db_cursor(commit=True) as cur:
             cur.execute(
                 """
-                SELECT *
-                FROM public.t_alert_record
+                UPDATE public.t_alert_record
+                SET end_time = %s
                 WHERE end_time IS NULL
-                """
-            )
-            for row in cur.fetchall():
-                sensor_no = str(row["sensor_no"] or "").strip().lower()
-                channel = str(row.get("channel") or "").strip()
-                alert_type = normalize_alert_type(row["alert_type"]) or row["alert_type"]
-                if alert_type == ALERT_TYPE_DAQ_OFFLINE:
-                    condition_active = bool(
-                        self._daq_condition_active.get(sensor_no)
-                    )
-                else:
-                    state = self.channel_states.get(
-                        self.make_key(sensor_no, channel)
-                    )
-                    if state is None:
-                        continue
-                    state_field = {
-                        ALERT_TYPE_THRESHOLD: "threshold_condition_active",
-                        ALERT_TYPE_OFFLINE: "offline_condition_active",
-                        ALERT_TYPE_STUCK: "stuck_condition_active",
-                        ALERT_TYPE_OOR: "oor_condition_active",
-                    }.get(alert_type)
-                    if state_field is None:
-                        continue
-                    condition_active = bool(state.get(state_field))
-                if condition_active:
-                    continue
-                cur.execute(
-                    """
-                    UPDATE public.t_alert_record
-                    SET end_time = LOCALTIMESTAMP
-                    WHERE id = %s
-                      AND end_time IS NULL
-                    """,
-                    (row["id"],),
-                )
-                closed += int(cur.rowcount or 0)
-        if closed:
-            logger.info("Closed %d recovered alert incidents during reconciliation.", closed)
-        return closed
-
-    def bootstrap_last_seen(self) -> None:
-        """初始化最后上报时间，确保重启后仍能判断离线。"""
-        rules = self.channel_states.values()
-        if not rules:
-            return
-
-        with get_db_cursor() as cur:
-            cur.execute("SELECT LOCALTIMESTAMP AS now")
-            now = cur.fetchone()["now"]
-        max_timeout_seconds = max(
-            self._offline_timeout_ms(rule) / 1000.0 for rule in rules
-        )
-        # 至少回看一分钟，且不少于一个离线判定周期。
-        lookback_seconds = max(60.0, max_timeout_seconds)
-        with get_db_cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                  LOWER(sensor_no) AS sensor_no,
-                  COALESCE(channel, '') AS channel,
-                  MAX(time) AS last_ts
-                FROM public.t_monitor
-                WHERE time >= %s
-                GROUP BY LOWER(sensor_no), COALESCE(channel, '')
                 """,
-                (now - timedelta(seconds=lookback_seconds),),
+                (started_at,),
             )
-            latest_by_target = {
-                self.make_key(row["sensor_no"], row["channel"]): row["last_ts"]
-                for row in cur.fetchall()
-            }
+            closed = int(cur.rowcount or 0)
 
-        for rule in rules:
-            key = rule["key"]
-            if rule.get("last_ts") is not None:
-                continue
-            last_seen = self._parse_maybe_dt(latest_by_target.get(key))
-            offline_timeout_ms = self._offline_timeout_ms(rule)
-            timeout = timedelta(milliseconds=offline_timeout_ms)
-            if last_seen is None:
-                # 没有历史样本时，让通道初始状态具备离线判定条件。
-                last_seen = now - timeout - timedelta(minutes=2)
-            online_status = "ONLINE" if now - last_seen <= timeout else "OFFLINE"
+        for rule in self.channel_states.values():
             self.channel_states.update_field(
-                key,
-                last_ts=serialize_val(last_seen),
-                online_status=online_status,
+                rule["key"],
+                last_ts=self._serialize_runtime_dt(started_at),
+                last_val=None,
+                online_status="ONLINE",
+                threshold_streak_count=0,
+                threshold_streak_started_at=None,
+                threshold_last_level=None,
+                threshold_last_value=None,
+                threshold_last_limit=None,
+                threshold_condition_active=False,
+                threshold_condition_level=None,
+                oor_streak_count=0,
+                oor_streak_started_at=None,
+                oor_last_value=None,
+                oor_condition_active=False,
+                stuck_streak_count=0,
+                stuck_last_value=None,
+                stuck_since=None,
+                stuck_condition_active=False,
+                offline_condition_active=False,
+            )
+        self._daq_condition_active = {}
+        self._daq_state_known = set()
+        self._active_alert_cache = {}
+        self.detection_started_at = started_at
+        if closed:
+            logger.info(
+                "Closed %d open alert incidents at detection session boundary.",
+                closed,
             )
 
     def refresh_monitor_row_count(self) -> int:
@@ -391,10 +339,9 @@ class AlertAnalyticsEngine:
             # 1. 加载采集仪与站点映射。
             station_code = self._resolve_station_code(cur)
             self.station_code = station_code
-            persisted_states: Dict[str, Dict[str, Any]] = {}
-            persisted_daq_states: Dict[str, bool] = {}
-            if self.persist_state:
-                persisted_states, persisted_daq_states = load_channel_states(cur)
+            previous_states = {
+                rule["key"]: rule for rule in self.channel_states.values()
+            }
             cur.execute(
                 """
                 SELECT ci.id, ci.number, ci.name, ci.model, ci.manufacturer, ci.box_id,
@@ -516,17 +463,10 @@ class AlertAnalyticsEngine:
                 frequency_text = sm.get("frequency") or "1"
                 frequency_hz = self._parse_frequency_hz(frequency_text)
                 sample_interval_ms = 1000.0 / frequency_hz
-                confirm_points = self.confirm_points
-                stuck_points = self.stuck_points
-                offline_points = self.offline_points
                 confirm_seconds = self.confirm_seconds
                 stuck_seconds = self.stuck_seconds
                 offline_seconds = self.offline_seconds
-                offline_timeout_ms = (
-                    offline_seconds * 1000.0
-                    if self.condition_unit == "seconds"
-                    else offline_points * sample_interval_ms
-                )
+                offline_timeout_ms = offline_seconds * 1000.0
 
                 # 合并数据库规则、派生元数据和默认检测参数。
                 d.update(
@@ -547,10 +487,6 @@ class AlertAnalyticsEngine:
                         "unit": unit,                                           # 计量单位
                         "physical_min": range_min,                              # 物理量程下限
                         "physical_max": range_max,                              # 物理量程上限
-                        "confirm_points": confirm_points,                       # 通用连续确认点数
-                        "stuck_points": stuck_points,                           # 死值连续确认点数
-                        "offline_points": offline_points,                       # 离线连续确认点数
-                        "condition_unit": self.condition_unit,                  # 连续条件单位（seconds/points）
                         "confirm_seconds": confirm_seconds,                     # 通用连续确认时长（秒）
                         "stuck_seconds": stuck_seconds,                         # 死值连续确认时长（秒）
                         "offline_seconds": offline_seconds,                     # 离线连续确认时长（秒）
@@ -568,19 +504,16 @@ class AlertAnalyticsEngine:
                         "offline_condition_active": False,                      # 离线预警条件是否已触发
                     }
                 )
-                persisted = persisted_states.get(key)
-                if persisted:
+                previous = previous_states.get(key)
+                if previous:
                     for runtime_field in RUNTIME_STATE_FIELDS:
-                        if runtime_field in persisted:
-                            d[runtime_field] = persisted[runtime_field]
+                        if runtime_field in previous:
+                            d[runtime_field] = previous[runtime_field]
                 new_states[key] = d
 
             # 完整构建后一次性替换，避免读取到半加载状态。
             self.channel_states.replace_all(new_states)
-            if self.persist_state:
-                self._daq_condition_active = dict(persisted_daq_states)
-                self._daq_state_known = set(persisted_daq_states)
-                self.rule_version = load_rule_version(cur)
+            self.rule_version = load_rule_version(cur)
             self._last_rule_check_monotonic = time.monotonic()
             self.last_reload_time = datetime.now()
             logger.info("Loaded %d threshold rules into memory.", len(new_states))
@@ -589,8 +522,6 @@ class AlertAnalyticsEngine:
     def refresh_rules_if_changed(self, force: bool = False) -> bool:
         """Reload threshold rules when the database version changes."""
 
-        if not self.persist_state:
-            return False
         now = time.monotonic()
         if (
             not force
@@ -633,17 +564,11 @@ class AlertAnalyticsEngine:
 
     @classmethod
     def _offline_timeout_ms(cls, rule: Dict[str, Any]) -> float:
-        """根据秒数或采样点数计算离线超时时间。"""
+        """根据配置的持续秒数返回离线超时时间。"""
         configured = rule.get("offline_timeout_ms")
         if configured is not None:
             return max(1.0, float(configured))
-        if rule.get("condition_unit") == "seconds":
-            return max(1.0, float(rule.get("offline_seconds") or 5.0) * 1000.0)
-        interval_ms = float(
-            rule.get("sample_interval_ms")
-            or 1000.0 / cls._parse_frequency_hz(rule.get("frequency"))
-        )
-        return max(1, int(rule.get("offline_points") or 5)) * interval_ms
+        return max(1.0, float(rule.get("offline_seconds") or 5.0) * 1000.0)
 
     # ------------------------------------------------------------------
     # 阈值、量程和死值连续命中判定
@@ -653,8 +578,7 @@ class AlertAnalyticsEngine:
         samples: List[Tuple[datetime, float]],
         rule: Dict[str, Any],
         previous_count: Any,
-        target_points: int,
-        target_seconds: Optional[float] = None,
+        target_seconds: float,
         previous_started_at: Any = None,
         previous_sample_time: Any = None,
         max_gap_ms: Optional[float] = None,
@@ -677,9 +601,8 @@ class AlertAnalyticsEngine:
           - 方向翻转 -> 以当前点作为新一段的起点，count 重新从 1 开始；
           - 同时记录这一段里最严重（level 数字最小）的命中，供写告警使用。
 
-        达到条件即置 ``active=True``：``target_seconds`` 不为空时按时间跨度
-        （``sample_time - started_at``）判断，为空时按点数 ``count >= target_points``
-        判断，两者互斥。返回这一段连续命中中最严重的一次快照
+        达到 ``target_seconds`` 即置 ``active=True``。返回这一段连续命中中
+        最严重的一次快照
         ``(level, value, limit, fire_time)``。调用方再用 active 的状态变化
         和级别是否升级决定要不要写 t_alert_record。
         """
@@ -730,13 +653,9 @@ class AlertAnalyticsEngine:
                 run_best_value = eval_value
                 run_best_limit = float(limit or eval_value)
                 run_best_time = sample_time
-            duration_reached = (
+            if (
                 started_at is not None
-                and target_seconds is not None
                 and (sample_time - started_at).total_seconds() >= target_seconds
-            )
-            if (target_seconds is not None and duration_reached) or (
-                target_seconds is None and count >= target_points
             ):
                 # 达到配置条件后返回最严重的一次命中快照。
                 active = True
@@ -765,8 +684,7 @@ class AlertAnalyticsEngine:
         samples: List[Tuple[datetime, float]],
         rule: Dict[str, Any],
         previous_count: Any,
-        target_points: int,
-        target_seconds: Optional[float] = None,
+        target_seconds: float,
         previous_started_at: Any = None,
         previous_sample_time: Any = None,
         max_gap_ms: Optional[float] = None,
@@ -801,13 +719,9 @@ class AlertAnalyticsEngine:
             count += 1
             if started_at is None:
                 started_at = sample_time
-            duration_reached = (
+            if (
                 started_at is not None
-                and target_seconds is not None
                 and (sample_time - started_at).total_seconds() >= target_seconds
-            )
-            if (target_seconds is not None and duration_reached) or (
-                target_seconds is None and count >= target_points
             ):
                 active = True
                 snapshot = (value, sample_time)
@@ -820,12 +734,11 @@ class AlertAnalyticsEngine:
         previous_value: Any,
         previous_count: Any,
         previous_since: Any,
-        target_points: int,
-        target_seconds: Optional[float] = None,
+        target_seconds: float,
         previous_sample_time: Any = None,
         max_gap_ms: Optional[float] = None,
     ) -> Tuple[int, Optional[float], Optional[datetime], bool, Optional[Tuple[float, datetime]]]:
-        """判断相同读数是否连续达到点数或秒数条件。"""
+        """判断相同读数是否连续达到配置的持续秒数。"""
         count = max(0, int(previous_count or 0))
         last_value = (
             float(previous_value) if previous_value is not None else None
@@ -853,13 +766,9 @@ class AlertAnalyticsEngine:
                 count = 1
                 since = sample_time
             last_value = value
-            duration_reached = (
+            if (
                 since is not None
-                and target_seconds is not None
                 and (sample_time - since).total_seconds() >= target_seconds
-            )
-            if (target_seconds is not None and duration_reached) or (
-                target_seconds is None and count >= target_points
             ):
                 active = True
                 snapshot = (value, sample_time)
@@ -1224,6 +1133,11 @@ class AlertAnalyticsEngine:
         return None
 
     @staticmethod
+    def _serialize_runtime_dt(value: datetime) -> str:
+        """保留运行时时间戳的完整微秒精度，供下一轮严格去重。"""
+        return value.isoformat(sep=" ", timespec="microseconds")
+
+    @staticmethod
     def _alert_key(
         sensor_no: str,
         channel: Optional[str],
@@ -1499,15 +1413,29 @@ class AlertAnalyticsEngine:
                 # 未在 t_alert_threshold 中配置的组合会被直接丢弃，
                 # 因此 raw_points_processed 统计的是“读到的行数”，
                 # 不等于参与判定的样本数。
-                cur.execute(SAMPLE_BATCH_SQL, (window_start, window_end))
-                for row in cur.fetchall():
-                    raw_points_processed += 1
-                    key = self.make_key(row["s_no"], row["ch"])
-                    if key not in rules_by_key:
-                        continue
-                    samples_by_key.setdefault(key, []).append(
-                        (row["time"], float(row["value"]))
+                targets = [
+                    (rule["sensor_no_lower"], rule.get("channel") or "")
+                    for rule in rules
+                ]
+                if targets:
+                    target_placeholders = ", ".join(
+                        ["(%s, %s)"] * len(targets)
                     )
+                    sample_sql = SAMPLE_BATCH_SQL.format(
+                        targets=target_placeholders
+                    )
+                    sample_params: List[Any] = [window_start, window_end]
+                    for sensor_no, channel in targets:
+                        sample_params.extend([sensor_no, channel])
+                    cur.execute(sample_sql, tuple(sample_params))
+                    for row in cur.fetchall():
+                        raw_points_processed += 1
+                        key = self.make_key(row["s_no"], row["ch"])
+                        if key not in rules_by_key:
+                            continue
+                        samples_by_key.setdefault(key, []).append(
+                            (row["time"], float(row["value"]))
+                        )
                 if new_samples_only:
                     # 回看查询可能返回旧数据，丢弃各通道水位之前或同一时刻的样本。
                     # 水位 last_ts 来自上一轮扫描结束后的 channel_states，
@@ -1545,7 +1473,7 @@ class AlertAnalyticsEngine:
             # 注意这里是“整个表里所有未处理记录”，不按窗口过滤，
             # 所以跨窗口的活动事件也能在同一轮里被识别出来。
             if detect_alerts:
-                if self.persist_state and self._active_alert_cache is not None:
+                if self._active_alert_cache is not None:
                     active_map = {
                         key: dict(value)
                         for key, value in self._active_alert_cache.items()
@@ -1633,20 +1561,11 @@ class AlertAnalyticsEngine:
                     )
                     continue
 
-                confirm_points = max(1, int(rule.get("confirm_points") or 3))
-                stuck_points = max(1, int(rule.get("stuck_points") or 100))
-                condition_unit = rule.get("condition_unit", "points")
-                # points 模式直接使用规则中的连续点数；seconds 模式则把
-                # 持续时间传给评估函数，由评估函数结合采样周期换算点数。
-                confirm_seconds = (
-                    float(rule.get("confirm_seconds") or self.confirm_seconds)
-                    if condition_unit == "seconds"
-                    else None
+                confirm_seconds = float(
+                    rule.get("confirm_seconds") or self.confirm_seconds
                 )
-                stuck_seconds = (
-                    float(rule.get("stuck_seconds") or self.stuck_seconds)
-                    if condition_unit == "seconds"
-                    else None
+                stuck_seconds = float(
+                    rule.get("stuck_seconds") or self.stuck_seconds
                 )
                 samples = samples_by_key.get(key, [])
                 if not samples:
@@ -1676,8 +1595,7 @@ class AlertAnalyticsEngine:
                     samples,
                     rule,
                     rule.get("threshold_streak_count"),
-                    confirm_points,
-                    target_seconds=confirm_seconds,
+                    confirm_seconds,
                     previous_started_at=rule.get("threshold_streak_started_at"),
                     previous_sample_time=previous_last_seen,
                     # 相邻样本间隔超过 1.5 个采样周期视为断流，
@@ -1688,12 +1606,14 @@ class AlertAnalyticsEngine:
                 # 事务提交成功后才真正更新 channel_states。
                 state_updates: Dict[str, Any] = {
                     # last_ts 是下一轮去重的依据，必须取本轮最后一个样本时间。
-                    "last_ts": serialize_val(samples[-1][0]),
+                    "last_ts": self._serialize_runtime_dt(samples[-1][0]),
                     "last_val": round(samples[-1][1], 5),
                     "online_status": "ONLINE",
                     "threshold_streak_count": threshold_count,
-                    "threshold_streak_started_at": serialize_val(
-                        threshold_started_at
+                    "threshold_streak_started_at": (
+                        self._serialize_runtime_dt(threshold_started_at)
+                        if threshold_started_at is not None
+                        else None
                     ),
                     "threshold_condition_active": bool(threshold_active),
                     "threshold_condition_level": None,
@@ -1770,8 +1690,7 @@ class AlertAnalyticsEngine:
                     samples,
                     rule,
                     rule.get("oor_streak_count"),
-                    confirm_points,
-                    target_seconds=confirm_seconds,
+                    confirm_seconds,
                     previous_started_at=rule.get("oor_streak_started_at"),
                     previous_sample_time=previous_last_seen,
                     max_gap_ms=float(rule.get("sample_interval_ms") or 1000) * 1.5,
@@ -1779,7 +1698,11 @@ class AlertAnalyticsEngine:
                 state_updates.update(
                     {
                         "oor_streak_count": oor_count,
-                        "oor_streak_started_at": serialize_val(oor_started_at),
+                        "oor_streak_started_at": (
+                            self._serialize_runtime_dt(oor_started_at)
+                            if oor_started_at is not None
+                            else None
+                        ),
                         "oor_condition_active": bool(oor_active),
                     }
                 )
@@ -1825,8 +1748,7 @@ class AlertAnalyticsEngine:
                     rule.get("stuck_last_value"),
                     rule.get("stuck_streak_count"),
                     rule.get("stuck_since"),
-                    stuck_points,
-                    target_seconds=stuck_seconds,
+                    stuck_seconds,
                     previous_sample_time=previous_last_seen,
                     max_gap_ms=float(rule.get("sample_interval_ms") or 1000) * 1.5,
                 )
@@ -1834,7 +1756,11 @@ class AlertAnalyticsEngine:
                     {
                         "stuck_streak_count": stuck_count,
                         "stuck_last_value": stuck_last_value,
-                        "stuck_since": serialize_val(stuck_since) if stuck_since else None,
+                        "stuck_since": (
+                            self._serialize_runtime_dt(stuck_since)
+                            if stuck_since is not None
+                            else None
+                        ),
                         "stuck_condition_active": bool(stuck_active),
                     }
                 )
@@ -1952,15 +1878,8 @@ class AlertAnalyticsEngine:
 
                 pending_state_updates.setdefault(key, {}).update(state_updates)
 
-            # 条件状态、统计数据、通道/采集仪预警在同一事务中落库。
-            # 只有该事务成功提交后，函数末尾才会把新状态发布到内存。
-            if self.persist_state:
-                state_rows = state_rows_for_persistence(
-                    rules_by_key,
-                    pending_state_updates,
-                    daq_condition_updates,
-                )
-                persist_channel_states(cur, state_rows)
+            # 统计数据和预警事件在同一事务中落库；运行时连续状态只保存在
+            # 当前进程，事务成功提交后再发布到 channel_states。
             if stat_rows:
                 # 批量更新插入，确保一个完整窗口在同一事务中提交。
                 execute_values(
@@ -2130,7 +2049,7 @@ class AlertAnalyticsEngine:
             }
 
     def get_status(self) -> Dict[str, Any]:
-        """返回引擎计数和当前连续命中单位配置。"""
+        """返回引擎计数和连续命中秒数配置。"""
         rules = self.channel_states.values()
         online_cnt = sum(1 for r in rules if r.get("online_status") == "ONLINE")
         offline_cnt = len(rules) - online_cnt
@@ -2141,16 +2060,12 @@ class AlertAnalyticsEngine:
             "totalMonitorRows": self.total_monitor_rows,
             "lastReloadTime": serialize_val(self.last_reload_time),
             "detectionMode": "realtime_sample_groups",
-            "conditionUnit": self.condition_unit,
+            "detectionStartedAt": serialize_val(self.detection_started_at),
             "stationName": self.station_name,
             "stationCode": self.station_code,
             "alertTypeSwitches": dict(self.alert_type_switches),
-            "persistState": self.persist_state,
             "ruleVersion": self.rule_version,
             "ruleRefreshSeconds": self.rule_refresh_seconds,
-            "confirmPoints": self.confirm_points,
-            "stuckPoints": self.stuck_points,
-            "offlinePoints": self.offline_points,
             "confirmSeconds": self.confirm_seconds,
             "stuckSeconds": self.stuck_seconds,
             "offlineSeconds": self.offline_seconds,

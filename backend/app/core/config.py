@@ -66,27 +66,13 @@ class Settings(BaseSettings):
         le=60,
         validation_alias="DETECTION_ALERT_OVERLAP_SECONDS",
     )
-    # 检测主节点检查阈值规则版本的周期。规则表触发器递增版本，其他实例
-    # 无需依赖处理修改请求的 API 实例即可重新加载阈值。
+    # 检测进程检查阈值规则版本的周期。规则表触发器递增版本后，
+    # Worker 无需重启即可重新加载阈值。
     detection_rule_refresh_seconds: float = Field(
         default=5.0,
         ge=0.1,
         le=300,
         validation_alias="DETECTION_RULE_REFRESH_SECONDS",
-    )
-    # 主备切换或停机恢复时最多追溯多少秒，避免一次拉取无限历史。
-    detection_max_alert_catchup_seconds: int = Field(
-        default=300,
-        ge=1,
-        le=86400,
-        validation_alias="DETECTION_MAX_ALERT_CATCHUP_SECONDS",
-    )
-    # 追溯历史时按小窗口处理，限制单次 SQL 和 Python 内存占用。
-    detection_alert_catchup_chunk_seconds: int = Field(
-        default=5,
-        ge=1,
-        le=300,
-        validation_alias="DETECTION_ALERT_CATCHUP_CHUNK_SECONDS",
     )
     # 统计窗口的落库延迟；实时预警扫描不使用该延迟。
     detection_lag_seconds: int = Field(
@@ -102,33 +88,7 @@ class Settings(BaseSettings):
         le=1440,
         validation_alias="DETECTION_WINDOW_MINUTES",
     )
-    # 连续命中单位：采样点数或样本持续时间。
-    detection_condition_unit: Literal["points", "seconds"] = Field(
-        default="seconds",
-        validation_alias="DETECTION_CONDITION_UNIT",
-    )
-    # 阈值超限或超物理量程需要连续命中的采样组数。
-    detection_confirm_points: int = Field(
-        default=3,
-        ge=1,
-        le=10000,
-        validation_alias="DETECTION_CONFIRM_POINTS",
-    )
-    # 传感器读数连续相同多少组后判定为死值。
-    detection_stuck_points: int = Field(
-        default=100,
-        ge=1,
-        le=10000,
-        validation_alias="DETECTION_STUCK_POINTS",
-    )
-    # 按传感器 frequency 换算后，连续缺失多少组采样判定为离线。
-    detection_offline_points: int = Field(
-        default=5,
-        ge=1,
-        le=10000,
-        validation_alias="DETECTION_OFFLINE_POINTS",
-    )
-    # 秒模式下的连续命中持续时间。
+    # 连续命中持续时间。
     detection_confirm_seconds: float = Field(
         default=3.0,
         gt=0,
@@ -167,13 +127,6 @@ class Settings(BaseSettings):
     detection_alert_oor_enabled: bool = Field(
         default=True,
         validation_alias="DETECTION_ALERT_OOR_ENABLED",
-    )
-    # 服务恢复后单轮最多补处理的统计窗口数，防止长时间停机的追帧压力。
-    detection_max_catchup_windows: int = Field(
-        default=5,
-        ge=1,
-        le=1440,
-        validation_alias="DETECTION_MAX_CATCHUP_WINDOWS",
     )
 
     # HTTP 安全、跨域和日志配置。

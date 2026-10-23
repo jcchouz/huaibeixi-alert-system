@@ -84,18 +84,20 @@ breakpoint sequence, verification SQL and troubleshooting notes.
 
 Production only needs the backend service. It scans newly arrived raw samples
 from `t_monitor` for alerts every second by default and writes one-minute
-statistics to `t_stat_record`. Multiple backend instances are coordinated
-through PostgreSQL advisory leader locks. Configure the realtime alert interval
+statistics to `t_stat_record`. The service is designed for a single backend
+instance. On startup it creates a database-time boundary and only processes
+samples and complete statistics windows after that boundary; historical
+watermarks and catch-up processing are not used. Configure the realtime alert interval
 with `DETECTION_INTERVAL_SECONDS`, the commit-delay lookback with
 `DETECTION_ALERT_OVERLAP_SECONDS`, and the statistics window with
-`DETECTION_WINDOW_MINUTES`. Sampling interval is derived from
-`t_sensor.frequency`. `DETECTION_CONDITION_UNIT=seconds` is the default and
-uses `DETECTION_CONFIRM_SECONDS`, `DETECTION_STUCK_SECONDS` and
+`DETECTION_WINDOW_MINUTES`. Each alert loop advances at most one
+`DETECTION_INTERVAL_SECONDS` window; if a window takes longer than that,
+`alertBacklogSeconds` grows and the backend is not keeping up with ingestion.
+Continuous conditions use
+`DETECTION_CONFIRM_SECONDS`, `DETECTION_STUCK_SECONDS` and
 `DETECTION_OFFLINE_SECONDS` for threshold/out-of-range, stuck and offline
-detection. Set `DETECTION_CONDITION_UNIT=points` to keep the original
-`DETECTION_CONFIRM_POINTS`, `DETECTION_STUCK_POINTS` and
-`DETECTION_OFFLINE_POINTS` behavior. Each alert scenario can be disabled
-independently with `DETECTION_ALERT_THRESHOLD_ENABLED`,
+detection. Each alert scenario can be disabled independently with
+`DETECTION_ALERT_THRESHOLD_ENABLED`,
 `DETECTION_ALERT_OFFLINE_ENABLED`, `DETECTION_ALERT_DAQ_OFFLINE_ENABLED`,
 `DETECTION_ALERT_STUCK_ENABLED` and `DETECTION_ALERT_OOR_ENABLED` (all default
 to `true`); disabling a scenario only stops writing that alert type, while

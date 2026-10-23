@@ -139,11 +139,10 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="采样频率 / 离线组数（全局）" width="190" align="center">
+        <el-table-column label="采样频率" width="120" align="center">
           <template #default="{ row }">
             <div class="mono-num" style="font-size: 11px">
               <div>频率: {{ row.frequency || '-' }} Hz</div>
-              <div>离线: {{ row.offline_points || 5 }} 组</div>
             </div>
           </template>
         </el-table-column>
@@ -152,22 +151,6 @@
           <template #default="{ row }">
             <div class="mono-num" style="font-size: 11px">
               [{{ formatLim(row.range_min) }}, {{ formatLim(row.range_max) }}]
-            </div>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="死值连续组数（全局）" width="160" align="center">
-          <template #default="{ row }">
-            <div class="mono-num" style="font-size: 11px">
-              {{ row.stuck_points || 100 }} 组
-            </div>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="阈值连续组数（全局）" width="160" align="center">
-          <template #default="{ row }">
-            <div class="mono-num" style="font-size: 11px">
-              <div>{{ row.confirm_points || 3 }} 组</div>
             </div>
           </template>
         </el-table-column>

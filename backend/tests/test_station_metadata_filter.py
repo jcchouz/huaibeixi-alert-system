@@ -67,6 +67,8 @@ class MetadataCursor:
                     "range_max": 100,
                 }
             ]
+        elif normalized.startswith("SELECT version"):
+            self.result = [{"version": 1}]
         else:
             raise AssertionError(f"Unexpected SQL: {normalized}")
 
@@ -86,7 +88,7 @@ def test_reload_thresholds_filters_all_metadata_by_station_code(monkeypatch) -> 
 
     monkeypatch.setattr(engine_module, "get_db_cursor", fake_get_db_cursor)
 
-    engine = AlertAnalyticsEngine(station_name="玉环站", persist_state=False)
+    engine = AlertAnalyticsEngine(station_name="玉环站")
     rule_count = engine.reload_thresholds()
 
     assert rule_count == 1

@@ -10,9 +10,13 @@ from app.services.detection import AlertDetectionWorker
 
 class FakeEngine:
     def __init__(self) -> None:
+        self.sessions: list[datetime] = []
         self.alert_scans: list[tuple[datetime, datetime]] = []
         self.windows: list[tuple[datetime, datetime]] = []
         self.period_types: list[str] = []
+
+    def begin_detection_session(self, started_at: datetime) -> None:
+        self.sessions.append(started_at)
 
     def scan_realtime_alerts(
         self,
@@ -53,189 +57,118 @@ def make_worker(
         detection_alert_overlap_seconds=1,
         detection_lag_seconds=5,
         detection_window_minutes=window_minutes,
-        detection_max_catchup_windows=3,
     )
     return AlertDetectionWorker(engine, settings)  # type: ignore[arg-type]
 
 
-def test_detection_worker_processes_latest_completed_minute(monkeypatch) -> None:
+def test_initialize_starts_from_current_time_without_historical_state() -> None:
     engine = FakeEngine()
     worker = make_worker(engine)
-    monkeypatch.setattr(worker, "_ensure_leader", lambda: True)
-    monkeypatch.setattr(worker, "_ensure_statistics_leader", lambda: True)
+    started_at = datetime(2026, 10, 20, 15, 42, 30)
 
-    results = worker.run_once(datetime(2026, 10, 20, 15, 42, 30))
+    worker.initialize(started_at)
 
-    assert len(results) == 1
+    assert engine.sessions == [started_at]
+    assert worker._detection_started_at == started_at
+    assert worker._last_alert_scan_at == started_at
+    # 当前窗口包含启动前数据，因此统计从下一个完整窗口开始。
+    assert worker._last_window_end == datetime(2026, 10, 20, 15, 43)
+
+
+def test_alert_scan_never_reaches_before_startup_boundary() -> None:
+    engine = FakeEngine()
+    worker = make_worker(engine)
+    worker.initialize(datetime(2026, 10, 20, 15, 42, 30))
+
+    worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 31))
+    worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 32))
+
     assert engine.alert_scans == [
-        (datetime(2026, 10, 20, 15, 42, 29), datetime(2026, 10, 20, 15, 42, 30))
+        (datetime(2026, 10, 20, 15, 42, 30), datetime(2026, 10, 20, 15, 42, 31)),
+        (datetime(2026, 10, 20, 15, 42, 30), datetime(2026, 10, 20, 15, 42, 32)),
     ]
+
+
+def test_alert_scan_does_not_replay_data_before_start() -> None:
+    engine = FakeEngine()
+    worker = make_worker(engine)
+    worker.initialize(datetime(2026, 10, 20, 15, 42, 30))
+
+    assert worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 30)) is None
+    assert engine.alert_scans == []
+
+
+def test_alert_scan_processes_only_the_previous_one_second_window() -> None:
+    engine = FakeEngine()
+    worker = make_worker(engine)
+    started_at = datetime(2026, 10, 20, 15, 42, 30)
+    worker.initialize(started_at)
+
+    result = worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 45))
+
+    assert engine.alert_scans == [
+        (started_at, datetime(2026, 10, 20, 15, 42, 31))
+    ]
+    assert result is not None
+    assert result["backlogSeconds"] == 14.0
+    assert worker._last_alert_scan_at == datetime(2026, 10, 20, 15, 42, 31)
+
+
+def test_statistics_start_with_first_complete_window_after_startup() -> None:
+    engine = FakeEngine()
+    worker = make_worker(engine)
+    worker.initialize(datetime(2026, 10, 20, 15, 40, 30))
+
+    first = worker.run_once(datetime(2026, 10, 20, 15, 42, 30))
+    second = worker.run_once(datetime(2026, 10, 20, 15, 42, 31))
+
+    assert len(first) == 1
+    assert second == []
     assert engine.windows == [
         (datetime(2026, 10, 20, 15, 41), datetime(2026, 10, 20, 15, 42))
     ]
     assert engine.period_types == ["1m"]
 
 
-def test_detection_worker_chunks_alert_catchup(monkeypatch) -> None:
-    engine = FakeEngine()
-    worker = make_worker(engine)
-    monkeypatch.setattr(worker, "_ensure_leader", lambda: True)
-    monkeypatch.setattr(worker, "_ensure_statistics_leader", lambda: True)
-
-    worker.run_once(datetime(2026, 10, 20, 15, 42, 30))
-    worker.run_once(datetime(2026, 10, 20, 15, 42, 45))
-
-    assert len(engine.windows) == 1
-    assert engine.alert_scans == [
-        (datetime(2026, 10, 20, 15, 42, 29), datetime(2026, 10, 20, 15, 42, 30)),
-        (datetime(2026, 10, 20, 15, 42, 29), datetime(2026, 10, 20, 15, 42, 35)),
-        (datetime(2026, 10, 20, 15, 42, 34), datetime(2026, 10, 20, 15, 42, 40)),
-        (datetime(2026, 10, 20, 15, 42, 39), datetime(2026, 10, 20, 15, 42, 45)),
-    ]
-
-
-def test_alert_scan_persists_watermark_after_each_catchup_chunk(
-    monkeypatch,
-) -> None:
-    engine = FakeEngine()
-    worker = make_worker(engine)
-    monkeypatch.setattr(worker, "_ensure_leader", lambda: True)
-    monkeypatch.setattr(worker, "_ensure_statistics_leader", lambda: True)
-    persisted: list[tuple[str, datetime, datetime]] = []
-    monkeypatch.setattr(
-        worker,
-        "_persist_worker_watermark",
-        lambda name, processed, completed: persisted.append(
-            (name, processed, completed)
-        ),
-    )
-
-    worker.run_once(datetime(2026, 10, 20, 15, 42, 30))
-    worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 45))
-
-    assert [item[1] for item in persisted if item[0] == "alert"] == [
-        datetime(2026, 10, 20, 15, 42, 30),
-        datetime(2026, 10, 20, 15, 42, 35),
-        datetime(2026, 10, 20, 15, 42, 40),
-        datetime(2026, 10, 20, 15, 42, 45),
-    ]
-    assert sum(item[0] == "alert" for item in persisted) == 4
-    assert sum(item[0] == "statistics" for item in persisted) == 1
-
-
-def test_detection_worker_catches_up_a_bounded_number_of_windows(monkeypatch) -> None:
-    engine = FakeEngine()
-    worker = make_worker(engine)
-    monkeypatch.setattr(worker, "_ensure_leader", lambda: True)
-    monkeypatch.setattr(worker, "_ensure_statistics_leader", lambda: True)
-
-    worker.run_once(datetime(2026, 10, 20, 15, 40, 30))
-    worker.run_once(datetime(2026, 10, 20, 15, 46, 30))
-
-    assert engine.windows == [
-        (datetime(2026, 10, 20, 15, 39), datetime(2026, 10, 20, 15, 40)),
-        (datetime(2026, 10, 20, 15, 43), datetime(2026, 10, 20, 15, 44)),
-        (datetime(2026, 10, 20, 15, 44), datetime(2026, 10, 20, 15, 45)),
-        (datetime(2026, 10, 20, 15, 45), datetime(2026, 10, 20, 15, 46)),
-    ]
-
-
-def test_detection_worker_supports_a_configurable_window(monkeypatch) -> None:
+def test_detection_worker_supports_a_configurable_window() -> None:
     engine = FakeEngine()
     worker = make_worker(engine, window_minutes=10)
-    monkeypatch.setattr(worker, "_ensure_leader", lambda: True)
-    monkeypatch.setattr(worker, "_ensure_statistics_leader", lambda: True)
-
-    worker.run_once(datetime(2026, 10, 20, 15, 42, 30))
-
-    assert engine.windows == [
-        (datetime(2026, 10, 20, 15, 30), datetime(2026, 10, 20, 15, 40))
-    ]
-    assert engine.period_types == ["10m"]
-
-
-def test_alerts_are_scanned_even_when_no_stat_window_is_due(monkeypatch) -> None:
-    engine = FakeEngine()
-    worker = make_worker(engine)
-    monkeypatch.setattr(worker, "_ensure_leader", lambda: True)
-    monkeypatch.setattr(worker, "_ensure_statistics_leader", lambda: True)
-
-    worker.run_once(datetime(2026, 10, 20, 15, 42, 30))
-    worker.run_once(datetime(2026, 10, 20, 15, 42, 31))
-
-    assert engine.windows == [
-        (datetime(2026, 10, 20, 15, 41), datetime(2026, 10, 20, 15, 42))
-    ]
-    assert engine.alert_scans[-1] == (
-        datetime(2026, 10, 20, 15, 42, 29),
-        datetime(2026, 10, 20, 15, 42, 31),
-    )
-
-
-def test_alert_scan_windows_reuse_a_short_overlap(monkeypatch) -> None:
-    engine = FakeEngine()
-    worker = make_worker(engine)
-    monkeypatch.setattr(worker, "_ensure_leader", lambda: True)
-    monkeypatch.setattr(worker, "_ensure_statistics_leader", lambda: True)
-
-    assert worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 30)) is not None
-    assert worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 31)) is not None
-
-    assert engine.alert_scans == [
-        (datetime(2026, 10, 20, 15, 42, 29), datetime(2026, 10, 20, 15, 42, 30)),
-        (datetime(2026, 10, 20, 15, 42, 29), datetime(2026, 10, 20, 15, 42, 31)),
-    ]
-
-
-def test_alert_scan_windows_can_disable_overlap(monkeypatch) -> None:
-    engine = FakeEngine()
-    worker = make_worker(engine)
-    worker.alert_overlap_seconds = 0
-    monkeypatch.setattr(worker, "_ensure_leader", lambda: True)
-    monkeypatch.setattr(worker, "_ensure_statistics_leader", lambda: True)
-
-    assert worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 30)) is not None
-    assert worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 31)) is not None
-
-    assert engine.alert_scans == [
-        (datetime(2026, 10, 20, 15, 42, 29), datetime(2026, 10, 20, 15, 42, 30)),
-        (datetime(2026, 10, 20, 15, 42, 30), datetime(2026, 10, 20, 15, 42, 31)),
-    ]
-
-
-def test_run_once_scans_alerts_without_waiting_for_statistics_leadership(
-    monkeypatch,
-) -> None:
-    engine = FakeEngine()
-    worker = make_worker(engine)
-    monkeypatch.setattr(worker, "_ensure_leader", lambda: True)
-    monkeypatch.setattr(worker, "_ensure_statistics_leader", lambda: False)
+    worker.initialize(datetime(2026, 10, 20, 15, 30, 30))
 
     results = worker.run_once(datetime(2026, 10, 20, 15, 42, 30))
 
     assert results == []
-    assert len(engine.alert_scans) == 1
+    assert worker._last_window_end == datetime(2026, 10, 20, 15, 40)
     assert engine.windows == []
 
 
-def test_run_once_processes_statistics_without_alert_leadership(
-    monkeypatch,
-) -> None:
+def test_startup_on_window_boundary_uses_next_complete_window() -> None:
+    engine = FakeEngine()
+    worker = make_worker(engine, window_minutes=10)
+    worker.initialize(datetime(2026, 10, 20, 15, 30))
+
+    assert worker._last_window_end == datetime(2026, 10, 20, 15, 30)
+
+
+def test_alert_scan_windows_reuse_a_short_overlap() -> None:
     engine = FakeEngine()
     worker = make_worker(engine)
-    monkeypatch.setattr(worker, "_ensure_leader", lambda: False)
-    monkeypatch.setattr(worker, "_ensure_statistics_leader", lambda: True)
+    worker.initialize(datetime(2026, 10, 20, 15, 42, 30))
+    worker.alert_overlap_seconds = 0
 
-    results = worker.run_once(datetime(2026, 10, 20, 15, 42, 30))
+    assert worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 31)) is not None
+    assert worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 32)) is not None
 
-    assert len(results) == 1
-    assert engine.alert_scans == []
-    assert len(engine.windows) == 1
+    assert engine.alert_scans == [
+        (datetime(2026, 10, 20, 15, 42, 30), datetime(2026, 10, 20, 15, 42, 31)),
+        (datetime(2026, 10, 20, 15, 42, 31), datetime(2026, 10, 20, 15, 42, 32)),
+    ]
 
 
-def test_alert_scans_are_serialized_before_advancing_watermark(monkeypatch) -> None:
+def test_alert_scans_are_serialized_before_advancing_cursor(monkeypatch) -> None:
     engine = FakeEngine()
     worker = make_worker(engine)
+    worker.initialize(datetime(2026, 10, 20, 15, 42, 30))
     worker.alert_overlap_seconds = 0
     entered = threading.Event()
     release = threading.Event()
@@ -258,11 +191,11 @@ def test_alert_scans_are_serialized_before_advancing_watermark(monkeypatch) -> N
 
     first = threading.Thread(
         target=worker.scan_alerts_once,
-        args=(datetime(2026, 10, 20, 15, 42, 30),),
+        args=(datetime(2026, 10, 20, 15, 42, 31),),
     )
     second = threading.Thread(
         target=worker.scan_alerts_once,
-        args=(datetime(2026, 10, 20, 15, 42, 31),),
+        args=(datetime(2026, 10, 20, 15, 42, 32),),
     )
     first.start()
     assert entered.wait(1)
@@ -281,9 +214,7 @@ def test_alert_scans_are_serialized_before_advancing_watermark(monkeypatch) -> N
     assert all(start < end for start, end in engine.alert_scans)
 
 
-def test_worker_starts_separate_realtime_and_statistics_threads(
-    monkeypatch,
-) -> None:
+def test_worker_starts_separate_realtime_and_statistics_threads(monkeypatch) -> None:
     engine = FakeEngine()
     worker = make_worker(engine)
     entered = threading.Event()

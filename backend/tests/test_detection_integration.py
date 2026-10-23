@@ -12,10 +12,6 @@ from psycopg2.extras import RealDictCursor, execute_values
 from app.domain.alert_types import ALERT_TYPE_THRESHOLD
 from app.domain.engine import AlertAnalyticsEngine
 from app.infrastructure.database import close_db_pool
-from app.repositories.detection_state import (
-    load_worker_watermark,
-    save_worker_watermark,
-)
 
 pytestmark = pytest.mark.integration
 TEST_RUN_PREFIX = f"itest-det-{uuid.uuid4().hex[:10]}"
@@ -67,20 +63,11 @@ def cleanup(conn: Any, prefix: str, time_floor: datetime) -> None:
             """,
             (time_floor, pattern),
         )
-        for table in (
-            "t_detection_channel_state",
-            "t_alert_threshold",
-            "t_sensor_channel",
-            "t_sensor",
-        ):
+        for table in ("t_alert_threshold", "t_sensor_channel", "t_sensor"):
             cur.execute(
                 f"DELETE FROM public.{table} WHERE LOWER(sensor_no) LIKE %s",
                 (pattern,),
             )
-        cur.execute(
-            "DELETE FROM public.t_detection_worker_state WHERE worker_name LIKE %s",
-            (pattern,),
-        )
         cur.execute(
             "DELETE FROM public.t_collect_instrument WHERE id LIKE %s",
             (pattern,),
@@ -143,7 +130,7 @@ def insert_rule(
             ON CONFLICT (id) DO NOTHING
             """,
             (
-                f"{TEST_RUN_PREFIX}-sensor-{sensor_no}",
+                f"itest-{uuid.uuid4().hex[:20]}",
                 sensor_no,
                 sensor_no,
                 TEST_INSTRUMENT_ID,
@@ -208,16 +195,11 @@ def database_time(conn: Any) -> datetime:
 def make_engine() -> AlertAnalyticsEngine:
     return AlertAnalyticsEngine(
         station_name=TEST_STATION_NAME,
-        condition_unit="points",
-        confirm_points=3,
-        stuck_points=100,
-        offline_points=5,
-        persist_state=True,
         rule_refresh_seconds=0.1,
     )
 
 
-def test_threshold_lifecycle_persists_state_and_handles_recurrence(db_conn: Any) -> None:
+def test_threshold_lifecycle_and_recurrence_without_state_restore(db_conn: Any) -> None:
     sensor_no = f"{TEST_RUN_PREFIX}-lifecycle"
     channel = "x"
     insert_rule(
@@ -236,12 +218,13 @@ def test_threshold_lifecycle_persists_state_and_handles_recurrence(db_conn: Any)
         channel=channel,
         samples=[
             (base, 12.0),
-            (base + timedelta(milliseconds=100), 12.1),
-            (base + timedelta(milliseconds=200), 12.2),
+            (base + timedelta(seconds=1), 12.1),
+            (base + timedelta(seconds=2), 12.2),
+            (base + timedelta(seconds=3), 12.3),
         ],
     )
 
-    engine.scan_realtime_alerts(base, base + timedelta(milliseconds=350))
+    engine.scan_realtime_alerts(base, base + timedelta(seconds=3, milliseconds=50))
     with db_conn.cursor() as cur:
         cur.execute(
             """
@@ -261,10 +244,10 @@ def test_threshold_lifecycle_persists_state_and_handles_recurrence(db_conn: Any)
     restarted.initialize()
     restored_state = restarted.channel_states.get(key)
     assert restored_state is not None
-    assert restored_state["threshold_condition_active"] is True
-    assert restored_state["threshold_streak_count"] == 3
+    assert restored_state["threshold_condition_active"] is False
+    assert restored_state["threshold_streak_count"] == 0
 
-    normal_time = base + timedelta(milliseconds=500)
+    normal_time = base + timedelta(seconds=4)
     insert_samples(
         db_conn,
         sensor_no=sensor_no,
@@ -272,10 +255,18 @@ def test_threshold_lifecycle_persists_state_and_handles_recurrence(db_conn: Any)
         samples=[(normal_time, 1.0)],
     )
     engine.scan_realtime_alerts(
-        normal_time - timedelta(milliseconds=50),
-        normal_time + timedelta(milliseconds=50),
+        normal_time - timedelta(seconds=1),
+        normal_time + timedelta(seconds=1),
     )
-    assert engine.channel_states.get(key)["threshold_condition_active"] is False
+    normal_state = engine.channel_states.get(key)
+    assert normal_state["threshold_condition_active"] is False, {
+        "last_ts": normal_state["last_ts"],
+        "last_val": normal_state.get("last_val"),
+        "threshold_streak_count": normal_state["threshold_streak_count"],
+        "threshold_streak_started_at": normal_state[
+            "threshold_streak_started_at"
+        ],
+    }
     with db_conn.cursor() as cur:
         cur.execute(
             """
@@ -287,20 +278,21 @@ def test_threshold_lifecycle_persists_state_and_handles_recurrence(db_conn: Any)
         )
         assert cur.fetchone()["end_time"] is not None
 
-    recurrence_base = base + timedelta(milliseconds=700)
+    recurrence_base = base + timedelta(seconds=6)
     insert_samples(
         db_conn,
         sensor_no=sensor_no,
         channel=channel,
         samples=[
             (recurrence_base, 12.0),
-            (recurrence_base + timedelta(milliseconds=100), 12.1),
-            (recurrence_base + timedelta(milliseconds=200), 12.2),
+            (recurrence_base + timedelta(seconds=1), 12.1),
+            (recurrence_base + timedelta(seconds=2), 12.2),
+            (recurrence_base + timedelta(seconds=3), 12.3),
         ],
     )
     engine.scan_realtime_alerts(
-        recurrence_base - timedelta(milliseconds=50),
-        recurrence_base + timedelta(milliseconds=250),
+        recurrence_base - timedelta(seconds=1),
+        recurrence_base + timedelta(seconds=3, milliseconds=50),
     )
 
     with db_conn.cursor() as cur:
@@ -349,24 +341,3 @@ def test_rule_version_change_reloads_thresholds(db_conn: Any) -> None:
 
     assert engine.refresh_rules_if_changed(force=True) is True
     assert engine.channel_states.get(key)["level3_upper"] == 7.5
-
-
-
-def test_worker_watermark_round_trip(db_conn: Any) -> None:
-    worker_name = f"{TEST_RUN_PREFIX}-worker-{uuid.uuid4().hex[:8]}"
-    last_processed = database_time(db_conn)
-    completed = last_processed + timedelta(milliseconds=25)
-    with db_conn.cursor() as cur:
-        save_worker_watermark(
-            cur,
-            worker_name=worker_name,
-            last_processed_time=last_processed,
-            last_completed_time=completed,
-        )
-    db_conn.commit()
-
-    with db_conn.cursor() as cur:
-        restored = load_worker_watermark(cur, worker_name)
-    assert restored is not None
-    assert restored["last_processed_time"] == last_processed
-    assert restored["last_completed_time"] == completed

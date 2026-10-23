@@ -5,7 +5,6 @@ from typing import Any
 
 from app.domain.alert_types import ALERT_TYPE_OFFLINE, ALERT_TYPE_THRESHOLD
 from app.domain.engine import AlertAnalyticsEngine
-from app.repositories.detection_state import state_rows_for_persistence
 
 
 def test_force_refresh_updates_existing_same_level_alert() -> None:
@@ -39,37 +38,6 @@ def test_force_refresh_updates_existing_same_level_alert() -> None:
     assert result is not None
     assert len(calls) == 1
     assert len(triggered) == 1
-
-
-def test_state_rows_include_channel_runtime_and_daq_state() -> None:
-    rule = {
-        "sensor_no_lower": "sensor-1",
-        "channel": "x",
-        "last_ts": "2026-10-21 12:00:00.000",
-        "threshold_condition_active": True,
-        "threshold_streak_count": 3,
-        "offline_condition_active": False,
-    }
-    rows = state_rows_for_persistence(
-        {"sensor-1:x": rule},
-        {
-            "sensor-1:x": {
-                "last_ts": "2026-10-21 12:00:01.000",
-                "threshold_condition_active": False,
-                "offline_condition_active": True,
-            }
-        },
-        {"instrument-1": True},
-    )
-
-    assert rows[0][0:2] == ("sensor-1", "x")
-    assert rows[0][2]["threshold_condition_active"] is False
-    assert rows[0][2]["offline_condition_active"] is True
-    assert rows[1] == (
-        "instrument-1",
-        "__DAQ__",
-        {"daq_condition_active": True},
-    )
 
 
 def test_offline_alert_uses_force_refresh_for_new_incident() -> None:

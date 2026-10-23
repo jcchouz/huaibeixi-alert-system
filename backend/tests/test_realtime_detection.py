@@ -222,9 +222,6 @@ def test_realtime_threshold_streak_continues_across_one_second_scans(
             "sensor_no_lower": "sensor-1",
             "channel": "x",
             "instrument_id": None,
-            "confirm_points": 3,
-            "stuck_points": 100,
-            "offline_points": 5,
             "sample_interval_ms": 1000.0,
             "level1_upper": 30.0,
             "level2_upper": 20.0,
@@ -285,7 +282,6 @@ def test_no_data_still_alerts_offline_once_per_unrecovered_incident(
             "sensor_no_lower": "sensor-1",
             "channel": "x",
             "instrument_id": None,
-            "offline_points": 5,
             "sample_interval_ms": 1000.0,
             "last_ts": "2026-10-20 11:59:50",
             "threshold_condition_active": False,
@@ -330,9 +326,6 @@ def test_overlap_window_does_not_replay_an_already_processed_sample(
             "sensor_no_lower": "sensor-1",
             "channel": "x",
             "instrument_id": None,
-            "confirm_points": 3,
-            "stuck_points": 100,
-            "offline_points": 5,
             "sample_interval_ms": 1000.0,
             "level1_upper": 30.0,
             "level2_upper": 20.0,
@@ -377,7 +370,7 @@ def test_overlap_window_does_not_replay_an_already_processed_sample(
     assert engine.channel_states.get(key)["last_ts"] == previous_sample_time
 
 
-def test_scan_does_not_advance_watermark_when_commit_fails(
+def test_scan_does_not_advance_channel_state_when_commit_fails(
     monkeypatch,
 ) -> None:
     engine = AlertAnalyticsEngine()
@@ -389,9 +382,6 @@ def test_scan_does_not_advance_watermark_when_commit_fails(
             "sensor_no_lower": "sensor-1",
             "channel": "x",
             "instrument_id": None,
-            "confirm_points": 3,
-            "stuck_points": 100,
-            "offline_points": 5,
             "sample_interval_ms": 1000.0,
             "level1_upper": 30.0,
             "level2_upper": 20.0,
@@ -443,7 +433,6 @@ def test_existing_daq_alert_is_not_refreshed_after_worker_restart(
                 "sensor_no_lower": f"sensor-{channel}",
                 "channel": channel,
                 "instrument_id": instrument_id,
-                "offline_points": 5,
                 "sample_interval_ms": 1000.0,
                 "last_ts": window_end.replace(second=0),
                 "offline_condition_active": False,
@@ -629,7 +618,6 @@ def _add_offline_channel(
             "sensor_no_lower": sensor_no,
             "channel": channel,
             "instrument_id": instrument_id,
-            "offline_points": 5,
             "sample_interval_ms": 1000.0,
             "last_ts": last_ts,
             "offline_condition_active": False,

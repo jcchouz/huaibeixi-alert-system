@@ -27,7 +27,6 @@ def test_health_and_overview_are_open() -> None:
         cors_origins="http://testserver",
     )
     app = create_app(settings)
-    assert app.state.engine.condition_unit == "seconds"
     assert app.state.engine.confirm_seconds == 3.0
     assert app.state.engine.stuck_seconds == 100.0
     assert app.state.engine.offline_seconds == 5.0

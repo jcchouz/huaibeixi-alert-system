@@ -199,8 +199,6 @@ class HealthObserver(threading.Thread):
         last_scan = parse_datetime(str(last.get("lastAlertScanAt") or ""))
         return {
             "available": self.last_status is not None,
-            "alertLeader": last.get("leader"),
-            "statisticsLeader": last.get("statisticsLeader"),
             "alertCycleDelta": max(0, last_cycles - first_cycles),
             "lastAlertScanAt": last.get("lastAlertScanAt"),
             "observedScans": len(latencies),
@@ -453,10 +451,6 @@ def verify_backend(health: dict[str, Any], args: argparse.Namespace) -> dict[str
         raise StressTestError("health response is missing engine or detection status")
     if not detection.get("running"):
         raise StressTestError("AlertDetectionWorker is not running")
-    if not detection.get("leader"):
-        raise StressTestError("AlertDetectionWorker does not hold the alert leader lock")
-    if not detection.get("statisticsLeader"):
-        raise StressTestError("AlertDetectionWorker does not hold the statistics leader lock")
     switches = engine.get("alertTypeSwitches") or {}
     disabled = [
         alert_type
@@ -476,13 +470,10 @@ def verify_backend(health: dict[str, Any], args: argparse.Namespace) -> dict[str
             raise StressTestError(f"worker reports {field_name}: {detection[field_name]}")
     return {
         "loadedRulesCount": int(engine.get("loadedRulesCount") or 0),
-        "conditionUnit": detection.get("conditionUnit"),
+        "stationCode": engine.get("stationCode"),
         "confirmSeconds": float(detection.get("confirmSeconds") or 0),
         "stuckSeconds": float(detection.get("stuckSeconds") or 0),
         "offlineSeconds": float(detection.get("offlineSeconds") or 0),
-        "confirmPoints": int(detection.get("confirmPoints") or 0),
-        "stuckPoints": int(detection.get("stuckPoints") or 0),
-        "offlinePoints": int(detection.get("offlinePoints") or 0),
         "intervalSeconds": float(detection.get("intervalSeconds") or 1),
         "windowMinutes": int(detection.get("windowMinutes") or 1),
         "lagSeconds": float(detection.get("lagSeconds") or 0),
@@ -492,19 +483,10 @@ def verify_backend(health: dict[str, Any], args: argparse.Namespace) -> dict[str
 def validate_duration(
     args: argparse.Namespace,
     config: dict[str, Any],
-    active_channel_count: int,
 ) -> None:
-    per_channel_rate = args.rows_per_second / active_channel_count
-    if config["conditionUnit"] == "seconds":
-        # Rule refresh runs every few seconds. Keep enough data after the
-        # refresh for both the confirm time and the long stuck-value window.
-        stuck_requirement = config["stuckSeconds"] + 15
-    else:
-        stuck_requirement = (
-            config["stuckPoints"] / per_channel_rate + 2
-            if per_channel_rate > 0
-            else args.duration + 1
-        )
+    # Rule refresh runs every few seconds. Keep enough data after the refresh
+    # for both the confirm time and the long stuck-value window.
+    stuck_requirement = config["stuckSeconds"] + 15
     stats_requirement = (
         config["windowMinutes"] * 60
         + config["lagSeconds"]
@@ -564,20 +546,20 @@ def cleanup_plan(conn: Any, plan: TestPlan, now: datetime) -> dict[str, Any]:
                 )
                 deleted[table] = int(cur.rowcount)
             for table in (
-                "t_detection_channel_state",
                 "t_alert_threshold",
                 "t_sensor_channel",
                 "t_sensor",
                 "t_collect_instrument",
+                "t_collect_box",
             ):
                 cur.execute(
                     f"""
                     DELETE FROM public.{table}
                     WHERE LEFT(LOWER(sensor_no), %s) = %s
                     """
-                    if table not in {"t_collect_instrument"}
+                    if table not in {"t_collect_instrument", "t_collect_box"}
                     else """
-                    DELETE FROM public.t_collect_instrument
+                    DELETE FROM public.""" + table + """
                     WHERE LEFT(LOWER(id), %s) = %s
                     """,
                     (len(plan.prefix), plan.prefix),
@@ -594,18 +576,51 @@ def cleanup_plan(conn: Any, plan: TestPlan, now: datetime) -> dict[str, Any]:
     }
 
 
-def insert_metadata(conn: Any, plan: TestPlan, rows_per_second: int) -> int:
+def insert_metadata(
+    conn: Any,
+    plan: TestPlan,
+    rows_per_second: int,
+    station_code: str,
+) -> int:
     per_channel_rate = rows_per_second / len(plan.active_channels)
     sensor_specs: dict[str, list[ChannelSpec]] = {}
     for spec in plan.all_channels:
         sensor_specs.setdefault(spec.sensor_no, []).append(spec)
 
     with conn.cursor() as cur:
+        box_id = plan.prefix + "box"
+        active_instrument_id = plan.prefix + "active"
+        if len(active_instrument_id) > 32:
+            raise StressTestError("full prefix is too long for the instrument id column")
+        cur.execute(
+            """
+            INSERT INTO public.t_collect_box (id, number, name, station)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (box_id, plan.session_id, "Benchmark Box " + plan.session_id, station_code),
+        )
         cur.execute(
             """
             INSERT INTO public.t_collect_instrument (
-                id, number, name, model, manufacturer, channel_count, create_by
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                id, number, name, model, manufacturer, box_id, channel_count, create_by
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                active_instrument_id,
+                plan.session_id + "-active",
+                "Benchmark Active DAQ " + plan.session_id,
+                "benchmark",
+                "benchmark",
+                box_id,
+                len(plan.active_channels),
+                "stress-test",
+            ),
+        )
+        cur.execute(
+            """
+            INSERT INTO public.t_collect_instrument (
+                id, number, name, model, manufacturer, box_id, channel_count, create_by
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 plan.instrument_id,
@@ -613,6 +628,7 @@ def insert_metadata(conn: Any, plan: TestPlan, rows_per_second: int) -> int:
                 "Benchmark DAQ " + plan.session_id,
                 "benchmark",
                 "benchmark",
+                box_id,
                 len(plan.daq_channels),
                 "stress-test",
             ),
@@ -630,7 +646,7 @@ def insert_metadata(conn: Any, plan: TestPlan, rows_per_second: int) -> int:
                     uuid.uuid4().hex,
                     sensor_no,
                     "benchmark",
-                    plan.instrument_id if is_daq else None,
+                    plan.instrument_id if is_daq else active_instrument_id,
                     "Benchmark " + channels[0].scenario,
                     "benchmark",
                     "benchmark",
@@ -1054,7 +1070,7 @@ def preflight(
 ) -> dict[str, Any]:
     identity = database_identity(conn)
     config = verify_backend(health, args)
-    validate_duration(args, config, len(plan.active_channels))
+    validate_duration(args, config)
     if args.mode != "preflight" and args.confirm_database != identity["database"]:
         raise StressTestError(
             f"--confirm-database must exactly match {identity['database']}"
@@ -1143,7 +1159,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         baseline_rules = int(preflight_result["config"]["loadedRulesCount"])
         expected_rules = baseline_rules + len(plan.all_channels)
         setup_started = database_now(conn)
-        rule_count = insert_metadata(conn, plan, args.rows_per_second)
+        station_code = str(
+            preflight_result["config"].get("stationCode") or ""
+        ).strip()
+        if not station_code:
+            raise StressTestError("worker health response is missing engine.stationCode")
+        rule_count = insert_metadata(
+            conn,
+            plan,
+            args.rows_per_second,
+            station_code,
+        )
         summary["setup"] = {
             "rulesInserted": rule_count,
             "activeChannels": len(plan.active_channels),
@@ -1184,8 +1210,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         worker_summary = {
             **(observer_summary or {}),
             "available": bool(detection),
-            "alertLeader": detection.get("leader"),
-            "statisticsLeader": detection.get("statisticsLeader"),
             "lastAlertScanAt": detection.get("lastAlertScanAt"),
             "lastAlertResult": detection.get("lastAlertResult"),
             "lastStatisticsResult": detection.get("lastResult"),
