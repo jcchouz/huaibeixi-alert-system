@@ -441,12 +441,15 @@ class AlertDetectionWorker:
 
     def _run_alert_loop(self) -> None:
         """参与选主并持续执行实时扫描，直到收到停止信号。"""
+        # 每轮重新确认选主状态；只有持有 advisory lock 的实例执行扫描。
         while not self._stop_event.is_set():
             started = time.monotonic()
             if self._ensure_leader():
                 try:
+                    # 即使当前没有新样本，也要执行扫描以持续推进通道离线判定。
                     self.scan_alerts_once(self._current_time())
                 except Exception as exc:
+                    # 单次扫描失败不终止后台线程，记录异常后在下一轮继续重试。
                     logger.exception("Realtime alert scan failed")
                     with self._state_lock:
                         self._last_alert_error = str(exc)
