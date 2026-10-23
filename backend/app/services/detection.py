@@ -201,6 +201,7 @@ class AlertDetectionWorker:
         重叠产生的重复样本由检索引擎依据原始采样时间去重。
         """
 
+        # 同一实例的实时扫描串行执行，避免并发轮次同时推进扫描水位。
         with self._alert_cycle_lock:
             self._refresh_rules()
             with self._state_lock:
@@ -210,6 +211,7 @@ class AlertDetectionWorker:
             started = time.perf_counter()
             if last_alert_scan_at is None:
                 # 首次启动没有历史水位，只处理一个最小扫描区间，避免读取全部历史。
+                # 扫描完成后立即持久化水位，后续轮次从该位置继续。
                 window_start = current_time - timedelta(
                     seconds=max(
                         self.interval_seconds,
@@ -221,6 +223,7 @@ class AlertDetectionWorker:
                 first_start = window_start
                 raw_points = 0
                 triggered = 0
+                # 区间内没有采样点也必须扫描，确保通道和采集仪离线判定继续推进。
                 result = self.engine.scan_realtime_alerts(
                     window_start,
                     current_time,
@@ -235,6 +238,7 @@ class AlertDetectionWorker:
                     current_time,
                 )
             else:
+                # 已有水位时从上次扫描位置续扫，并叠加回看区间覆盖提交延迟。
                 scan_cursor = last_alert_scan_at
                 # 长时间停机后只追赶允许的最近一段历史，避免启动时长时间阻塞。
                 earliest = current_time - timedelta(
@@ -280,12 +284,14 @@ class AlertDetectionWorker:
                     scan_cursor = chunk_end
                     with self._state_lock:
                         self._last_alert_scan_at = scan_cursor
+                    # 每完成一个分块就提交一次水位，异常后只重试尚未完成的区间。
                     self._persist_worker_watermark(
                         "alert",
                         scan_cursor,
                         scan_cursor,
                     )
 
+            # 汇总本轮实际覆盖范围、处理量和耗时，供运行状态查询使用。
             summary = {
                 "windowStart": serialize_val(first_start),
                 "windowEnd": serialize_val(current_time),
