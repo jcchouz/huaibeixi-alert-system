@@ -190,8 +190,9 @@ class RealtimeCursor:
                 {
                     "s_no": "sensor-1",
                     "ch": "x",
-                    "time": self.window_start,
-                    "value": value,
+                    "sample_cnt": 1,
+                    "sample_times": [self.window_start],
+                    "sample_values": [value],
                 }
             ]
         else:

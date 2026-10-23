@@ -112,13 +112,15 @@ SAMPLE_BATCH_SQL = """
 SELECT
     LOWER(sensor_no) AS s_no,
     COALESCE(channel, '') AS ch,
-    time,
-    value
+    COUNT(*) AS sample_cnt,
+    ARRAY_AGG(time ORDER BY time) AS sample_times,
+    ARRAY_AGG(value::double precision ORDER BY time) AS sample_values
 FROM public.t_monitor
 WHERE time >= %s AND time < %s
   AND value IS NOT NULL
   AND (LOWER(sensor_no), COALESCE(channel, '')) IN ({targets})
-ORDER BY time ASC
+GROUP BY LOWER(sensor_no), COALESCE(channel, '')
+ORDER BY s_no, ch
 """
 
 # 仅执行统计时使用的批量更新插入语句。
@@ -233,6 +235,7 @@ class AlertAnalyticsEngine:
         self._active_alert_cache: Optional[
             Dict[Tuple[str, str, str], Dict[str, Any]]
         ] = None
+        self._sample_query: Optional[Tuple[str, Tuple[Any, ...]]] = None
         self._threshold_rule = ThresholdAlertRule()
         self._out_of_range_rule = OutOfRangeAlertRule()
         self._stuck_rule = StuckAlertRule()
@@ -538,11 +541,28 @@ class AlertAnalyticsEngine:
 
             # 完整构建后一次性替换，避免读取到半加载状态。
             self.channel_states.replace_all(new_states)
+            self._cache_sample_query(new_states.values())
             self.rule_version = load_rule_version(cur)
             self._last_rule_check_monotonic = time.monotonic()
             self.last_reload_time = datetime.now()
             logger.info("Loaded %d threshold rules into memory.", len(new_states))
             return len(new_states)
+
+    def _cache_sample_query(self, rules: Iterable[Dict[str, Any]]) -> None:
+        """Cache the configured channel filter used by realtime scans."""
+        targets = [
+            (rule["sensor_no_lower"], rule.get("channel") or "")
+            for rule in rules
+        ]
+        if not targets:
+            self._sample_query = None
+            return
+        placeholders = ", ".join(["(%s, %s)"] * len(targets))
+        sample_sql = SAMPLE_BATCH_SQL.format(targets=placeholders)
+        params: List[Any] = []
+        for sensor_no, channel in targets:
+            params.extend([sensor_no, channel])
+        self._sample_query = (sample_sql, tuple(params))
 
     def refresh_rules_if_changed(self, force: bool = False) -> bool:
         """Reload threshold rules when the database version changes."""
@@ -1309,28 +1329,27 @@ class AlertAnalyticsEngine:
                 # 未在 t_alert_threshold 中配置的组合会被直接丢弃，
                 # 因此 raw_points_processed 统计的是“读到的行数”，
                 # 不等于参与判定的样本数。
-                targets = [
-                    (rule["sensor_no_lower"], rule.get("channel") or "")
-                    for rule in rules
-                ]
-                if targets:
-                    target_placeholders = ", ".join(
-                        ["(%s, %s)"] * len(targets)
+                sample_query = self._sample_query
+                if sample_query is None and rules:
+                    self._cache_sample_query(rules)
+                    sample_query = self._sample_query
+                if sample_query is not None:
+                    sample_sql, sample_params_tail = sample_query
+                    cur.execute(
+                        sample_sql,
+                        (window_start, window_end, *sample_params_tail),
                     )
-                    sample_sql = SAMPLE_BATCH_SQL.format(
-                        targets=target_placeholders
-                    )
-                    sample_params: List[Any] = [window_start, window_end]
-                    for sensor_no, channel in targets:
-                        sample_params.extend([sensor_no, channel])
-                    cur.execute(sample_sql, tuple(sample_params))
                     for row in cur.fetchall():
-                        raw_points_processed += 1
+                        raw_points_processed += int(row["sample_cnt"] or 0)
                         key = self.make_key(row["s_no"], row["ch"])
                         if key not in rules_by_key:
                             continue
-                        samples_by_key.setdefault(key, []).append(
-                            (row["time"], float(row["value"]))
+                        samples_by_key[key] = list(
+                            zip(
+                                row["sample_times"],
+                                row["sample_values"],
+                                strict=True,
+                            )
                         )
                 if new_samples_only:
                     # 回看查询可能返回旧数据，丢弃各通道水位之前或同一时刻的样本。
