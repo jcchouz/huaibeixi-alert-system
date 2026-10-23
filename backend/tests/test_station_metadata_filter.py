@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Any
 
 import app.domain.engine as engine_module
@@ -20,7 +21,9 @@ class MetadataCursor:
         normalized = " ".join(sql.split())
         self.statements.append((normalized, params or ()))
 
-        if normalized.startswith("SELECT number FROM t_station"):
+        if normalized.startswith("SELECT LOCALTIMESTAMP"):
+            self.result = [{"now": datetime(2026, 10, 23, 12, 0, 0)}]
+        elif normalized.startswith("SELECT number FROM t_station"):
             self.result = [{"number": "YHZ"}]
         elif normalized.startswith("SELECT ci.id"):
             self.result = [

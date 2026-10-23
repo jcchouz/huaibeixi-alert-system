@@ -5,6 +5,9 @@ The tool creates isolated sensors, thresholds, and monitor samples under a
 test-only prefix in ``t_monitor``. Detection is performed by the already
 running ``AlertDetectionWorker``; this process never calls the detection engine.
 
+Synthetic write mode is disabled. Only preflight and cleanup of historical
+``benchall-*`` data remain available.
+
 Covered scenarios:
   * threshold levels 1, 2, and 3
   * sensor stuck value
@@ -1152,6 +1155,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             summary["cleanup"] = cleanup
             print_summary(summary)
             return 0 if cleanup["totalDeleted"] >= 0 else 1
+
+        raise StressTestError(
+            "synthetic sensor load testing is disabled; use existing real sensors "
+            "from t_sensor and t_alert_threshold"
+        )
 
         if preflight_result["recentPrefixMonitorRows"] or preflight_result["recentPrefixAlertRows"]:
             raise StressTestError("exact prefix already has recent monitor or alert rows")

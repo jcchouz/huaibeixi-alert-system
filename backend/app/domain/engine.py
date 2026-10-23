@@ -336,6 +336,8 @@ class AlertAnalyticsEngine:
     def reload_thresholds(self) -> int:
         """热更新规则和元数据，并保留现有运行状态。"""
         with get_db_cursor() as cur:
+            cur.execute("SELECT LOCALTIMESTAMP AS now")
+            runtime_now = cur.fetchone()["now"]
             # 1. 加载采集仪与站点映射。
             station_code = self._resolve_station_code(cur)
             self.station_code = station_code
@@ -492,6 +494,7 @@ class AlertAnalyticsEngine:
                         "offline_seconds": offline_seconds,                     # 离线连续确认时长（秒）
                         "offline_timeout_ms": offline_timeout_ms,               # 离线超时阈值（毫秒）
                         "online_status": "ONLINE",                              # 初始在线状态
+                        "last_ts": self._serialize_runtime_dt(runtime_now),     # 新规则的离线判断起点
                         "threshold_streak_count": 0,                            # 阈值连续命中计数
                         "threshold_streak_started_at": None,                    # 阈值连续命中开始时间
                         "threshold_condition_active": False,                    # 阈值预警条件是否已触发

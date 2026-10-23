@@ -8,6 +8,9 @@ so the benchmark does not modify ``public.t_alert_threshold``.
 Every generated sensor starts with ``bench10k-`` by default. Rows using that
 prefix are removed from monitor, alert, and statistics tables before the run
 and again after the run unless ``--keep-data`` is supplied.
+
+Synthetic write mode is disabled. Only cleanup of historical ``bench10k-``
+data remains available.
 """
 
 from __future__ import annotations
@@ -714,6 +717,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
             )
             return 0 if cleanup["totalRemaining"] == 0 else 1
+
+        raise BenchmarkError(
+            "synthetic sensor benchmarking is disabled; use existing real sensors "
+            "from t_sensor and t_alert_threshold"
+        )
 
         channels = build_channel_specs(prefix, args.sensors, args.channels)
         plan = build_rate_plan(
