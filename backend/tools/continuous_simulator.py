@@ -3,12 +3,12 @@
 
 采样频率从 ``t_sensor.frequency`` 读取。
 
-包含的预警场景：
-  * 阈值超限：sensor-01/channel-a
-  * 传感器死值：wy-sj-01/x
-  * 超物理量程：wprs-01
-  * 传感器离线：zd-wg-01/x
-  * 采集仪离线：加速度采集仪下全部通道（accl-01 ~ accl-04）
+包含的预警场景均由 ``t_alert_threshold`` 中当前存在的真实通道动态生成：
+  * 阈值超限
+  * 传感器死值
+  * 超物理量程
+  * 传感器离线
+  * 采集仪离线
 """
 
 from __future__ import annotations
@@ -19,7 +19,8 @@ import signal
 import sys
 import time
 import zlib
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -34,12 +35,14 @@ if str(BACKEND_DIR) not in sys.path:
 from app.config import DSN
 
 ACCELERATION_SENSOR_PREFIXES = ("accl-", "zd-wg-", "zd-cg-")
-OFFLINE_CHANNELS = {("zd-wg-01", "x")}
-# 采集仪离线需该采集仪下全部通道同时离线，因此整台加速度采集仪都停止上报。
-DAQ_OFFLINE_SENSORS = {"accl-01", "accl-02", "accl-03", "accl-04"}
-THRESHOLD_CHANNELS = {("sensor-01", "channel-a")}
-STUCK_CHANNELS = {("wy-sj-01", "x")}
-OOR_CHANNELS = {("wprs-01", "")}
+OFFLINE_SCENARIOS = {"sensor_offline", "daq_offline"}
+SCENARIO_ORDER = {
+    "threshold": 0,
+    "stuck": 1,
+    "oor": 2,
+    "sensor_offline": 3,
+    "daq_offline": 4,
+}
 
 
 @dataclass(frozen=True)
@@ -48,12 +51,157 @@ class ChannelPlan:
 
     sensor_no: str
     channel: str
+    instrument_id: str
     sample_rate: float
     is_acceleration: bool
     scenario: str
     base_value: float
     amplitude: float
     phase: float
+    level3_lower: float | None
+    level3_upper: float | None
+    range_min: float | None
+    range_max: float | None
+
+
+def plan_key(plan: ChannelPlan) -> tuple[str, str]:
+    """返回用于匹配阈值规则的通道键。"""
+    return plan.sensor_no.strip().lower(), plan.channel.strip()
+
+
+def threshold_target(plan: ChannelPlan) -> tuple[float, float] | None:
+    """生成位于三级阈值外、物理量程内的波形中心和振幅。"""
+    candidates: list[tuple[float, float]] = []
+
+    if plan.level3_upper is not None:
+        upper = plan.level3_upper
+        boundary = plan.range_max
+        if boundary is not None and math.isfinite(boundary):
+            span = boundary - upper
+        else:
+            span = max(abs(upper) * 0.1, 1.0)
+        if span > 0:
+            candidates.append((upper + span * 0.5, span * 0.15))
+
+    if plan.level3_lower is not None:
+        lower = plan.level3_lower
+        boundary = plan.range_min
+        if boundary is not None and math.isfinite(boundary):
+            span = lower - boundary
+        else:
+            span = max(abs(lower) * 0.1, 1.0)
+        if span > 0:
+            candidates.append((lower - span * 0.5, span * 0.15))
+
+    if not candidates:
+        return None
+    return candidates[0]
+
+
+def out_of_range_target(plan: ChannelPlan) -> tuple[float, float] | None:
+    """生成物理量程外的波形中心和振幅。"""
+    minimum = plan.range_min
+    maximum = plan.range_max
+    if maximum is not None and math.isfinite(maximum):
+        span = abs(maximum - minimum) if minimum is not None else abs(maximum)
+        margin = max(span * 0.02, abs(maximum) * 1e-6, 0.01)
+        return maximum + margin * 2.0, margin
+    if minimum is not None and math.isfinite(minimum):
+        span = abs(maximum - minimum) if maximum is not None else abs(minimum)
+        margin = max(span * 0.02, abs(minimum) * 1e-6, 0.01)
+        return minimum - margin * 2.0, margin
+    return None
+
+
+def assign_alert_scenarios(plans: list[ChannelPlan]) -> list[ChannelPlan]:
+    """从真实阈值通道中选择互不重叠的五类预警通道。"""
+    assigned = list(plans)
+    used: set[tuple[str, str]] = set()
+    by_instrument: dict[str, list[int]] = defaultdict(list)
+    for index, plan in enumerate(assigned):
+        if plan.instrument_id:
+            by_instrument[plan.instrument_id].append(index)
+
+    # 优先选择通道数最少的多通道采集仪，用它验证整台采集仪离线。
+    daq_candidates = [
+        (instrument_id, indexes)
+        for instrument_id, indexes in by_instrument.items()
+        if len(indexes) >= 2
+    ]
+    daq_instrument = ""
+    if daq_candidates:
+        daq_instrument, daq_indexes = min(
+            daq_candidates,
+            key=lambda item: (len(item[1]), item[0]),
+        )
+        for index in daq_indexes:
+            assigned[index] = replace(assigned[index], scenario="daq_offline")
+            used.add(plan_key(assigned[index]))
+
+    # 传感器离线只停写一个通道，并确保同一采集仪还有其他通道持续上报。
+    offline_candidates = [
+        (instrument_id, indexes)
+        for instrument_id, indexes in by_instrument.items()
+        if instrument_id != daq_instrument and len(indexes) >= 2
+    ]
+    if offline_candidates:
+        _, offline_indexes = min(
+            offline_candidates,
+            key=lambda item: (-len(item[1]), item[0]),
+        )
+        index = min(
+            offline_indexes,
+            key=lambda item: plan_key(assigned[item]),
+        )
+        assigned[index] = replace(assigned[index], scenario="sensor_offline")
+        used.add(plan_key(assigned[index]))
+
+    def first_available(
+        predicate: Any,
+    ) -> int | None:
+        candidates = [
+            index
+            for index, plan in enumerate(assigned)
+            if plan_key(plan) not in used and predicate(plan)
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda item: plan_key(assigned[item]))
+
+    threshold_index = first_available(lambda plan: threshold_target(plan) is not None)
+    if threshold_index is not None:
+        plan = assigned[threshold_index]
+        target = threshold_target(plan)
+        if target is not None:
+            base_value, amplitude = target
+            assigned[threshold_index] = replace(
+                plan,
+                scenario="threshold",
+                base_value=base_value,
+                amplitude=amplitude,
+            )
+            used.add(plan_key(plan))
+
+    oor_index = first_available(lambda plan: out_of_range_target(plan) is not None)
+    if oor_index is not None:
+        plan = assigned[oor_index]
+        target = out_of_range_target(plan)
+        if target is not None:
+            base_value, amplitude = target
+            assigned[oor_index] = replace(
+                plan,
+                scenario="oor",
+                base_value=base_value,
+                amplitude=amplitude,
+            )
+            used.add(plan_key(plan))
+
+    stuck_index = first_available(lambda _plan: True)
+    if stuck_index is not None:
+        plan = assigned[stuck_index]
+        assigned[stuck_index] = replace(plan, scenario="stuck", amplitude=0.0)
+
+    return assigned
 
 
 def load_channel_plans() -> list[ChannelPlan]:
@@ -61,7 +209,8 @@ def load_channel_plans() -> list[ChannelPlan]:
     query = """
         SELECT t.sensor_no, COALESCE(t.channel, '') AS channel,
                t.physical_quantity, t.level3_lower, t.level3_upper,
-               t.range_min, t.range_max, s.name AS sensor_name, s.frequency
+               t.range_min, t.range_max, s.name AS sensor_name, s.frequency,
+               s.instrument_id
         FROM public.t_alert_threshold t
         LEFT JOIN public.t_sensor s
           ON LOWER(s.sensor_no) = LOWER(t.sensor_no)
@@ -74,10 +223,20 @@ def load_channel_plans() -> list[ChannelPlan]:
 
     # 将数据库元数据转换为波形参数和预警场景配置。
     plans: list[ChannelPlan] = []
-    for sensor_no, channel, quantity, level3_lower, level3_upper, range_min, range_max, sensor_name, frequency in rows:
+    for (
+        sensor_no,
+        channel,
+        quantity,
+        level3_lower,
+        level3_upper,
+        range_min,
+        range_max,
+        sensor_name,
+        frequency,
+        instrument_id,
+    ) in rows:
         sensor_key = str(sensor_no).strip().lower()
         channel_key = str(channel or "").strip()
-        key = (sensor_key, channel_key)
         sensor_text = f"{sensor_no} {sensor_name or ''}".lower()
         is_acceleration = (
             "加速度" in str(quantity or "")
@@ -111,45 +270,30 @@ def load_channel_plans() -> list[ChannelPlan]:
             base_value = 0.0
             amplitude = 0.05
 
-        # 为指定测试通道选择固定的预警场景。
-        scenario = "normal"
-        if key in THRESHOLD_CHANNELS:
-            scenario = "threshold"
-            base_value = float(level3_upper or 10.0) * 1.35
-            amplitude = 0.2
-        elif key in STUCK_CHANNELS:
-            scenario = "stuck"
-            base_value = min(max(base_value, -1.0), 1.0)
-            amplitude = 0.0
-        elif key in OOR_CHANNELS:
-            scenario = "oor"
-            minimum = float(range_min) if range_min is not None else -1.0
-            maximum = float(range_max) if range_max is not None else 1.0
-            base_value = maximum + max(1.0, abs(maximum - minimum) * 0.25)
-            amplitude = 0.2
-
         phase = (zlib.crc32(f"{sensor_key}:{channel_key}".encode("utf-8")) % 360) * math.pi / 180.0
         plans.append(
             ChannelPlan(
                 sensor_no=str(sensor_no),
                 channel=channel_key,
+                instrument_id=str(instrument_id or "").strip(),
                 sample_rate=sample_rate,
                 is_acceleration=is_acceleration,
-                scenario=scenario,
+                scenario="normal",
                 base_value=base_value,
                 amplitude=amplitude,
                 phase=phase,
+                level3_lower=lower,
+                level3_upper=upper,
+                range_min=float(range_min) if range_min is not None else None,
+                range_max=float(range_max) if range_max is not None else None,
             )
         )
-    return plans
+    return assign_alert_scenarios(plans)
 
 
 def should_skip(plan: ChannelPlan) -> bool:
     """跳过用于模拟传感器或采集仪离线的通道。"""
-    key = (plan.sensor_no.lower(), plan.channel)
-    if key in OFFLINE_CHANNELS:
-        return True
-    return plan.sensor_no.lower() in DAQ_OFFLINE_SENSORS
+    return plan.scenario in OFFLINE_SCENARIOS
 
 
 def channel_value(plan: ChannelPlan, elapsed_seconds: float) -> float:
@@ -157,9 +301,8 @@ def channel_value(plan: ChannelPlan, elapsed_seconds: float) -> float:
     if plan.scenario == "stuck":
         return plan.base_value
     t = elapsed_seconds
-    wave = (
-        math.sin(plan.phase + t * 2.0 * math.pi * 0.8)
-        + 0.35 * math.sin(plan.phase * 0.7 + t * 2.0 * math.pi * 3.2)
+    wave = math.sin(plan.phase + t * 2.0 * math.pi * 0.8) + 0.35 * math.sin(
+        plan.phase * 0.7 + t * 2.0 * math.pi * 3.2
     )
     return plan.base_value + plan.amplitude * wave
 
@@ -233,6 +376,19 @@ def main() -> int:
         "[simulator] active alert scenarios: threshold, stuck, OOR, sensor offline, DAQ offline",
         flush=True,
     )
+    scenario_plans = sorted(
+        (plan for plan in plans if plan.scenario != "normal"),
+        key=lambda plan: (SCENARIO_ORDER.get(plan.scenario, 99), plan_key(plan)),
+    )
+    if scenario_plans:
+        print(
+            "[simulator] scenario channels: "
+            + ", ".join(
+                f"{plan.scenario}={plan.sensor_no}/{plan.channel or '(default)'}"
+                for plan in scenario_plans
+            ),
+            flush=True,
+        )
     if skipped_plans:
         print(
             "[simulator] skipped channels: "
