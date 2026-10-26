@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import threading
-import time
 from datetime import datetime, timedelta
 
 from app.core.config import Settings
@@ -209,55 +208,6 @@ def test_alert_scan_windows_reuse_a_short_overlap() -> None:
         (datetime(2026, 10, 20, 15, 42, 30), datetime(2026, 10, 20, 15, 42, 31)),
         (datetime(2026, 10, 20, 15, 42, 31), datetime(2026, 10, 20, 15, 42, 32)),
     ]
-
-
-def test_alert_scans_are_serialized_before_advancing_cursor(monkeypatch) -> None:
-    engine = FakeEngine()
-    worker = make_worker(engine)
-    worker.initialize(datetime(2026, 10, 20, 15, 42, 30))
-    worker.alert_overlap_seconds = 0
-    entered = threading.Event()
-    release = threading.Event()
-    original_scan = engine.scan_realtime_alerts
-    active_scans = 0
-    max_active_scans = 0
-
-    def blocking_scan(window_start: datetime, window_end: datetime) -> dict:
-        nonlocal active_scans, max_active_scans
-        active_scans += 1
-        max_active_scans = max(max_active_scans, active_scans)
-        entered.set()
-        try:
-            assert release.wait(2)
-            return original_scan(window_start, window_end)
-        finally:
-            active_scans -= 1
-
-    monkeypatch.setattr(engine, "scan_realtime_alerts", blocking_scan)
-
-    first = threading.Thread(
-        target=worker.scan_alerts_once,
-        args=(datetime(2026, 10, 20, 15, 42, 31),),
-    )
-    second = threading.Thread(
-        target=worker.scan_alerts_once,
-        args=(datetime(2026, 10, 20, 15, 42, 32),),
-    )
-    first.start()
-    assert entered.wait(1)
-    second.start()
-    time.sleep(0.05)
-    assert second.is_alive()
-
-    release.set()
-    first.join(timeout=2)
-    second.join(timeout=2)
-
-    assert not first.is_alive()
-    assert not second.is_alive()
-    assert max_active_scans == 1
-    assert engine.alert_scans
-    assert all(start < end for start, end in engine.alert_scans)
 
 
 def test_worker_starts_separate_realtime_and_statistics_threads(monkeypatch) -> None:

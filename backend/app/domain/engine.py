@@ -6,7 +6,6 @@
 
 import logging
 import re
-import threading
 import time
 import uuid
 from collections import Counter
@@ -43,28 +42,6 @@ from app.domain.alert_types import (
 from app.infrastructure.database import get_db_cursor
 
 logger = logging.getLogger("alert_analysis.engine")
-
-RUNTIME_STATE_FIELDS: Tuple[str, ...] = (
-    "last_ts",
-    "last_val",
-    "online_status",
-    "threshold_streak_count",
-    "threshold_streak_started_at",
-    "threshold_last_level",
-    "threshold_last_value",
-    "threshold_last_limit",
-    "oor_streak_count",
-    "oor_streak_started_at",
-    "oor_last_value",
-    "stuck_streak_count",
-    "stuck_last_value",
-    "stuck_since",
-    "threshold_condition_active",
-    "threshold_condition_level",
-    "oor_condition_active",
-    "stuck_condition_active",
-    "offline_condition_active",
-)
 
 # 在数据库内一次性聚合一个 t_monitor 窗口。
 #   s_no / ch            -> 分组键，传感器编号统一转小写
@@ -124,59 +101,6 @@ DO UPDATE SET
     sample_count = EXCLUDED.sample_count
 """
 
-class ConcurrentDict:
-    """线程安全的通道规则和运行状态字典。"""
-
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self._data: Dict[str, Dict[str, Any]] = {}
-
-    def get(self, key: str, default: Any = None) -> Any:
-        """返回副本，避免调用方直接修改共享状态。"""
-        with self._lock:
-            val = self._data.get(key, default)
-            return dict(val) if isinstance(val, dict) else val
-
-    def set(self, key: str, value: Dict[str, Any]) -> None:
-        """替换一个通道状态。"""
-        with self._lock:
-            self._data[key] = value
-
-    def update_field(self, key: str, **kwargs: Any) -> None:
-        """更新指定通道的部分运行字段。"""
-        with self._lock:
-            if key in self._data:
-                self._data[key].update(kwargs)
-
-    def replace_all(self, new_map: Dict[str, Dict[str, Any]]) -> None:
-        """替换元数据，同时保留仍在使用的连续命中状态。"""
-        with self._lock:
-            # 已存在的运行状态字段优先保留。
-            merged: Dict[str, Dict[str, Any]] = {}
-            for k, v in new_map.items():
-                old = self._data.get(k)
-                if old:
-                    for rt_field in RUNTIME_STATE_FIELDS:
-                        if rt_field in old:
-                            v[rt_field] = old[rt_field]
-                merged[k] = v
-            self._data = merged
-
-    def values(self) -> List[Dict[str, Any]]:
-        """返回全部通道状态的快照。"""
-        with self._lock:
-            return [dict(v) for v in self._data.values()]
-
-    def items(self) -> List[Tuple[str, Dict[str, Any]]]:
-        """返回全部键和状态的快照。"""
-        with self._lock:
-            return [(k, dict(v)) for k, v in self._data.items()]
-
-    def __len__(self) -> int:
-        with self._lock:
-            return len(self._data)
-
-
 class AlertAnalyticsEngine:
     """从原始样本检测预警，并持久化完整统计窗口。"""
 
@@ -191,7 +115,8 @@ class AlertAnalyticsEngine:
         channel_rules: Optional[Iterable[AlertRule]] = None,
     ) -> None:
         # 检测、接口补充信息和总览统计共用这些元数据。
-        self.channel_states = ConcurrentDict()
+        # 单实例启动后只有实时预警线程写运行状态，其余线程只读。
+        self.channel_states: Dict[str, Dict[str, Any]] = {}
         self.sensor_meta: Dict[str, Dict[str, Any]] = {}
         self.instrument_meta: Dict[str, Dict[str, Any]] = {}
         self._daq_condition_active: Dict[str, bool] = {}
@@ -209,8 +134,6 @@ class AlertAnalyticsEngine:
             (normalize_alert_type(name) or name): bool(enabled)
             for name, enabled in (alert_type_switches or {}).items()
         }
-        self._alert_step_lock = threading.Lock()
-        self._statistics_step_lock = threading.Lock()
         self._active_alert_cache: Optional[
             Dict[Tuple[str, str, str], Dict[str, Any]]
         ] = None
@@ -262,8 +185,7 @@ class AlertAnalyticsEngine:
             closed = int(cur.rowcount or 0)
 
         for rule in self.channel_states.values():
-            self.channel_states.update_field(
-                rule["key"],
+            rule.update(
                 last_ts=self._serialize_runtime_dt(started_at),
                 last_val=None,
                 online_status="ONLINE",
@@ -342,9 +264,6 @@ class AlertAnalyticsEngine:
             # 1. 加载采集仪与站点映射。
             station_code = self._resolve_station_code(cur)
             self.station_code = station_code
-            previous_states = {
-                rule["key"]: rule for rule in self.channel_states.values()
-            }
             cur.execute(
                 """
                 SELECT ci.id, ci.number, ci.name, ci.model, ci.manufacturer, ci.box_id,
@@ -533,15 +452,10 @@ class AlertAnalyticsEngine:
                         "offline_condition_active": False,                      # 离线预警条件是否已触发
                     }
                 )
-                previous = previous_states.get(key)
-                if previous:
-                    for runtime_field in RUNTIME_STATE_FIELDS:
-                        if runtime_field in previous:
-                            d[runtime_field] = previous[runtime_field]
                 new_states[key] = d
 
-            # 完整构建后一次性替换，避免读取到半加载状态。
-            self.channel_states.replace_all(new_states)
+            # 规则只在进程启动时加载一次。
+            self.channel_states = new_states
             self._cache_sample_query(new_states.values())
             self.last_rule_load_time = datetime.now()
             logger.info("Loaded %d threshold rules into memory.", len(new_states))
@@ -1406,7 +1320,7 @@ class AlertAnalyticsEngine:
                     daq_condition_updates[instrument_id] = True
 
         for key, updates in pending_state_updates.items():
-            self.channel_states.update_field(key, **updates)
+            self.channel_states[key].update(updates)
         self._daq_condition_active.update(daq_condition_updates)
         self._daq_state_known.update(daq_condition_updates)
         self._active_alert_cache = {
@@ -1490,19 +1404,17 @@ class AlertAnalyticsEngine:
         window_end: datetime,
     ) -> Dict[str, Any]:
         """只对新到达的原始样本执行实时预警检测。"""
-        with self._alert_step_lock:
-            t0 = time.perf_counter()
-            if window_end <= window_start:
-                raise ValueError("window_end must be later than window_start")
-            result = self._scan_realtime_alerts(
-                window_start,
-                window_end,
-            )
-            return {
-                **result,
-                "subWindowCount": 1,
-                "elapsedMs": round((time.perf_counter() - t0) * 1000, 2),
-            }
+        t0 = time.perf_counter()
+        if window_end <= window_start:
+            raise ValueError("window_end must be later than window_start")
+        result = self._scan_realtime_alerts(
+            window_start,
+            window_end,
+        )
+        return {
+            **result,
+            "elapsedMs": round((time.perf_counter() - t0) * 1000, 2),
+        }
 
     def record_statistics_window(
         self,
@@ -1511,20 +1423,18 @@ class AlertAnalyticsEngine:
         period_type: str = "1m",
     ) -> Dict[str, Any]:
         """只持久化一个完整统计窗口，不执行预警检测。"""
-        with self._statistics_step_lock:
-            t0 = time.perf_counter()
-            if window_end <= window_start:
-                raise ValueError("window_end must be later than window_start")
-            result = self._record_statistics_window(
-                window_start,
-                window_end,
-                period_type,
-            )
-            return {
-                **result,
-                "subWindowCount": 1,
-                "elapsedMs": round((time.perf_counter() - t0) * 1000, 2),
-            }
+        t0 = time.perf_counter()
+        if window_end <= window_start:
+            raise ValueError("window_end must be later than window_start")
+        result = self._record_statistics_window(
+            window_start,
+            window_end,
+            period_type,
+        )
+        return {
+            **result,
+            "elapsedMs": round((time.perf_counter() - t0) * 1000, 2),
+        }
 
     def get_status(self) -> Dict[str, Any]:
         """返回引擎计数和连续命中秒数配置。"""

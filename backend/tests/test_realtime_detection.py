@@ -48,7 +48,6 @@ def test_realtime_scan_uses_alert_only_path(monkeypatch) -> None:
 
     assert captured["window_start"] == datetime(2026, 10, 20, 12, 0, 1)
     assert result["triggeredAlertsCount"] == 1
-    assert result["subWindowCount"] == 1
 
 
 def test_statistics_window_skips_alert_detection(monkeypatch) -> None:
@@ -89,14 +88,12 @@ def test_statistics_window_skips_alert_detection(monkeypatch) -> None:
 def test_statistics_batch_supplies_create_by_and_create_time(monkeypatch) -> None:
     engine = AlertAnalyticsEngine()
     key = engine.make_key("sensor-1", "x")
-    engine.channel_states.set(
-        key,
-        {
-            "key": key,
-            "sensor_no_lower": "sensor-1",
-            "channel": "x",
-        },
-    )
+    engine.channel_states[key] = {
+        "key": key,
+        "sensor_no_lower": "sensor-1",
+        "channel": "x",
+    }
+
     class StatisticsCursor:
         def __init__(self) -> None:
             self.rows: list[dict[str, Any]] = []
@@ -219,33 +216,30 @@ def test_realtime_threshold_streak_continues_across_one_second_scans(
 ) -> None:
     engine = AlertAnalyticsEngine()
     key = engine.make_key("sensor-1", "x")
-    engine.channel_states.set(
-        key,
-        {
-            "id": "threshold-1",
-            "key": key,
-            "sensor_no_lower": "sensor-1",
-            "channel": "x",
-            "instrument_id": None,
-            "sample_interval_ms": 1000.0,
-            "level1_upper": 30.0,
-            "level2_upper": 20.0,
-            "level3_upper": 10.0,
-            "level1_lower": None,
-            "level2_lower": None,
-            "level3_lower": None,
-            "physical_min": -100.0,
-            "physical_max": 100.0,
-            "threshold_streak_count": 0,
-            "threshold_condition_active": False,
-            "threshold_condition_level": None,
-            "oor_streak_count": 0,
-            "oor_condition_active": False,
-            "stuck_streak_count": 0,
-            "stuck_condition_active": False,
-            "offline_condition_active": False,
-        },
-    )
+    engine.channel_states[key] = {
+        "id": "threshold-1",
+        "key": key,
+        "sensor_no_lower": "sensor-1",
+        "channel": "x",
+        "instrument_id": None,
+        "sample_interval_ms": 1000.0,
+        "level1_upper": 30.0,
+        "level2_upper": 20.0,
+        "level3_upper": 10.0,
+        "level1_lower": None,
+        "level2_lower": None,
+        "level3_lower": None,
+        "physical_min": -100.0,
+        "physical_max": 100.0,
+        "threshold_streak_count": 0,
+        "threshold_condition_active": False,
+        "threshold_condition_level": None,
+        "oor_streak_count": 0,
+        "oor_condition_active": False,
+        "stuck_streak_count": 0,
+        "stuck_condition_active": False,
+        "offline_condition_active": False,
+    }
     cursor = RealtimeCursor()
 
     @contextmanager
@@ -280,21 +274,18 @@ def test_no_data_still_alerts_offline_once_per_unrecovered_incident(
 ) -> None:
     engine = AlertAnalyticsEngine()
     key = engine.make_key("sensor-1", "x")
-    engine.channel_states.set(
-        key,
-        {
-            "key": key,
-            "sensor_no_lower": "sensor-1",
-            "channel": "x",
-            "instrument_id": None,
-            "sample_interval_ms": 1000.0,
-            "last_ts": "2026-10-20 11:59:50",
-            "threshold_condition_active": False,
-            "threshold_condition_level": None,
-            "oor_condition_active": False,
-            "stuck_condition_active": False,
-        },
-    )
+    engine.channel_states[key] = {
+        "key": key,
+        "sensor_no_lower": "sensor-1",
+        "channel": "x",
+        "instrument_id": None,
+        "sample_interval_ms": 1000.0,
+        "last_ts": "2026-10-20 11:59:50",
+        "threshold_condition_active": False,
+        "threshold_condition_level": None,
+        "oor_condition_active": False,
+        "stuck_condition_active": False,
+    }
     cursor = EmptyRealtimeCursor()
 
     @contextmanager
@@ -324,33 +315,30 @@ def test_overlap_window_does_not_replay_an_already_processed_sample(
     engine = AlertAnalyticsEngine()
     key = engine.make_key("sensor-1", "x")
     previous_sample_time = datetime(2026, 10, 20, 11, 59, 59)
-    engine.channel_states.set(
-        key,
-        {
-            "key": key,
-            "sensor_no_lower": "sensor-1",
-            "channel": "x",
-            "instrument_id": None,
-            "sample_interval_ms": 1000.0,
-            "level1_upper": 30.0,
-            "level2_upper": 20.0,
-            "level3_upper": 10.0,
-            "level1_lower": None,
-            "level2_lower": None,
-            "level3_lower": None,
-            "physical_min": -100.0,
-            "physical_max": 100.0,
-            "last_ts": previous_sample_time,
-            "threshold_streak_count": 0,
-            "threshold_condition_active": False,
-            "threshold_condition_level": None,
-            "oor_streak_count": 0,
-            "oor_condition_active": False,
-            "stuck_streak_count": 0,
-            "stuck_condition_active": False,
-            "offline_condition_active": False,
-        },
-    )
+    engine.channel_states[key] = {
+        "key": key,
+        "sensor_no_lower": "sensor-1",
+        "channel": "x",
+        "instrument_id": None,
+        "sample_interval_ms": 1000.0,
+        "level1_upper": 30.0,
+        "level2_upper": 20.0,
+        "level3_upper": 10.0,
+        "level1_lower": None,
+        "level2_lower": None,
+        "level3_lower": None,
+        "physical_min": -100.0,
+        "physical_max": 100.0,
+        "last_ts": previous_sample_time,
+        "threshold_streak_count": 0,
+        "threshold_condition_active": False,
+        "threshold_condition_level": None,
+        "oor_streak_count": 0,
+        "oor_condition_active": False,
+        "stuck_streak_count": 0,
+        "stuck_condition_active": False,
+        "offline_condition_active": False,
+    }
     cursor = RealtimeCursor()
 
     @contextmanager
@@ -380,33 +368,30 @@ def test_scan_does_not_advance_channel_state_when_commit_fails(
 ) -> None:
     engine = AlertAnalyticsEngine()
     key = engine.make_key("sensor-1", "x")
-    engine.channel_states.set(
-        key,
-        {
-            "key": key,
-            "sensor_no_lower": "sensor-1",
-            "channel": "x",
-            "instrument_id": None,
-            "sample_interval_ms": 1000.0,
-            "level1_upper": 30.0,
-            "level2_upper": 20.0,
-            "level3_upper": 10.0,
-            "level1_lower": None,
-            "level2_lower": None,
-            "level3_lower": None,
-            "physical_min": -100.0,
-            "physical_max": 100.0,
-            "last_ts": None,
-            "threshold_streak_count": 0,
-            "threshold_condition_active": False,
-            "threshold_condition_level": None,
-            "oor_streak_count": 0,
-            "oor_condition_active": False,
-            "stuck_streak_count": 0,
-            "stuck_condition_active": False,
-            "offline_condition_active": False,
-        },
-    )
+    engine.channel_states[key] = {
+        "key": key,
+        "sensor_no_lower": "sensor-1",
+        "channel": "x",
+        "instrument_id": None,
+        "sample_interval_ms": 1000.0,
+        "level1_upper": 30.0,
+        "level2_upper": 20.0,
+        "level3_upper": 10.0,
+        "level1_lower": None,
+        "level2_lower": None,
+        "level3_lower": None,
+        "physical_min": -100.0,
+        "physical_max": 100.0,
+        "last_ts": None,
+        "threshold_streak_count": 0,
+        "threshold_condition_active": False,
+        "threshold_condition_level": None,
+        "oor_streak_count": 0,
+        "oor_condition_active": False,
+        "stuck_streak_count": 0,
+        "stuck_condition_active": False,
+        "offline_condition_active": False,
+    }
     cursor = RealtimeCursor()
 
     @contextmanager
@@ -431,18 +416,15 @@ def test_existing_daq_alert_is_not_refreshed_after_worker_restart(
     window_end = datetime(2026, 10, 20, 12, 0, 10)
     for channel in ("x", "y"):
         key = engine.make_key(f"sensor-{channel}", channel)
-        engine.channel_states.set(
-            key,
-            {
-                "key": key,
-                "sensor_no_lower": f"sensor-{channel}",
-                "channel": channel,
-                "instrument_id": instrument_id,
-                "sample_interval_ms": 1000.0,
-                "last_ts": window_end.replace(second=0),
-                "offline_condition_active": False,
-            },
-        )
+        engine.channel_states[key] = {
+            "key": key,
+            "sensor_no_lower": f"sensor-{channel}",
+            "channel": channel,
+            "instrument_id": instrument_id,
+            "sample_interval_ms": 1000.0,
+            "last_ts": window_end.replace(second=0),
+            "offline_condition_active": False,
+        }
 
     active_daq = {
         "id": "daq-alert",
@@ -544,14 +526,11 @@ def test_statistics_window_uses_one_batch_upsert(monkeypatch) -> None:
     window_end = datetime(2026, 10, 20, 12, 1)
     for sensor_no, channel in (("sensor-1", "x"), ("sensor-2", "y")):
         key = engine.make_key(sensor_no, channel)
-        engine.channel_states.set(
-            key,
-            {
-                "key": key,
-                "sensor_no_lower": sensor_no,
-                "channel": channel,
-            },
-        )
+        engine.channel_states[key] = {
+            "key": key,
+            "sensor_no_lower": sensor_no,
+            "channel": channel,
+        }
 
     class StatisticsCursor:
         def __init__(self) -> None:
@@ -623,18 +602,15 @@ def _add_offline_channel(
 ) -> None:
     """登记一个采集仪下属通道，用于采集仪离线聚合测试。"""
     key = engine.make_key(sensor_no, channel)
-    engine.channel_states.set(
-        key,
-        {
-            "key": key,
-            "sensor_no_lower": sensor_no,
-            "channel": channel,
-            "instrument_id": instrument_id,
-            "sample_interval_ms": 1000.0,
-            "last_ts": last_ts,
-            "offline_condition_active": False,
-        },
-    )
+    engine.channel_states[key] = {
+        "key": key,
+        "sensor_no_lower": sensor_no,
+        "channel": channel,
+        "instrument_id": instrument_id,
+        "sample_interval_ms": 1000.0,
+        "last_ts": last_ts,
+        "offline_condition_active": False,
+    }
 
 
 def test_daq_offline_requires_every_channel_offline(monkeypatch) -> None:

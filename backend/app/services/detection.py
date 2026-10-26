@@ -40,21 +40,15 @@ class AlertDetectionWorker:
         self.lag_seconds = settings.detection_lag_seconds
         self.window_minutes = settings.detection_window_minutes
 
-        # 两条 Worker 线程共享的生命周期和并发状态。
+        # 单实例下每条链路只有一个处理线程，不需要额外的重入或状态锁。
         self._stop_event = threading.Event()
         self._alert_thread: Optional[threading.Thread] = None
         self._statistics_thread: Optional[threading.Thread] = None
 
-        # 状态锁保护共享字段，链路锁防止手动调用与后台线程同时处理同一链路。
-        self._state_lock = threading.Lock()
-        self._alert_cycle_lock = threading.Lock()
-        self._statistics_cycle_lock = threading.Lock()
-        self._running = False
         self._detection_started_at: Optional[datetime] = None
         self._last_alert_scan_at: Optional[datetime] = None
         self._last_window_end: Optional[datetime] = None
         self._last_run_at: Optional[datetime] = None
-        self._last_completed_at: Optional[datetime] = None
         self._last_result: Optional[Dict[str, Any]] = None
         self._last_alert_result: Optional[Dict[str, Any]] = None
         self._last_error: Optional[str] = None
@@ -65,30 +59,23 @@ class AlertDetectionWorker:
 
     def start(self) -> None:
         """分别启动实时预警线程和统计线程。"""
-        threads: List[threading.Thread] = []
-        with self._state_lock:
-            # 任一后台线程仍存活时，重复调用启动不会创建新线程。
-            if (
-                self._alert_thread
-                and self._alert_thread.is_alive()
-            ) or (
-                self._statistics_thread
-                and self._statistics_thread.is_alive()
-            ):
-                return
-            self._stop_event.clear()
-            self._running = True
-            self._alert_thread = threading.Thread(
-                target=self._run_alert_loop,
-                name="alert-realtime-worker",
-                daemon=True,
-            )
-            self._statistics_thread = threading.Thread(
-                target=self._run_statistics_loop,
-                name="alert-statistics-worker",
-                daemon=True,
-            )
-            threads = [self._alert_thread, self._statistics_thread]
+        if any(
+            thread and thread.is_alive()
+            for thread in (self._alert_thread, self._statistics_thread)
+        ):
+            return
+        self._stop_event.clear()
+        self._alert_thread = threading.Thread(
+            target=self._run_alert_loop,
+            name="alert-realtime-worker",
+            daemon=True,
+        )
+        self._statistics_thread = threading.Thread(
+            target=self._run_statistics_loop,
+            name="alert-statistics-worker",
+            daemon=True,
+        )
+        threads = (self._alert_thread, self._statistics_thread)
         for thread in threads:
             thread.start()
         logger.info(
@@ -103,18 +90,15 @@ class AlertDetectionWorker:
     def stop(self) -> None:
         """通知两条循环停止并清理线程状态。"""
         self._stop_event.set()
-        with self._state_lock:
-            threads = [
-                thread
-                for thread in (self._alert_thread, self._statistics_thread)
-                if thread and thread.is_alive()
-            ]
+        threads = [
+            thread
+            for thread in (self._alert_thread, self._statistics_thread)
+            if thread and thread.is_alive()
+        ]
         for thread in threads:
             thread.join(timeout=30)
-        with self._state_lock:
-            self._running = False
-            self._alert_thread = None
-            self._statistics_thread = None
+        self._alert_thread = None
+        self._statistics_thread = None
         logger.info("Alert detection worker stopped.")
 
     def initialize(self, now: Optional[datetime] = None) -> None:
@@ -129,11 +113,9 @@ class AlertDetectionWorker:
         if begin_session is not None:
             begin_session(now)
 
-        with self._state_lock:
-            self._detection_started_at = now
-            self._last_alert_scan_at = now
-            self._last_window_end = self._first_statistics_boundary_after(now)
-            self._last_completed_at = None
+        self._detection_started_at = now
+        self._last_alert_scan_at = now
+        self._last_window_end = self._first_statistics_boundary_after(now)
         logger.info(
             "Detection session initialized at %s; statistics starts after %s.",
             now,
@@ -148,70 +130,56 @@ class AlertDetectionWorker:
         当前时间超前于积压游标时，只推进一个检测周期；下一轮仍从上一轮
         ``scan_end`` 继续，不会跳到数据库当前时间而漏扫中间窗口。
         """
-        # 同一实例的实时扫描串行执行，避免并发轮次同时推进扫描水位。
-        with self._alert_cycle_lock:
-            with self._state_lock:
-                self._last_run_at = current_time
-                last_alert_scan_at = self._last_alert_scan_at
-                detection_started_at = self._detection_started_at
+        self._last_run_at = current_time
+        last_alert_scan_at = self._last_alert_scan_at
+        detection_started_at = self._detection_started_at
 
-            if last_alert_scan_at is None or detection_started_at is None:
-                return None
-            if current_time <= last_alert_scan_at:
-                return None
+        if last_alert_scan_at is None or detection_started_at is None:
+            return None
+        if current_time <= last_alert_scan_at:
+            return None
 
-            started = time.perf_counter()
-            scan_end = min(
-                current_time,
-                last_alert_scan_at + timedelta(seconds=self.interval_seconds),
-            )
-            window_start = max(
-                detection_started_at,
-                last_alert_scan_at - timedelta(seconds=self.alert_overlap_seconds),
-            )
-            # 即使区间内没有采样点也照常扫描，使通道离线判定继续推进。
-            result = self.engine.scan_realtime_alerts(
-                window_start,
-                scan_end,
-            )
-            with self._state_lock:
-                self._last_alert_scan_at = scan_end
+        started = time.perf_counter()
+        scan_end = min(
+            current_time,
+            last_alert_scan_at + timedelta(seconds=self.interval_seconds),
+        )
+        window_start = max(
+            detection_started_at,
+            last_alert_scan_at - timedelta(seconds=self.alert_overlap_seconds),
+        )
+        # 即使区间内没有采样点也照常扫描，使通道离线判定继续推进。
+        result = self.engine.scan_realtime_alerts(
+            window_start,
+            scan_end,
+        )
+        self._last_alert_scan_at = scan_end
 
-            # 汇总本轮实际覆盖范围、处理量和耗时，供运行状态查询使用。
-            summary = {
-                "windowStart": serialize_val(window_start),
-                "windowEnd": serialize_val(scan_end),
-                "rawPointsProcessed": int(result.get("rawPointsProcessed") or 0),
-                "triggeredAlertsCount": int(
-                    result.get("triggeredAlertsCount") or 0
-                ),
-                "elapsedMs": round((time.perf_counter() - started) * 1000, 2),
-                "backlogSeconds": round(
-                    max(0.0, (current_time - scan_end).total_seconds()),
-                    3,
-                ),
-            }
-            with self._state_lock:
-                self._last_alert_result = summary
-                self._last_alert_error = None
-                self._last_error = None
-                self._alert_cycles += 1
-            return summary
+        # 汇总本轮实际覆盖范围、处理量和耗时，供运行状态查询使用。
+        summary = {
+            "windowStart": serialize_val(window_start),
+            "windowEnd": serialize_val(scan_end),
+            "rawPointsProcessed": int(result.get("rawPointsProcessed") or 0),
+            "triggeredAlertsCount": int(
+                result.get("triggeredAlertsCount") or 0
+            ),
+            "elapsedMs": round((time.perf_counter() - started) * 1000, 2),
+            "backlogSeconds": round(
+                max(0.0, (current_time - scan_end).total_seconds()),
+                3,
+            ),
+        }
+        self._last_alert_result = summary
+        self._last_alert_error = None
+        self._last_error = None
+        self._alert_cycles += 1
+        return summary
 
     def process_statistics_once(self, current_time: datetime) -> List[Dict[str, Any]]:
         """按顺序处理当前所有已到期的统计窗口。"""
-        with self._statistics_cycle_lock:
-            return self._process_statistics_once(current_time)
-
-    def _process_statistics_once(
-        self,
-        current_time: datetime,
-    ) -> List[Dict[str, Any]]:
-        """查找已到期的完整窗口，并按顺序逐个持久化。"""
         # 只处理落库延迟之后已经闭合的窗口，避免统计到仍在写入的数据。
         eligible_end = self.latest_eligible_window_end(current_time)
-        with self._state_lock:
-            last_window_end = self._last_window_end
+        last_window_end = self._last_window_end
 
         if last_window_end is not None and eligible_end <= last_window_end:
             return []
@@ -246,20 +214,18 @@ class AlertDetectionWorker:
                 period_type=f"{self.window_minutes}m",
             )
             results.append(result)
-            with self._state_lock:
-                # 每完成一个窗口就推进一次统计水位。
-                self._last_window_end = window_end
-                self._last_result = {
-                    "windowStart": serialize_val(window_start),
-                    "windowEnd": serialize_val(window_end),
-                    "rawPointsProcessed": int(result.get("rawPointsProcessed") or 0),
-                    "upsertedStatsCount": int(result.get("upsertedStatsCount") or 0),
-                    "elapsedMs": result.get("elapsedMs"),
-                }
-                self._last_completed_at = current_time
-                self._last_statistics_error = None
-                self._last_error = None
-                self._statistics_cycles += 1
+            # 每完成一个窗口就推进一次统计水位。
+            self._last_window_end = window_end
+            self._last_result = {
+                "windowStart": serialize_val(window_start),
+                "windowEnd": serialize_val(window_end),
+                "rawPointsProcessed": int(result.get("rawPointsProcessed") or 0),
+                "upsertedStatsCount": int(result.get("upsertedStatsCount") or 0),
+                "elapsedMs": result.get("elapsedMs"),
+            }
+            self._last_statistics_error = None
+            self._last_error = None
+            self._statistics_cycles += 1
 
         return results
 
@@ -292,8 +258,7 @@ class AlertDetectionWorker:
 
     def _next_statistics_scan_at(self) -> Optional[datetime]:
         """返回下一轮统计窗口允许开始处理的时间。"""
-        with self._state_lock:
-            last_window_end = self._last_window_end
+        last_window_end = self._last_window_end
         if last_window_end is None:
             return None
         return last_window_end + timedelta(
@@ -324,59 +289,61 @@ class AlertDetectionWorker:
 
     def get_status(self) -> Dict[str, Any]:
         """返回可供健康检查和运维接口使用的 JSON 安全状态。"""
-        with self._state_lock:
-            return {
-                "enabled": bool(
-                    self.settings.detection_enabled
-                    and self.settings.environment != "test"
+        running = any(
+            thread and thread.is_alive()
+            for thread in (self._alert_thread, self._statistics_thread)
+        )
+        return {
+            "enabled": bool(
+                self.settings.detection_enabled
+                and self.settings.environment != "test"
+            ),
+            "running": running,
+            "intervalSeconds": self.interval_seconds,
+            "alertOverlapSeconds": self.alert_overlap_seconds,
+            "lagSeconds": self.lag_seconds,
+            "windowMinutes": self.window_minutes,
+            "detectionMode": "realtime_sample_groups",
+            "confirmSeconds": self.settings.detection_confirm_seconds,
+            "thresholdConfirmMode": "frequency_sample_count",
+            "thresholdConfirmMinimumSamples": MIN_CONFIRM_SAMPLES,
+            "stuckConfirmMode": "frequency_sample_count",
+            "stuckConfirmMinimumSamples": MIN_CONFIRM_SAMPLES,
+            "oorConfirmMode": "frequency_sample_count",
+            "oorConfirmMinimumSamples": MIN_CONFIRM_SAMPLES,
+            "offlineConfirmMode": "frequency_timeout",
+            "offlineConfirmMinimumPeriods": MIN_CONFIRM_SAMPLES,
+            "stuckSeconds": self.settings.detection_stuck_seconds,
+            "offlineSeconds": self.settings.detection_offline_seconds,
+            "cycles": self._alert_cycles + self._statistics_cycles,
+            "alertCycles": self._alert_cycles,
+            "statisticsCycles": self._statistics_cycles,
+            "startedAt": serialize_val(self._detection_started_at),
+            "lastRunAt": serialize_val(self._last_run_at),
+            "lastAlertScanAt": serialize_val(self._last_alert_scan_at),
+            "alertBacklogSeconds": round(
+                max(
+                    0.0,
+                    (
+                        self._last_run_at - self._last_alert_scan_at
+                    ).total_seconds(),
                 ),
-                "running": self._running,
-                "intervalSeconds": self.interval_seconds,
-                "alertOverlapSeconds": self.alert_overlap_seconds,
-                "lagSeconds": self.lag_seconds,
-                "windowMinutes": self.window_minutes,
-                "detectionMode": "realtime_sample_groups",
-                "confirmSeconds": self.settings.detection_confirm_seconds,
-                "thresholdConfirmMode": "frequency_sample_count",
-                "thresholdConfirmMinimumSamples": MIN_CONFIRM_SAMPLES,
-                "stuckConfirmMode": "frequency_sample_count",
-                "stuckConfirmMinimumSamples": MIN_CONFIRM_SAMPLES,
-                "oorConfirmMode": "frequency_sample_count",
-                "oorConfirmMinimumSamples": MIN_CONFIRM_SAMPLES,
-                "offlineConfirmMode": "frequency_timeout",
-                "offlineConfirmMinimumPeriods": MIN_CONFIRM_SAMPLES,
-                "stuckSeconds": self.settings.detection_stuck_seconds,
-                "offlineSeconds": self.settings.detection_offline_seconds,
-                "cycles": self._alert_cycles + self._statistics_cycles,
-                "alertCycles": self._alert_cycles,
-                "statisticsCycles": self._statistics_cycles,
-                "startedAt": serialize_val(self._detection_started_at),
-                "lastRunAt": serialize_val(self._last_run_at),
-                "lastCompletedAt": serialize_val(self._last_completed_at),
-                "lastAlertScanAt": serialize_val(self._last_alert_scan_at),
-                "alertBacklogSeconds": round(
-                    max(
-                        0.0,
-                        (
-                            self._last_run_at - self._last_alert_scan_at
-                        ).total_seconds(),
-                    ),
-                    3,
-                )
-                if self._last_run_at is not None
-                and self._last_alert_scan_at is not None
-                else 0.0,
-                "lastAlertResult": (
-                    dict(self._last_alert_result)
-                    if self._last_alert_result
-                    else None
-                ),
-                "lastWindowEnd": serialize_val(self._last_window_end),
-                "lastResult": dict(self._last_result) if self._last_result else None,
-                "lastError": self._last_error,
-                "lastAlertError": self._last_alert_error,
-                "lastStatisticsError": self._last_statistics_error,
-            }
+                3,
+            )
+            if self._last_run_at is not None
+            and self._last_alert_scan_at is not None
+            else 0.0,
+            "lastAlertResult": (
+                dict(self._last_alert_result)
+                if self._last_alert_result
+                else None
+            ),
+            "lastWindowEnd": serialize_val(self._last_window_end),
+            "lastResult": dict(self._last_result) if self._last_result else None,
+            "lastError": self._last_error,
+            "lastAlertError": self._last_alert_error,
+            "lastStatisticsError": self._last_statistics_error,
+        }
 
     def _run_alert_loop(self) -> None:
         """持续执行实时扫描，直到收到停止信号。"""
@@ -391,9 +358,8 @@ class AlertDetectionWorker:
             except Exception as exc:
                 # 单次扫描失败不终止后台线程，记录异常后在下一轮继续重试。
                 logger.exception("Realtime alert scan failed")
-                with self._state_lock:
-                    self._last_alert_error = str(exc)
-                    self._last_error = str(exc)
+                self._last_alert_error = str(exc)
+                self._last_error = str(exc)
             elapsed = time.monotonic() - started
             # 正常情况保持每秒一个窗口；存在积压时连续追赶。
             wait_seconds = (
@@ -414,9 +380,8 @@ class AlertDetectionWorker:
                 self.process_statistics_once(current_time)
             except Exception as exc:
                 logger.exception("Statistics window processing failed")
-                with self._state_lock:
-                    self._last_statistics_error = str(exc)
-                    self._last_error = str(exc)
+                self._last_statistics_error = str(exc)
+                self._last_error = str(exc)
             else:
                 elapsed = time.monotonic() - started
                 wait_seconds = self._statistics_wait_seconds(

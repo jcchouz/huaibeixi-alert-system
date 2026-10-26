@@ -162,7 +162,8 @@ class AlertRule(Protocol):
 1. 在 `backend/app/domain/alert_rules/` 新增规则类。
 2. 实现 `evaluate()` 并返回 `RuleEvaluation`。
 3. 在 `default_alert_rules()` 中注册。
-4. 如规则状态需要跨扫描保存，在 `RUNTIME_STATE_FIELDS` 中增加字段。
+4. 如规则状态需要跨扫描保存，在规则初始化和
+   `AlertAnalyticsEngine.begin_detection_session()` 中显式设置默认值。
 5. 增加单元测试和真实传感器场景测试。
 
 示例：
