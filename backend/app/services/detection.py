@@ -192,20 +192,10 @@ class AlertDetectionWorker:
         first_end = last_window_end + timedelta(minutes=self.window_minutes)
         if first_end > eligible_end:
             return []
-        count = (
-            int(
-                (eligible_end - first_end).total_seconds()
-                // (self.window_minutes * 60)
-            )
-            + 1
-        )
-        window_ends = [
-            first_end + timedelta(minutes=index * self.window_minutes)
-            for index in range(count)
-        ]
 
         results: List[Dict[str, Any]] = []
-        for window_end in window_ends:
+        window_end = first_end
+        while window_end <= eligible_end:
             window_start = window_end - timedelta(minutes=self.window_minutes)
             # 一个窗口成功后立即推进水位，异常时下次只重试尚未完成的窗口。
             result = self.engine.record_statistics_window(
@@ -226,18 +216,21 @@ class AlertDetectionWorker:
             self._last_statistics_error = None
             self._last_error = None
             self._statistics_cycles += 1
+            window_end += timedelta(minutes=self.window_minutes)
 
         return results
 
-    def _first_statistics_boundary_after(self, started_at: datetime) -> datetime:
-        """返回启动后第一个完整统计窗口的起始边界。"""
-        day_start = started_at.replace(hour=0, minute=0, second=0, microsecond=0)
-        elapsed_minutes = int(
-            (started_at - day_start).total_seconds() // 60
-        )
-        block_start = day_start + timedelta(
+    def _window_boundary(self, value: datetime) -> datetime:
+        """Floor a datetime to the configured natural-day window boundary."""
+        day_start = value.replace(hour=0, minute=0, second=0, microsecond=0)
+        elapsed_minutes = int((value - day_start).total_seconds() // 60)
+        return day_start + timedelta(
             minutes=(elapsed_minutes // self.window_minutes) * self.window_minutes
         )
+
+    def _first_statistics_boundary_after(self, started_at: datetime) -> datetime:
+        """返回启动后第一个完整统计窗口的起始边界。"""
+        block_start = self._window_boundary(started_at)
         # 启动时间落在窗口中间时，当前窗口包含启动前数据，跳过它。
         return (
             block_start
@@ -249,12 +242,7 @@ class AlertDetectionWorker:
         """应用落库延迟和统计周期后，返回最近完整窗口结束时间。"""
         # 先减去允许的落库延迟，再按自然日锚点对齐到完整窗口边界。
         cutoff = now - timedelta(seconds=self.lag_seconds)
-        day_start = cutoff.replace(hour=0, minute=0, second=0, microsecond=0)
-        elapsed_minutes = int((cutoff - day_start).total_seconds() // 60)
-        block_start = day_start + timedelta(
-            minutes=(elapsed_minutes // self.window_minutes) * self.window_minutes
-        )
-        return block_start
+        return self._window_boundary(cutoff)
 
     def _next_statistics_scan_at(self) -> Optional[datetime]:
         """返回下一轮统计窗口允许开始处理的时间。"""

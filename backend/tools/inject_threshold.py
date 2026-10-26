@@ -37,8 +37,10 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from app.config import DSN
+from app.core.config import get_settings
 from app.domain.alert_types import ALERT_TYPE_THRESHOLD
+
+DSN = get_settings().dsn
 
 DEFAULT_SENSOR = "stn-01-e"
 DEFAULT_CHANNEL = "stress"

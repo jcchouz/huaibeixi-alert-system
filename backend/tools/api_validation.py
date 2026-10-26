@@ -26,7 +26,10 @@ except Exception:
 
 import psycopg2
 
-from app.config import DSN, get_db_cursor
+from app.core.config import get_settings
+from app.infrastructure.database import get_db_cursor
+
+DSN = get_settings().dsn
 
 BASE = os.getenv("API_BASE_URL", "http://127.0.0.1:8090").rstrip("/")
 SNAP_DIR = Path(__file__).resolve().parent / "_snap"

@@ -158,6 +158,22 @@ def test_statistics_start_with_first_complete_window_after_startup() -> None:
     assert engine.period_types == ["1m"]
 
 
+def test_statistics_processes_all_due_windows_in_order() -> None:
+    engine = FakeEngine()
+    worker = make_worker(engine)
+    worker.initialize(datetime(2026, 10, 20, 15, 40, 30))
+
+    results = worker.process_statistics_once(datetime(2026, 10, 20, 15, 45, 4))
+
+    assert len(results) == 3
+    assert engine.windows == [
+        (datetime(2026, 10, 20, 15, 41), datetime(2026, 10, 20, 15, 42)),
+        (datetime(2026, 10, 20, 15, 42), datetime(2026, 10, 20, 15, 43)),
+        (datetime(2026, 10, 20, 15, 43), datetime(2026, 10, 20, 15, 44)),
+    ]
+    assert worker._last_window_end == datetime(2026, 10, 20, 15, 44)
+
+
 def test_detection_worker_supports_a_configurable_window() -> None:
     engine = FakeEngine()
     worker = make_worker(engine, window_minutes=10)

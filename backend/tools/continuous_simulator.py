@@ -32,7 +32,9 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from app.config import DSN
+from app.core.config import get_settings
+
+DSN = get_settings().dsn
 
 ACCELERATION_SENSOR_PREFIXES = ("accl-", "zd-wg-", "zd-cg-")
 OFFLINE_SCENARIOS = {"sensor_offline", "daq_offline"}

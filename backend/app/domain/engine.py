@@ -26,6 +26,7 @@ from app.domain.alert_rules.base import (
     RuleContext,
     RuleEvaluation,
     parse_datetime,
+    parse_frequency_hz,
     required_sample_count,
     serialize_runtime_datetime,
 )
@@ -186,7 +187,7 @@ class AlertAnalyticsEngine:
 
         for rule in self.channel_states.values():
             rule.update(
-                last_ts=self._serialize_runtime_dt(started_at),
+                last_ts=serialize_runtime_datetime(started_at),
                 last_val=None,
                 online_status="ONLINE",
                 threshold_streak_count=0,
@@ -386,20 +387,14 @@ class AlertAnalyticsEngine:
                 frequency_hz = self._parse_frequency_hz(frequency_text)
                 sample_interval_ms = 1000.0 / frequency_hz
                 confirm_seconds = self.confirm_seconds
-                threshold_confirm_samples = (
-                    required_sample_count(
-                        frequency_hz,
-                        confirm_seconds,
-                    )
+                confirm_samples = required_sample_count(
+                    frequency_hz,
+                    confirm_seconds,
                 )
                 stuck_seconds = self.stuck_seconds
                 stuck_confirm_samples = required_sample_count(
                     frequency_hz,
                     stuck_seconds,
-                )
-                oor_confirm_samples = required_sample_count(
-                    frequency_hz,
-                    confirm_seconds,
                 )
                 offline_seconds = self.offline_seconds
                 offline_confirm_periods = required_sample_count(
@@ -431,15 +426,15 @@ class AlertAnalyticsEngine:
                         "physical_min": range_min,                              # 物理量程下限
                         "physical_max": range_max,                              # 物理量程上限
                         "confirm_seconds": confirm_seconds,                     # 阈值确认基准时长（秒）
-                        "threshold_confirm_samples": threshold_confirm_samples, # 按频率折算的阈值连续点数
+                        "threshold_confirm_samples": confirm_samples,           # 按频率折算的阈值连续点数
                         "stuck_seconds": stuck_seconds,                         # 死值连续确认时长（秒）
                         "stuck_confirm_samples": stuck_confirm_samples,         # 按频率折算的死值连续点数
-                        "oor_confirm_samples": oor_confirm_samples,             # 按频率折算的超量程连续点数
+                        "oor_confirm_samples": confirm_samples,                 # 按频率折算的超量程连续点数
                         "offline_seconds": offline_seconds,                     # 离线确认基准时长（秒）
                         "offline_confirm_periods": offline_confirm_periods,     # 按频率折算的离线缺失周期数
                         "offline_timeout_ms": offline_timeout_ms,               # 离线超时阈值（毫秒）
                         "online_status": "ONLINE",                              # 初始在线状态
-                        "last_ts": self._serialize_runtime_dt(runtime_now),     # 新规则的离线判断起点
+                        "last_ts": serialize_runtime_datetime(runtime_now),     # 新规则的离线判断起点
                         "threshold_streak_count": 0,                            # 阈值连续命中计数
                         "threshold_streak_started_at": None,                    # 阈值连续命中开始时间
                         "threshold_condition_active": False,                    # 阈值预警条件是否已触发
@@ -477,21 +472,7 @@ class AlertAnalyticsEngine:
             params.extend([sensor_no, channel])
         self._sample_query = (sample_sql, tuple(params))
 
-    @staticmethod
-    def _parse_frequency_hz(value: Any) -> float:
-        """解析 ``t_sensor.frequency``，例如 ``100`` 或 ``1/60``。"""
-        text = str(value or "").strip().lower().removesuffix("hz").strip()
-        if not text:
-            return 1.0
-        try:
-            if "/" in text:
-                numerator, denominator = text.split("/", 1)
-                parsed = float(numerator) / float(denominator)
-            else:
-                parsed = float(text)
-        except (TypeError, ValueError, ZeroDivisionError):
-            return 1.0
-        return parsed if parsed > 0 else 1.0
+    _parse_frequency_hz = staticmethod(parse_frequency_hz)
 
     @classmethod
     def _offline_timeout_ms(cls, rule: Dict[str, Any]) -> float:
@@ -736,7 +717,6 @@ class AlertAnalyticsEngine:
         """
         alert_type = normalize_alert_type(alert_type) or alert_type
         alert_category = alert_category_for_type(alert_type)
-        alert_id = uuid.uuid4().hex
         cur.execute(
             """
             SELECT id
@@ -769,6 +749,7 @@ class AlertAnalyticsEngine:
             )
         else:
             # 新建事件，并分配新的轮询序列号。
+            alert_id = uuid.uuid4().hex
             cur.execute(
                 """
                 INSERT INTO public.t_alert_record (
@@ -846,16 +827,6 @@ class AlertAnalyticsEngine:
         )
         row = cur.fetchone()
         return dict(row) if row else None
-
-    @staticmethod
-    def _parse_maybe_dt(value: Any) -> Optional[datetime]:
-        """解析数据库、JSON 或序列化状态中的日期时间。"""
-        return parse_datetime(value)
-
-    @staticmethod
-    def _serialize_runtime_dt(value: datetime) -> str:
-        """保留运行时时间戳的完整微秒精度，供下一轮严格去重。"""
-        return serialize_runtime_datetime(value)
 
     @staticmethod
     def _alert_key(
@@ -1026,6 +997,30 @@ class AlertAnalyticsEngine:
                 end_time=window_end,
             )
 
+    def _close_channel_data_alerts(
+        self,
+        cur: Any,
+        active_map: Dict[Tuple[str, str, str], Dict[str, Any]],
+        rule: Dict[str, Any],
+        *,
+        end_time: datetime,
+    ) -> None:
+        """Close threshold, stuck and out-of-range incidents for an offline channel."""
+        for alert_type, state_field in (
+            (ALERT_TYPE_THRESHOLD, "threshold_condition_active"),
+            (ALERT_TYPE_STUCK, "stuck_condition_active"),
+            (ALERT_TYPE_OOR, "oor_condition_active"),
+        ):
+            if rule.get(state_field):
+                self._close_alert_incident(
+                    cur,
+                    active_map,
+                    sensor_no=rule["sensor_no_lower"],
+                    channel=rule.get("channel") or "",
+                    alert_type=alert_type,
+                    end_time=end_time,
+                )
+
     def _apply_offline_if_due(
         self,
         cur: Any,
@@ -1039,7 +1034,7 @@ class AlertAnalyticsEngine:
         window_end: datetime,
     ) -> bool:
         """超过离线超时时间仍无样本时创建离线预警。"""
-        last_seen = self._parse_maybe_dt(rule.get("last_ts"))
+        last_seen = parse_datetime(rule.get("last_ts"))
         evaluation = self._offline_rule.evaluate(
             RuleContext(
                 rule=rule,
@@ -1059,20 +1054,12 @@ class AlertAnalyticsEngine:
         if instrument_id:
             offline_by_instrument.setdefault(instrument_id, set()).add(key)
 
-        for alert_type, state_field in (
-            (ALERT_TYPE_THRESHOLD, "threshold_condition_active"),
-            (ALERT_TYPE_STUCK, "stuck_condition_active"),
-            (ALERT_TYPE_OOR, "oor_condition_active"),
-        ):
-            if bool(rule.get(state_field)):
-                self._close_alert_incident(
-                    cur,
-                    active_map,
-                    sensor_no=rule["sensor_no_lower"],
-                    channel=rule.get("channel") or "",
-                    alert_type=alert_type,
-                    end_time=window_end,
-                )
+        self._close_channel_data_alerts(
+            cur,
+            active_map,
+            rule,
+            end_time=window_end,
+        )
 
         self._apply_rule_evaluation(
             cur,
@@ -1106,7 +1093,6 @@ class AlertAnalyticsEngine:
 
         with get_db_cursor(commit=True) as cur:
             rules = self.channel_states.values()
-            rules_by_key = {rule["key"]: rule for rule in rules}
             samples_by_key: Dict[str, List[Tuple[datetime, float]]] = {}
 
             sample_query = self._sample_query
@@ -1122,7 +1108,7 @@ class AlertAnalyticsEngine:
                 for row in cur.fetchall():
                     raw_points_processed += int(row["sample_cnt"] or 0)
                     key = self.make_key(row["s_no"], row["ch"])
-                    if key not in rules_by_key:
+                    if key not in self.channel_states:
                         continue
                     samples_by_key[key] = list(
                         zip(
@@ -1134,8 +1120,8 @@ class AlertAnalyticsEngine:
 
             # 回看查询可能带回已处理样本，仅在 last_ts 之后继续累计状态。
             for key, samples in list(samples_by_key.items()):
-                previous_last_seen = self._parse_maybe_dt(
-                    rules_by_key[key].get("last_ts")
+                previous_last_seen = parse_datetime(
+                    self.channel_states[key].get("last_ts")
                 )
                 if previous_last_seen is not None:
                     samples = [
@@ -1149,10 +1135,7 @@ class AlertAnalyticsEngine:
                     del samples_by_key[key]
 
             if self._active_alert_cache is not None:
-                active_map = {
-                    key: dict(value)
-                    for key, value in self._active_alert_cache.items()
-                }
+                active_map = dict(self._active_alert_cache)
             else:
                 active_map = self._load_active_alerts(cur)
 
@@ -1169,7 +1152,7 @@ class AlertAnalyticsEngine:
                 sensor_no = rule["sensor_no_lower"]
                 channel = rule.get("channel") or ""
                 samples = samples_by_key.get(key, [])
-                previous_last_seen = self._parse_maybe_dt(rule.get("last_ts"))
+                previous_last_seen = parse_datetime(rule.get("last_ts"))
                 if not samples:
                     # 通道离线：本窗口没有该通道的新样本，按 last_ts 计算静默时长。
                     self._apply_offline_if_due(
@@ -1202,27 +1185,19 @@ class AlertAnalyticsEngine:
                 # 通道离线或采样中断：使用原始样点时间检查静默时长和最大采样间隔。
                 offline_evaluation = self._offline_rule.evaluate(context)
                 state_updates: Dict[str, Any] = {
-                    "last_ts": self._serialize_runtime_dt(samples[-1][0]),
+                    "last_ts": serialize_runtime_datetime(samples[-1][0]),
                     "last_val": round(samples[-1][1], 5),
                     "online_status": "ONLINE",
                 }
                 if offline_evaluation.suppress_other_alerts:
                     # 通道已离线时，离线预警优先，并关闭尚未结束的阈值、死值和超量程事件。
                     state_updates.update(offline_evaluation.state_updates)
-                    for alert_type, state_field in (
-                        (ALERT_TYPE_THRESHOLD, "threshold_condition_active"),
-                        (ALERT_TYPE_STUCK, "stuck_condition_active"),
-                        (ALERT_TYPE_OOR, "oor_condition_active"),
-                    ):
-                        if bool(rule.get(state_field)):
-                            self._close_alert_incident(
-                                cur,
-                                active_map,
-                                sensor_no=sensor_no,
-                                channel=channel,
-                                alert_type=alert_type,
-                                end_time=window_end,
-                            )
+                    self._close_channel_data_alerts(
+                        cur,
+                        active_map,
+                        rule,
+                        end_time=window_end,
+                    )
                 else:
                     # 通道在线时按注册表固定顺序判定：
                     # 1. ThresholdAlertRule   -> 阈值超限（level1/2/3）；
@@ -1323,9 +1298,7 @@ class AlertAnalyticsEngine:
             self.channel_states[key].update(updates)
         self._daq_condition_active.update(daq_condition_updates)
         self._daq_state_known.update(daq_condition_updates)
-        self._active_alert_cache = {
-            key: dict(value) for key, value in active_map.items()
-        }
+        self._active_alert_cache = active_map
 
         return {
             "windowStart": serialize_val(window_start),

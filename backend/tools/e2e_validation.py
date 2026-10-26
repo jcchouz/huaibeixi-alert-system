@@ -37,8 +37,11 @@ except Exception:
 
 import psycopg2
 
-from app.config import DSN, get_db_cursor
-from app.engine import AlertAnalyticsEngine
+from app.core.config import get_settings
+from app.domain.engine import AlertAnalyticsEngine
+from app.infrastructure.database import get_db_cursor
+
+DSN = get_settings().dsn
 
 # --------------------------------------------------------------------------- #
 # 测试计划常量

@@ -10,6 +10,20 @@ from typing import Any, Dict, List, Optional, Protocol, Tuple
 MIN_CONFIRM_SAMPLES = 3
 
 
+def parse_frequency_hz(value: Any) -> float:
+    """Parse ``t_sensor.frequency`` values such as ``50`` or ``1/60``."""
+    text = str(value or "").strip().lower().removesuffix("hz").strip()
+    try:
+        if "/" in text:
+            numerator, denominator = text.split("/", 1)
+            frequency = float(numerator) / float(denominator)
+        else:
+            frequency = float(text)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 1.0
+    return frequency if frequency > 0 else 1.0
+
+
 def required_sample_count(
     frequency_hz: Any,
     reference_seconds: Any,
@@ -17,24 +31,11 @@ def required_sample_count(
     minimum_samples: int = MIN_CONFIRM_SAMPLES,
 ) -> int:
     """Convert a reference duration into consecutive samples for one channel."""
-    try:
-        frequency = float(frequency_hz)
-    except (TypeError, ValueError):
-        text = str(frequency_hz or "").strip().lower().removesuffix("hz").strip()
-        try:
-            if "/" in text:
-                numerator, denominator = text.split("/", 1)
-                frequency = float(numerator) / float(denominator)
-            else:
-                frequency = float(text)
-        except (TypeError, ValueError, ZeroDivisionError):
-            frequency = 1.0
+    frequency = parse_frequency_hz(frequency_hz)
     try:
         seconds = float(reference_seconds)
     except (TypeError, ValueError):
         seconds = 1.0
-    if frequency <= 0:
-        frequency = 1.0
     if seconds <= 0:
         seconds = 1.0
     estimated = math.ceil(frequency * seconds)
