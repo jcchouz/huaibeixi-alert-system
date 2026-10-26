@@ -1,11 +1,11 @@
 # 全预警场景压测报告
 
-> 历史报告：当时使用的 `benchall-*` 临时传感器方案已经停用。当前测试必须使用真实传感器。
+> 历史报告：当时使用的 `benchall-*` 临时传感器方案和压测脚本均已删除。当前测试必须使用真实传感器。
 
 - 测试日期：2026-10-22
 - 测试库：`huaibeixi_db_test`
 - 检测入口：正在运行的 `AlertDetectionWorker`
-- 测试工具：`backend/tools/stress_all_alerts.py`
+- 测试工具：历史 synthetic 压测脚本，已删除
 
 ## 测试范围
 

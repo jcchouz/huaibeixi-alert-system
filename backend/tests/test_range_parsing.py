@@ -4,6 +4,11 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from app.domain.alert_rules import (
+    OutOfRangeAlertRule,
+    StuckAlertRule,
+    ThresholdAlertRule,
+)
 from app.domain.engine import AlertAnalyticsEngine
 
 
@@ -72,7 +77,6 @@ def test_offline_timeout_scales_to_three_periods_for_low_frequency(
 
 
 def test_threshold_confirmation_uses_sample_count_not_elapsed_time() -> None:
-    engine = AlertAnalyticsEngine()
     rule = {
         "frequency_hz": 1.0,
         "level1_upper": 10.0,
@@ -86,11 +90,11 @@ def test_threshold_confirmation_uses_sample_count_not_elapsed_time() -> None:
     ]
 
     count, started_at, active, snapshot = (
-        engine._evaluate_threshold_streak(
+        ThresholdAlertRule.evaluate_streak(
             samples,
             rule,
             previous_count=0,
-            target_seconds=3,
+            target_count=3,
         )
     )
 
@@ -112,16 +116,13 @@ def test_threshold_required_sample_count_uses_sensor_frequency(
     frequency_hz: float,
     expected: int,
 ) -> None:
-    engine = AlertAnalyticsEngine()
-
-    assert engine._threshold_rule.required_sample_count(
+    assert ThresholdAlertRule.required_sample_count(
         frequency_hz,
         reference_seconds=3,
     ) == expected
 
 
 def test_threshold_at_50_hz_requires_150_consecutive_samples() -> None:
-    engine = AlertAnalyticsEngine()
     rule = {
         "frequency_hz": 50.0,
         "level1_upper": 10.0,
@@ -133,21 +134,25 @@ def test_threshold_at_50_hz_requires_150_consecutive_samples() -> None:
         (first_ts + timedelta(seconds=index / 50.0), 7.0)
         for index in range(150)
     ]
+    target_count = ThresholdAlertRule.required_sample_count(
+        rule["frequency_hz"],
+        3,
+    )
 
-    count, _, active, _ = engine._evaluate_threshold_streak(
+    count, _, active, _ = ThresholdAlertRule.evaluate_streak(
         samples[:149],
         rule,
         previous_count=0,
-        target_seconds=3,
+        target_count=target_count,
     )
     assert count == 149
     assert active is False
 
-    count, _, active, snapshot = engine._evaluate_threshold_streak(
+    count, _, active, snapshot = ThresholdAlertRule.evaluate_streak(
         samples,
         rule,
         previous_count=0,
-        target_seconds=3,
+        target_count=target_count,
     )
     assert count == 150
     assert active is True
@@ -155,19 +160,18 @@ def test_threshold_at_50_hz_requires_150_consecutive_samples() -> None:
 
 
 def test_stuck_confirmation_uses_sample_count_not_elapsed_time() -> None:
-    engine = AlertAnalyticsEngine()
     first_ts = datetime(2026, 10, 19, 10, 0, 0)
     samples = [
         (first_ts + timedelta(milliseconds=index), 12.5)
         for index in range(4)
     ]
 
-    count, value, since, active, snapshot = engine._evaluate_stuck_streak(
+    count, value, since, active, snapshot = StuckAlertRule.evaluate_streak(
         samples,
         previous_value=None,
         previous_count=0,
         previous_since=None,
-        target_seconds=3,
+        target_count=3,
     )
 
     assert count == 4
@@ -178,7 +182,6 @@ def test_stuck_confirmation_uses_sample_count_not_elapsed_time() -> None:
 
 
 def test_out_of_range_confirmation_uses_sample_count_not_elapsed_time() -> None:
-    engine = AlertAnalyticsEngine()
     first_ts = datetime(2026, 10, 19, 10, 0, 0)
     samples = [
         (first_ts + timedelta(milliseconds=index), 12.0)
@@ -186,11 +189,11 @@ def test_out_of_range_confirmation_uses_sample_count_not_elapsed_time() -> None:
     ]
 
     count, started_at, active, snapshot = (
-        engine._evaluate_out_of_range_streak(
+        OutOfRangeAlertRule.evaluate_streak(
             samples,
             {"physical_min": -10.0, "physical_max": 10.0},
             previous_count=0,
-            target_seconds=3,
+            target_count=3,
         )
     )
 
@@ -216,16 +219,13 @@ def test_confirm_sample_count_uses_rule_frequency(
     frequency_hz: float,
     expected: int,
 ) -> None:
-    engine = AlertAnalyticsEngine()
-
-    assert engine._threshold_rule.required_sample_count(
+    assert ThresholdAlertRule.required_sample_count(
         frequency_hz,
         reference_seconds=reference_seconds,
     ) == expected
 
 
 def test_threshold_streak_continues_across_windows() -> None:
-    engine = AlertAnalyticsEngine()
     rule = {
         "level1_upper": 10.0,
         "level2_upper": 8.0,
@@ -238,25 +238,25 @@ def test_threshold_streak_continues_across_windows() -> None:
         (first_ts + timedelta(seconds=2), 7.0),
     ]
 
-    count, started_at, active, snapshot = engine._evaluate_threshold_streak(
+    count, started_at, active, snapshot = ThresholdAlertRule.evaluate_streak(
         samples,
         rule,
         previous_count=0,
-        target_seconds=3,
+        target_count=3,
     )
 
     assert count == 1
     assert active is False
     assert snapshot is None
 
-    count, started_at, active, snapshot = engine._evaluate_threshold_streak(
+    count, started_at, active, snapshot = ThresholdAlertRule.evaluate_streak(
         [
             (first_ts + timedelta(seconds=3), 7.1),
             (first_ts + timedelta(seconds=5), 7.2),
         ],
         rule,
         previous_count=count,
-        target_seconds=3,
+        target_count=3,
         previous_started_at=started_at,
     )
 
@@ -267,19 +267,18 @@ def test_threshold_streak_continues_across_windows() -> None:
 
 
 def test_stuck_streak_requires_configured_sample_count() -> None:
-    engine = AlertAnalyticsEngine()
     first_ts = datetime(2026, 10, 19, 10, 0, 0)
     samples = [
         (first_ts + timedelta(seconds=index), 12.5)
         for index in range(4)
     ]
 
-    count, value, since, active, snapshot = engine._evaluate_stuck_streak(
+    count, value, since, active, snapshot = StuckAlertRule.evaluate_streak(
         samples,
         previous_value=None,
         previous_count=0,
         previous_since=None,
-        target_seconds=3,
+        target_count=3,
     )
 
     assert count == 4
@@ -290,7 +289,6 @@ def test_stuck_streak_requires_configured_sample_count() -> None:
 
 
 def test_missing_sample_groups_break_threshold_streak() -> None:
-    engine = AlertAnalyticsEngine()
     rule = {
         "level1_upper": 10.0,
         "level2_upper": 8.0,
@@ -298,11 +296,11 @@ def test_missing_sample_groups_break_threshold_streak() -> None:
     }
     previous_ts = datetime(2026, 10, 19, 10, 0, 0)
 
-    count, started_at, active, snapshot = engine._evaluate_threshold_streak(
+    count, started_at, active, snapshot = ThresholdAlertRule.evaluate_streak(
         [(previous_ts + timedelta(seconds=2), 7.0)],
         rule,
         previous_count=2,
-        target_seconds=3,
+        target_count=3,
         previous_sample_time=previous_ts,
         max_gap_ms=1500,
     )

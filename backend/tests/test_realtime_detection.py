@@ -552,7 +552,7 @@ def test_statistics_window_uses_one_batch_upsert(monkeypatch) -> None:
             params: tuple[Any, ...] | None = None,
         ) -> None:
             self.sql_calls.append(sql)
-            assert "WITH ordered_samples" in sql
+            assert "GROUP BY LOWER(sensor_no), COALESCE(channel, '')" in sql
             self.rows = [
                 {
                     "s_no": sensor_no,
@@ -563,7 +563,6 @@ def test_statistics_window_uses_one_batch_upsert(monkeypatch) -> None:
                     "val_avg": 1.5,
                     "first_ts": window_start,
                     "last_ts": window_end - timedelta(seconds=1),
-                    "max_gap_ms": 1000.0,
                     "min_time": window_start,
                     "max_time": window_end - timedelta(seconds=1),
                 }

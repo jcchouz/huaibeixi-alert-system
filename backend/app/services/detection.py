@@ -140,12 +140,6 @@ class AlertDetectionWorker:
             self._last_window_end,
         )
 
-    def run_once(self, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
-        """执行一次手动检测，用于测试或本地诊断。"""
-        current_time = now or self._current_time()
-        self.scan_alerts_once(current_time)
-        return self.process_statistics_once(current_time)
-
     def scan_alerts_once(self, current_time: datetime) -> Optional[Dict[str, Any]]:
         """扫描启动边界之后的实时样本。
 

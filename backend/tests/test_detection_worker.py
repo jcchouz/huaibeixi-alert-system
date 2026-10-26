@@ -146,8 +146,11 @@ def test_statistics_start_with_first_complete_window_after_startup() -> None:
     worker = make_worker(engine)
     worker.initialize(datetime(2026, 10, 20, 15, 40, 30))
 
-    first = worker.run_once(datetime(2026, 10, 20, 15, 42, 30))
-    second = worker.run_once(datetime(2026, 10, 20, 15, 42, 31))
+    current_time = datetime(2026, 10, 20, 15, 42, 30)
+    worker.scan_alerts_once(current_time)
+    first = worker.process_statistics_once(current_time)
+    worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 31))
+    second = worker.process_statistics_once(datetime(2026, 10, 20, 15, 42, 31))
 
     assert len(first) == 1
     assert second == []
@@ -162,7 +165,9 @@ def test_detection_worker_supports_a_configurable_window() -> None:
     worker = make_worker(engine, window_minutes=10)
     worker.initialize(datetime(2026, 10, 20, 15, 30, 30))
 
-    results = worker.run_once(datetime(2026, 10, 20, 15, 42, 30))
+    current_time = datetime(2026, 10, 20, 15, 42, 30)
+    worker.scan_alerts_once(current_time)
+    results = worker.process_statistics_once(current_time)
 
     assert results == []
     assert worker._last_window_end == datetime(2026, 10, 20, 15, 40)

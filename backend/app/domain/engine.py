@@ -20,16 +20,12 @@ from app.domain.alert_rules import (
     AlertRuleRegistry,
     DaqOfflineRule,
     OfflineAlertRule,
-    OutOfRangeAlertRule,
-    StuckAlertRule,
-    ThresholdAlertRule,
 )
 from app.domain.alert_rules.base import (
     MIN_CONFIRM_SAMPLES,
     AlertRule,
     RuleContext,
     RuleEvaluation,
-    max_sample_gap_ms,
     parse_datetime,
     required_sample_count,
     serialize_runtime_datetime,
@@ -74,41 +70,27 @@ RUNTIME_STATE_FIELDS: Tuple[str, ...] = (
 #   s_no / ch            -> 分组键，传感器编号统一转小写
 #   max_time / min_time  -> 极值样本的真实时间，不是窗口边界
 WINDOW_AGG_SQL = """
-WITH ordered_samples AS (
-    SELECT
-        LOWER(sensor_no) AS s_no,
-        COALESCE(channel, '') AS ch,
-        time,
-        value,
-        time - LAG(time) OVER (
-            PARTITION BY LOWER(sensor_no), COALESCE(channel, '')
-            ORDER BY time
-        ) AS sample_gap
-    FROM public.t_monitor
-    WHERE time >= %s AND time < %s
-)
 SELECT
-    s_no,
-    ch,
+    LOWER(sensor_no) AS s_no,
+    COALESCE(channel, '') AS ch,
     COUNT(*) AS sample_cnt,
     MAX(value) AS val_max,
     MIN(value) AS val_min,
     AVG(value) AS val_avg,
-    COALESCE(STDDEV_POP(value), 0) AS value_std,
     MIN(time) AS first_ts,
     MAX(time) AS last_ts,
-    COALESCE(MAX(EXTRACT(EPOCH FROM sample_gap) * 1000.0), 0) AS max_gap_ms,
     (ARRAY_AGG(time ORDER BY value ASC, time ASC))[1] AS min_time,
     (ARRAY_AGG(time ORDER BY value DESC, time ASC))[1] AS max_time
-FROM ordered_samples
-GROUP BY s_no, ch
+FROM public.t_monitor
+WHERE time >= %s AND time < %s
+GROUP BY LOWER(sensor_no), COALESCE(channel, '')
 """
 
 # 实时预警专用的原始样本查询：按 time 升序返回窗口内的全部原始点。
 # 与 WINDOW_AGG_SQL 的区别：
 #   - 不聚合，保留每个点的时间，才能按连续点数和持续时长判断；
 #   - value 为空的行直接排除，不参与阈值、量程和死值判定；
-#   - 排序由数据库保证，下游 _evaluate_*_streak() 依赖这个顺序累计状态。
+#   - 排序由数据库保证，下游 AlertRuleRegistry 依赖这个顺序累计状态。
 SAMPLE_BATCH_SQL = """
 SELECT
     LOWER(sensor_no) AS s_no,
@@ -233,9 +215,6 @@ class AlertAnalyticsEngine:
             Dict[Tuple[str, str, str], Dict[str, Any]]
         ] = None
         self._sample_query: Optional[Tuple[str, Tuple[Any, ...]]] = None
-        self._threshold_rule = ThresholdAlertRule()
-        self._out_of_range_rule = OutOfRangeAlertRule()
-        self._stuck_rule = StuckAlertRule()
         self._offline_rule = OfflineAlertRule()
         self._daq_offline_rule = DaqOfflineRule()
         self.channel_rule_registry = AlertRuleRegistry(channel_rules)
@@ -616,102 +595,6 @@ class AlertAnalyticsEngine:
         )
         return max(1.0, missing_periods / frequency_hz * 1000.0)
 
-    # ------------------------------------------------------------------
-    # 阈值、量程和死值连续命中判定
-    # ------------------------------------------------------------------
-    def _evaluate_threshold_streak(
-        self,
-        samples: List[Tuple[datetime, float]],
-        rule: Dict[str, Any],
-        previous_count: Any,
-        target_seconds: float,
-        previous_started_at: Any = None,
-        previous_sample_time: Any = None,
-        max_gap_ms: Optional[float] = None,
-    ) -> Tuple[
-        int,
-        Optional[datetime],
-        bool,
-        Optional[Tuple[int, float, float, datetime]],
-    ]:
-        """兼容旧调用入口，实际逻辑由 ThresholdAlertRule 提供。"""
-        target_count = required_sample_count(
-            rule.get("frequency_hz") or rule.get("frequency"),
-            target_seconds,
-        )
-        return self._threshold_rule.evaluate_streak(
-            samples,
-            rule,
-            previous_count,
-            target_count,
-            previous_started_at=previous_started_at,
-            previous_sample_time=previous_sample_time,
-            max_gap_ms=max_gap_ms,
-        )
-
-    @staticmethod
-    def _is_out_of_range(
-        rule: Dict[str, Any],
-        value: float,
-    ) -> bool:
-        return OutOfRangeAlertRule.is_out_of_range(rule, value)
-
-    def _evaluate_out_of_range_streak(
-        self,
-        samples: List[Tuple[datetime, float]],
-        rule: Dict[str, Any],
-        previous_count: Any,
-        target_seconds: float,
-        previous_started_at: Any = None,
-        previous_sample_time: Any = None,
-        max_gap_ms: Optional[float] = None,
-    ) -> Tuple[
-        int,
-        Optional[datetime],
-        bool,
-        Optional[Tuple[float, datetime]],
-    ]:
-        """兼容旧调用入口，实际逻辑由 OutOfRangeAlertRule 提供。"""
-        target_count = required_sample_count(
-            rule.get("frequency_hz") or rule.get("frequency"),
-            target_seconds,
-        )
-        return self._out_of_range_rule.evaluate_streak(
-            samples,
-            rule,
-            previous_count,
-            target_count,
-            previous_started_at=previous_started_at,
-            previous_sample_time=previous_sample_time,
-            max_gap_ms=max_gap_ms,
-        )
-
-    @staticmethod
-    def _evaluate_stuck_streak(
-        samples: List[Tuple[datetime, float]],
-        previous_value: Any,
-        previous_count: Any,
-        previous_since: Any,
-        target_seconds: float,
-        previous_sample_time: Any = None,
-        max_gap_ms: Optional[float] = None,
-        frequency_hz: Any = 1.0,
-    ) -> Tuple[int, Optional[float], Optional[datetime], bool, Optional[Tuple[float, datetime]]]:
-        """兼容旧调用入口，实际逻辑由 StuckAlertRule 提供。"""
-        target_count = required_sample_count(
-            frequency_hz,
-            target_seconds,
-        )
-        return StuckAlertRule.evaluate_streak(
-            samples,
-            previous_value,
-            previous_count,
-            previous_since,
-            target_count,
-            previous_sample_time=previous_sample_time,
-            max_gap_ms=max_gap_ms,
-        )
-
     @classmethod
     def _parse_physical_range(
         cls,
@@ -1073,28 +956,6 @@ class AlertAnalyticsEngine:
             normalize_alert_type(alert_type) or (alert_type or "").strip(),
         )
 
-    def _level_for(
-        self,
-        rule: Dict[str, Any],
-        eval_upper: float,
-        eval_lower: float,
-    ) -> Tuple[Optional[int], Optional[float], Optional[float]]:
-        """返回单个评估值命中的最严重阈值级别。"""
-        return self._threshold_rule.level_for(rule, eval_upper, eval_lower)
-
-    def _sample_level(
-        self,
-        rule: Dict[str, Any],
-        value: float,
-    ) -> Tuple[Optional[int], Optional[float], Optional[float]]:
-        """直接使用原始样本值评估阈值级别。"""
-        return self._threshold_rule.sample_level(rule, value)
-
-    @staticmethod
-    def _max_sample_gap_ms(samples: List[Tuple[datetime, float]]) -> float:
-        """返回相邻样本之间的最大时间间隔。"""
-        return max_sample_gap_ms(samples)
-
     def _load_active_alerts(self, cur: Any) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
         """按传感器、通道和预警类型加载未处理预警。
 
@@ -1312,9 +1173,8 @@ class AlertAnalyticsEngine:
         pending_state_updates.setdefault(key, {}).update(evaluation.state_updates)
         return True
 
-    @classmethod
+    @staticmethod
     def _aggregate_samples(
-        cls,
         samples: List[Tuple[datetime, float]],
     ) -> Dict[str, Any]:
         """将原始样本批次聚合成与 SQL 查询一致的数据结构。"""
@@ -1326,10 +1186,8 @@ class AlertAnalyticsEngine:
             "val_max": val_max,
             "val_min": val_min,
             "val_avg": sum(values) / len(values),
-            "value_std": 0.0,
             "first_ts": samples[0][0],
             "last_ts": samples[-1][0],
-            "max_gap_ms": cls._max_sample_gap_ms(samples),
             "min_time": next(
                 sample_time
                 for sample_time, value in samples
