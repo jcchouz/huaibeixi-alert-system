@@ -1173,146 +1173,75 @@ class AlertAnalyticsEngine:
         pending_state_updates.setdefault(key, {}).update(evaluation.state_updates)
         return True
 
-    @staticmethod
-    def _aggregate_samples(
-        samples: List[Tuple[datetime, float]],
-    ) -> Dict[str, Any]:
-        """将原始样本批次聚合成与 SQL 查询一致的数据结构。"""
-        values = [value for _, value in samples]
-        val_max = max(values)
-        val_min = min(values)
-        return {
-            "sample_cnt": len(samples),
-            "val_max": val_max,
-            "val_min": val_min,
-            "val_avg": sum(values) / len(values),
-            "first_ts": samples[0][0],
-            "last_ts": samples[-1][0],
-            "min_time": next(
-                sample_time
-                for sample_time, value in samples
-                if value == val_min
-            ),
-            "max_time": next(
-                sample_time
-                for sample_time, value in samples
-                if value == val_max
-            ),
-        }
-
-    def _run_detection_window(
+    def _scan_realtime_alerts(
         self,
         window_start: datetime,
         window_end: datetime,
-        period_type: str,
-        *,
-        write_statistics: bool = True,
-        detect_alerts: bool = True,
-        new_samples_only: bool = False,
     ) -> Dict[str, Any]:
-        """在一个窗口中执行统计写入和预警检测。
-
-        三种调用方式共用同一套逻辑，靠三个开关区分：
-
-        - ``scan_realtime_alerts()``：write_statistics=False、
-          detect_alerts=True、new_samples_only=True，只处理新到样本并写预警；
-        - ``record_statistics_window()``：write_statistics=True、
-          detect_alerts=False，只做 SQL 聚合并写 t_stat_record；
-        - ``step_detection()``：两者都为 True，用于人工补算/联调。
-
-        窗口是左闭右开的 ``[window_start, window_end)``。整个方法在一个
-        数据库事务里完成“读样本 -> 判定 -> 写预警/统计”，事务提交后才把
-        新的连续命中状态发布到 ``channel_states``，避免写库失败但内存已推进。
-        """
-        # 以下累加结果与预警写入在同一事务中提交。
+        """只扫描原始采样点并执行实时预警规则，不读写统计记录。"""
+        # 本方法每轮按固定顺序判定五类预警：
+        # 1. 无新样本：_apply_offline_if_due() 判通道离线；
+        # 2. 有新样本：OfflineAlertRule 判通道离线或采样中断；
+        # 3. 未离线：AlertRuleRegistry 依次判阈值超限、超物理量程、传感器死值；
+        # 4. 本轮末尾：DaqOfflineRule 汇总全部通道均离线后的采集仪离线；
+        # 5. 条件恢复时，_apply_rule_evaluation() 关闭对应的活动预警。
         triggered_alerts: List[Dict[str, Any]] = []
-        upserted_stats = 0
         raw_points_processed = 0
-        stat_rows: List[Tuple[Any, ...]] = []
         pending_state_updates: Dict[str, Dict[str, Any]] = {}
         daq_condition_updates: Dict[str, bool] = {}
 
         with get_db_cursor(commit=True) as cur:
-            observed_map: Dict[str, Dict[str, Any]] = {}
             rules = self.channel_states.values()
             rules_by_key = {rule["key"]: rule for rule in rules}
             samples_by_key: Dict[str, List[Tuple[datetime, float]]] = {}
-            if detect_alerts:
-                # 实时预警需要逐点样本；只加载已配置的传感器和通道，
-                # 并保持数据库时间顺序。
-                # 未在 t_alert_threshold 中配置的组合会被直接丢弃，
-                # 因此 raw_points_processed 统计的是“读到的行数”，
-                # 不等于参与判定的样本数。
+
+            sample_query = self._sample_query
+            if sample_query is None and rules:
+                self._cache_sample_query(rules)
                 sample_query = self._sample_query
-                if sample_query is None and rules:
-                    self._cache_sample_query(rules)
-                    sample_query = self._sample_query
-                if sample_query is not None:
-                    sample_sql, sample_params_tail = sample_query
-                    cur.execute(
-                        sample_sql,
-                        (window_start, window_end, *sample_params_tail),
-                    )
-                    for row in cur.fetchall():
-                        raw_points_processed += int(row["sample_cnt"] or 0)
-                        key = self.make_key(row["s_no"], row["ch"])
-                        if key not in rules_by_key:
-                            continue
-                        samples_by_key[key] = list(
-                            zip(
-                                row["sample_times"],
-                                row["sample_values"],
-                                strict=True,
-                            )
-                        )
-                if new_samples_only:
-                    # 回看查询可能返回旧数据，丢弃各通道水位之前或同一时刻的样本。
-                    # 水位 last_ts 来自上一轮扫描结束后的 channel_states，
-                    # 比较使用严格大于，保证同一个时间戳只被计数一次。
-                    # 过滤后没有新样本的通道会从 dict 中移除，
-                    # 后续仍会走“无样本 -> 离线判定”的分支。
-                    for key, samples in list(samples_by_key.items()):
-                        previous_last_seen = self._parse_maybe_dt(
-                            rules_by_key[key].get("last_ts")
-                        )
-                        if previous_last_seen is not None:
-                            samples = [
-                                sample
-                                for sample in samples
-                                if sample[0] > previous_last_seen
-                            ]
-                        if samples:
-                            samples_by_key[key] = samples
-                        else:
-                            del samples_by_key[key]
-                # 把逐点样本聚合成与 WINDOW_AGG_SQL 相同的字段结构，
-                # 让后续统计和预警逻辑无需区分数据来源。
-                observed_map = {
-                    key: self._aggregate_samples(samples)
-                    for key, samples in samples_by_key.items()
-                }
-            else:
-                # 只做统计时，将聚合计算下推到 PostgreSQL。
-                cur.execute(WINDOW_AGG_SQL, (window_start, window_end))
+            if sample_query is not None:
+                sample_sql, sample_params_tail = sample_query
+                cur.execute(
+                    sample_sql,
+                    (window_start, window_end, *sample_params_tail),
+                )
                 for row in cur.fetchall():
                     raw_points_processed += int(row["sample_cnt"] or 0)
-                    observed_map[self.make_key(row["s_no"], row["ch"])] = row
+                    key = self.make_key(row["s_no"], row["ch"])
+                    if key not in rules_by_key:
+                        continue
+                    samples_by_key[key] = list(
+                        zip(
+                            row["sample_times"],
+                            row["sample_values"],
+                            strict=True,
+                        )
+                    )
 
-            # 一次性加载活动预警，重复条件在原事件上更新。
-            # 注意这里是“整个表里所有未处理记录”，不按窗口过滤，
-            # 所以跨窗口的活动事件也能在同一轮里被识别出来。
-            if detect_alerts:
-                if self._active_alert_cache is not None:
-                    active_map = {
-                        key: dict(value)
-                        for key, value in self._active_alert_cache.items()
-                    }
+            # 回看查询可能带回已处理样本，仅在 last_ts 之后继续累计状态。
+            for key, samples in list(samples_by_key.items()):
+                previous_last_seen = self._parse_maybe_dt(
+                    rules_by_key[key].get("last_ts")
+                )
+                if previous_last_seen is not None:
+                    samples = [
+                        sample
+                        for sample in samples
+                        if sample[0] > previous_last_seen
+                    ]
+                if samples:
+                    samples_by_key[key] = samples
                 else:
-                    active_map = self._load_active_alerts(cur)
+                    del samples_by_key[key]
+
+            if self._active_alert_cache is not None:
+                active_map = {
+                    key: dict(value)
+                    for key, value in self._active_alert_cache.items()
+                }
             else:
-                active_map = {}
-            # 采集仪级离线需要知道每台采集仪配置了多少个通道，
-            # 只有全部通道都离线时才汇总为一条采集仪离线预警。
+                active_map = self._load_active_alerts(cur)
+
             instrument_totals = Counter(
                 r.get("instrument_id")
                 for r in rules
@@ -1320,64 +1249,15 @@ class AlertAnalyticsEngine:
             )
             offline_by_instrument: Dict[str, Set[str]] = {}
 
-            # 每个已配置通道都要评估，包括当前窗口没有数据的通道。
-            # 没有样本不代表正常，可能是通道已经离线，必须继续判离线。
+            # 没有样本的通道也必须继续推进，否则无法判定通道离线。
             for rule in rules:
                 key = rule["key"]
                 sensor_no = rule["sensor_no_lower"]
                 channel = rule.get("channel") or ""
-                obs = observed_map.get(key)
+                samples = samples_by_key.get(key, [])
                 previous_last_seen = self._parse_maybe_dt(rule.get("last_ts"))
-                if obs is None or int(obs["sample_cnt"] or 0) <= 0:
-                    if not detect_alerts:
-                        continue
-                    # 没有样本的通道仍需继续执行离线判定。
-                    self._apply_offline_if_due(
-                        cur,
-                        active_map,
-                        triggered_alerts,
-                        offline_by_instrument,
-                        pending_state_updates,
-                        rule=rule,
-                        key=key,
-                        window_end=window_end,
-                    )
-                    continue
-
-                sample_cnt = int(obs["sample_cnt"] or 0)
-                first_ts = obs["first_ts"]
-                last_ts = obs["last_ts"]
-                val_max = float(obs["val_max"])
-                val_min = float(obs["val_min"])
-                val_avg = float(obs["val_avg"])
-                max_time = obs.get("max_time") or last_ts
-                min_time = obs.get("min_time") or first_ts
-                if write_statistics:
-                    # 每个完整统计窗口生成一条 t_stat_record 记录。
-                    stat_rows.append(
-                        (
-                            sensor_no,
-                            channel,
-                            period_type,
-                            window_start,
-                            val_max,
-                            val_min,
-                            val_avg,
-                            max_time,
-                            min_time,
-                            sample_cnt,
-                        )
-                    )
-                    upserted_stats += 1
-                if not detect_alerts:
-                    continue
-
-                # 回看重读的重复样本不能推进预警连续状态。
-                if (
-                    new_samples_only
-                    and previous_last_seen is not None
-                    and last_ts <= previous_last_seen
-                ):
+                if not samples:
+                    # 通道离线：本窗口没有该通道的新样本，按 last_ts 计算静默时长。
                     self._apply_offline_if_due(
                         cur,
                         active_map,
@@ -1396,23 +1276,6 @@ class AlertAnalyticsEngine:
                 stuck_seconds = float(
                     rule.get("stuck_seconds") or self.stuck_seconds
                 )
-                offline_timeout_ms = self._offline_timeout_ms(rule)
-                samples = samples_by_key.get(key, [])
-                if not samples:
-                    if new_samples_only:
-                        self._apply_offline_if_due(
-                            cur,
-                            active_map,
-                            triggered_alerts,
-                            offline_by_instrument,
-                            pending_state_updates,
-                            rule=rule,
-                            key=key,
-                            window_end=window_end,
-                        )
-                        continue
-                    samples = [(last_ts, val_avg)]
-
                 context = RuleContext(
                     rule=rule,
                     samples=samples,
@@ -1420,8 +1283,9 @@ class AlertAnalyticsEngine:
                     window_end=window_end,
                     confirm_seconds=confirm_seconds,
                     stuck_seconds=stuck_seconds,
-                    offline_timeout_ms=offline_timeout_ms,
+                    offline_timeout_ms=self._offline_timeout_ms(rule),
                 )
+                # 通道离线或采样中断：使用原始样点时间检查静默时长和最大采样间隔。
                 offline_evaluation = self._offline_rule.evaluate(context)
                 state_updates: Dict[str, Any] = {
                     "last_ts": self._serialize_runtime_dt(samples[-1][0]),
@@ -1429,6 +1293,7 @@ class AlertAnalyticsEngine:
                     "online_status": "ONLINE",
                 }
                 if offline_evaluation.suppress_other_alerts:
+                    # 通道已离线时，离线预警优先，并关闭尚未结束的阈值、死值和超量程事件。
                     state_updates.update(offline_evaluation.state_updates)
                     for alert_type, state_field in (
                         (ALERT_TYPE_THRESHOLD, "threshold_condition_active"),
@@ -1445,8 +1310,13 @@ class AlertAnalyticsEngine:
                                 end_time=window_end,
                             )
                 else:
+                    # 通道在线时按注册表固定顺序判定：
+                    # 1. ThresholdAlertRule   -> 阈值超限（level1/2/3）；
+                    # 2. OutOfRangeAlertRule  -> 超物理量程（physical_min/max）；
+                    # 3. StuckAlertRule       -> 传感器死值（连续相同读数）。
                     for evaluation in self.channel_rule_registry.evaluate(context):
                         state_updates.update(evaluation.state_updates)
+                        # 新建、升级或关闭上述三类预警，并同步 t_alert_record。
                         self._apply_rule_evaluation(
                             cur,
                             active_map,
@@ -1460,12 +1330,14 @@ class AlertAnalyticsEngine:
                     state_updates.update(offline_evaluation.state_updates)
 
                 if offline_evaluation.active:
+                    # 记录真正离线的通道，供本轮采集仪离线聚合使用。
                     instrument_id = (rule.get("instrument_id") or "").strip()
                     if instrument_id:
                         offline_by_instrument.setdefault(
                             instrument_id,
                             set(),
                         ).add(key)
+                # 通道离线预警同样通过统一写库入口创建或关闭。
                 self._apply_rule_evaluation(
                     cur,
                     active_map,
@@ -1476,27 +1348,10 @@ class AlertAnalyticsEngine:
                     evaluation=offline_evaluation,
                     window_end=window_end,
                 )
-
                 pending_state_updates.setdefault(key, {}).update(state_updates)
 
-            # 统计数据和预警事件在同一事务中落库；运行时连续状态只保存在
-            # 当前进程，事务成功提交后再发布到 channel_states。
-            if stat_rows:
-                # 批量更新插入，确保一个完整窗口在同一事务中提交。
-                execute_values(
-                    cur,
-                    STAT_UPSERT_SQL,
-                    stat_rows,
-                    template=(
-                        "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
-                        "'system', NOW())"
-                    ),
-                    page_size=len(stat_rows),
-                )
-            if detect_alerts and self.is_alert_type_enabled(
-                ALERT_TYPE_DAQ_OFFLINE
-            ):
-                # 采集仪下全部通道均离线时才汇总为采集仪级离线预警。
+            # 采集仪离线：同一采集仪下所有已配置通道都离线时，只生成一条设备级预警。
+            if self.is_alert_type_enabled(ALERT_TYPE_DAQ_OFFLINE):
                 for instrument_id in sorted(instrument_totals):
                     offline_keys = offline_by_instrument.get(instrument_id, set())
                     total_channels = int(instrument_totals.get(instrument_id, 0))
@@ -1515,6 +1370,7 @@ class AlertAnalyticsEngine:
                         state_known=instrument_id in self._daq_state_known,
                     )
                     if evaluation.should_close:
+                        # 至少一个通道恢复在线时，关闭采集仪离线预警。
                         self._close_alert_incident(
                             cur,
                             active_map,
@@ -1529,6 +1385,7 @@ class AlertAnalyticsEngine:
                     if not evaluation.should_create:
                         daq_condition_updates[instrument_id] = True
                         continue
+                    # 首次全部通道离线时创建采集仪离线预警。
                     daq_alert = self._upsert_alert_incident(
                         cur,
                         sensor_no=instrument_id,
@@ -1548,27 +1405,83 @@ class AlertAnalyticsEngine:
                     triggered_alerts.append(daq_alert)
                     daq_condition_updates[instrument_id] = True
 
-        # 仅在数据库事务成功后发布新的运行状态。
-        # 这一步是“状态在内存里”的落点：下一轮扫描通过 channel_states
-        # 读取 last_ts、连续命中计数和 condition_active，继续累计。
         for key, updates in pending_state_updates.items():
             self.channel_states.update_field(key, **updates)
-        # 采集仪级离线状态按采集仪维度单独维护，没有对应的通道 key。
         self._daq_condition_active.update(daq_condition_updates)
         self._daq_state_known.update(daq_condition_updates)
-        if detect_alerts:
-            self._active_alert_cache = {
-                key: dict(value) for key, value in active_map.items()
-            }
+        self._active_alert_cache = {
+            key: dict(value) for key, value in active_map.items()
+        }
+
+        return {
+            "windowStart": serialize_val(window_start),
+            "windowEnd": serialize_val(window_end),
+            "periodType": "realtime",
+            "rawPointsProcessed": raw_points_processed,
+            "upsertedStatsCount": 0,
+            "triggeredAlertsCount": len(triggered_alerts),
+            "triggeredAlerts": triggered_alerts[:10],
+        }
+
+    def _record_statistics_window(
+        self,
+        window_start: datetime,
+        window_end: datetime,
+        period_type: str,
+    ) -> Dict[str, Any]:
+        """只聚合完整窗口并写入 t_stat_record，不执行预警规则。"""
+        raw_points_processed = 0
+        stat_rows: List[Tuple[Any, ...]] = []
+        rules = self.channel_states.values()
+
+        with get_db_cursor(commit=True) as cur:
+            cur.execute(WINDOW_AGG_SQL, (window_start, window_end))
+            observed_map: Dict[str, Dict[str, Any]] = {}
+            for row in cur.fetchall():
+                raw_points_processed += int(row["sample_cnt"] or 0)
+                observed_map[self.make_key(row["s_no"], row["ch"])] = row
+
+            # 保持原有范围：仅为已配置预警规则的通道生成统计记录。
+            for rule in rules:
+                key = rule["key"]
+                obs = observed_map.get(key)
+                if obs is None or int(obs["sample_cnt"] or 0) <= 0:
+                    continue
+                stat_rows.append(
+                    (
+                        rule["sensor_no_lower"],
+                        rule.get("channel") or "",
+                        period_type,
+                        window_start,
+                        float(obs["val_max"]),
+                        float(obs["val_min"]),
+                        float(obs["val_avg"]),
+                        obs.get("max_time") or obs["last_ts"],
+                        obs.get("min_time") or obs["first_ts"],
+                        int(obs["sample_cnt"] or 0),
+                    )
+                )
+
+            if stat_rows:
+                execute_values(
+                    cur,
+                    STAT_UPSERT_SQL,
+                    stat_rows,
+                    template=(
+                        "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                        "'system', NOW())"
+                    ),
+                    page_size=len(stat_rows),
+                )
 
         return {
             "windowStart": serialize_val(window_start),
             "windowEnd": serialize_val(window_end),
             "periodType": period_type,
             "rawPointsProcessed": raw_points_processed,
-            "upsertedStatsCount": upserted_stats,
-            "triggeredAlertsCount": len(triggered_alerts),
-            "triggeredAlerts": triggered_alerts[:10],
+            "upsertedStatsCount": len(stat_rows),
+            "triggeredAlertsCount": 0,
+            "triggeredAlerts": [],
         }
 
     def scan_realtime_alerts(
@@ -1576,27 +1489,14 @@ class AlertAnalyticsEngine:
         window_start: datetime,
         window_end: datetime,
     ) -> Dict[str, Any]:
-        """只对新到达的原始样本执行实时预警检测。
-
-        生产环境由 AlertDetectionWorker 的实时线程按
-        ``DETECTION_INTERVAL_SECONDS`` 调用；窗口由 Worker 计算，
-        这里只负责：
-
-        - ``write_statistics=False``：不写 t_stat_record，统计由另一条线程负责；
-        - ``new_samples_only=True``：按通道 last_ts 丢弃回看带来的重复样本；
-        - 用 ``_alert_step_lock`` 串行化，避免手工调用和后台线程同时改内存状态。
-        """
+        """只对新到达的原始样本执行实时预警检测。"""
         with self._alert_step_lock:
             t0 = time.perf_counter()
             if window_end <= window_start:
                 raise ValueError("window_end must be later than window_start")
-            result = self._run_detection_window(
+            result = self._scan_realtime_alerts(
                 window_start,
                 window_end,
-                "realtime",
-                write_statistics=False,
-                detect_alerts=True,
-                new_samples_only=True,
             )
             return {
                 **result,
@@ -1615,47 +1515,15 @@ class AlertAnalyticsEngine:
             t0 = time.perf_counter()
             if window_end <= window_start:
                 raise ValueError("window_end must be later than window_start")
-            result = self._run_detection_window(
+            result = self._record_statistics_window(
                 window_start,
                 window_end,
                 period_type,
-                write_statistics=True,
-                detect_alerts=False,
             )
             return {
                 **result,
                 "subWindowCount": 1,
                 "elapsedMs": round((time.perf_counter() - t0) * 1000, 2),
-            }
-
-    def step_detection(
-        self,
-        window_start: datetime,
-        window_end: datetime,
-        period_type: str = "1m",
-    ) -> Dict[str, Any]:
-        """人工工作流中同时执行统计和预警检测。"""
-        with self._alert_step_lock, self._statistics_step_lock:
-            t0 = time.perf_counter()
-            if window_end <= window_start:
-                raise ValueError("window_end must be later than window_start")
-
-            result = self._run_detection_window(
-                window_start,
-                window_end,
-                period_type,
-            )
-            elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
-            return {
-                "windowStart": serialize_val(window_start),
-                "windowEnd": serialize_val(window_end),
-                "periodType": period_type,
-                "subWindowCount": 1,
-                "rawPointsProcessed": result["rawPointsProcessed"],
-                "upsertedStatsCount": result["upsertedStatsCount"],
-                "triggeredAlertsCount": result["triggeredAlertsCount"],
-                "triggeredAlerts": result["triggeredAlerts"],
-                "elapsedMs": elapsed_ms,
             }
 
     def get_status(self) -> Dict[str, Any]:

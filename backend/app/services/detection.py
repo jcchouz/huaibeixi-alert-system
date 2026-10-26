@@ -290,6 +290,29 @@ class AlertDetectionWorker:
         )
         return block_start
 
+    def _next_statistics_scan_at(self) -> Optional[datetime]:
+        """返回下一轮统计窗口允许开始处理的时间。"""
+        with self._state_lock:
+            last_window_end = self._last_window_end
+        if last_window_end is None:
+            return None
+        return last_window_end + timedelta(
+            minutes=self.window_minutes,
+            seconds=self.lag_seconds,
+        )
+
+    def _statistics_wait_seconds(
+        self,
+        current_time: datetime,
+        elapsed_seconds: float = 0.0,
+    ) -> float:
+        """按统计窗口节奏计算等待时间，不在实时扫描周期内空转。"""
+        next_scan_at = self._next_statistics_scan_at()
+        if next_scan_at is None:
+            return max(0.1, self.interval_seconds)
+        remaining = (next_scan_at - current_time).total_seconds() - elapsed_seconds
+        return max(0.1, remaining)
+
     def _current_time(self) -> datetime:
         """优先使用注入时钟，否则使用数据库时钟确定扫描边界。"""
         if self.clock is not None:
@@ -384,13 +407,20 @@ class AlertDetectionWorker:
         """持续处理完整统计窗口，直到收到停止信号。"""
         while not self._stop_event.is_set():
             started = time.monotonic()
+            # 默认按失败重试间隔等待，成功后再切换到下一窗口的处理时间。
+            wait_seconds = max(1.0, self.interval_seconds)
             try:
-                self.process_statistics_once(self._current_time())
+                current_time = self._current_time()
+                self.process_statistics_once(current_time)
             except Exception as exc:
                 logger.exception("Statistics window processing failed")
                 with self._state_lock:
                     self._last_statistics_error = str(exc)
                     self._last_error = str(exc)
-            elapsed = time.monotonic() - started
-            wait_seconds = max(0.1, self.interval_seconds - elapsed)
+            else:
+                elapsed = time.monotonic() - started
+                wait_seconds = self._statistics_wait_seconds(
+                    current_time,
+                    elapsed_seconds=elapsed,
+                )
             self._stop_event.wait(wait_seconds)

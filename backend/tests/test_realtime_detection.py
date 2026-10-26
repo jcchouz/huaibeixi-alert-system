@@ -21,13 +21,11 @@ def test_realtime_scan_uses_alert_only_path(monkeypatch) -> None:
     engine = AlertAnalyticsEngine()
     captured: dict[str, Any] = {}
 
-    def fake_run(window_start, window_end, period_type, **kwargs):
+    def fake_alert_scan(window_start, window_end):
         captured.update(
             {
                 "window_start": window_start,
                 "window_end": window_end,
-                "period_type": period_type,
-                **kwargs,
             }
         )
         return {
@@ -37,15 +35,18 @@ def test_realtime_scan_uses_alert_only_path(monkeypatch) -> None:
             "triggeredAlerts": [],
         }
 
-    monkeypatch.setattr(engine, "_run_detection_window", fake_run)
+    def fail_statistics(*args, **kwargs):
+        raise AssertionError("realtime scan must not run statistics")
+
+    monkeypatch.setattr(engine, "_scan_realtime_alerts", fake_alert_scan)
+    monkeypatch.setattr(engine, "_record_statistics_window", fail_statistics)
 
     result = engine.scan_realtime_alerts(
         datetime(2026, 10, 20, 12, 0, 1),
         datetime(2026, 10, 20, 12, 0, 2),
     )
 
-    assert captured["write_statistics"] is False
-    assert captured["detect_alerts"] is True
+    assert captured["window_start"] == datetime(2026, 10, 20, 12, 0, 1)
     assert result["triggeredAlertsCount"] == 1
     assert result["subWindowCount"] == 1
 
@@ -54,13 +55,15 @@ def test_statistics_window_skips_alert_detection(monkeypatch) -> None:
     engine = AlertAnalyticsEngine()
     captured: dict[str, Any] = {}
 
-    def fake_run(window_start, window_end, period_type, **kwargs):
+    def fail_alert_scan(*args, **kwargs):
+        raise AssertionError("statistics scan must not run alert detection")
+
+    def fake_statistics(window_start, window_end, period_type):
         captured.update(
             {
                 "window_start": window_start,
                 "window_end": window_end,
                 "period_type": period_type,
-                **kwargs,
             }
         )
         return {
@@ -70,15 +73,16 @@ def test_statistics_window_skips_alert_detection(monkeypatch) -> None:
             "triggeredAlerts": [],
         }
 
-    monkeypatch.setattr(engine, "_run_detection_window", fake_run)
+    monkeypatch.setattr(engine, "_scan_realtime_alerts", fail_alert_scan)
+    monkeypatch.setattr(engine, "_record_statistics_window", fake_statistics)
 
     result = engine.record_statistics_window(
         datetime(2026, 10, 20, 12, 0),
         datetime(2026, 10, 20, 12, 1),
     )
 
-    assert captured["write_statistics"] is True
-    assert captured["detect_alerts"] is False
+    assert captured["window_start"] == datetime(2026, 10, 20, 12, 0)
+    assert captured["period_type"] == "1m"
     assert result["upsertedStatsCount"] == 2
 
 
@@ -492,18 +496,26 @@ def test_statistics_window_does_not_block_realtime_alert_scan(
     statistics_started = threading.Event()
     release_statistics = threading.Event()
 
-    def fake_run(window_start, window_end, period_type, **kwargs):
-        if kwargs.get("write_statistics"):
-            statistics_started.set()
-            assert release_statistics.wait(2)
+    def fake_statistics(window_start, window_end, period_type):
+        statistics_started.set()
+        assert release_statistics.wait(2)
         return {
             "rawPointsProcessed": 1,
-            "upsertedStatsCount": int(bool(kwargs.get("write_statistics"))),
+            "upsertedStatsCount": 1,
             "triggeredAlertsCount": 0,
             "triggeredAlerts": [],
         }
 
-    monkeypatch.setattr(engine, "_run_detection_window", fake_run)
+    def fake_alert_scan(window_start, window_end):
+        return {
+            "rawPointsProcessed": 1,
+            "upsertedStatsCount": 0,
+            "triggeredAlertsCount": 0,
+            "triggeredAlerts": [],
+        }
+
+    monkeypatch.setattr(engine, "_record_statistics_window", fake_statistics)
+    monkeypatch.setattr(engine, "_scan_realtime_alerts", fake_alert_scan)
 
     statistics_thread = threading.Thread(
         target=engine.record_statistics_window,

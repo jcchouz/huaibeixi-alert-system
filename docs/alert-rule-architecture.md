@@ -35,8 +35,9 @@ Python 线程还受 GIL 限制，按类别开线程会增加调度和上下文�
 | 最大扫描耗时 | 316.721 ms | 299.379 ms | 快 5.47% |
 
 性能提升属于小幅改善，主要收益是把预警判定从主扫描器解耦，使新增规则不需要修改
-`_run_detection_window()`。当前数据库读取仍占主要耗时，后续性能优化应优先考虑
-索引、SQL 返回量和事务写入，而不是增加线程。
+实时告警扫描入口 `_scan_realtime_alerts()`。统计窗口由独立的
+`_record_statistics_window()` 处理。当前数据库读取仍占主要耗时，后续性能优化应
+优先考虑索引、SQL 返回量和事务写入，而不是增加线程。
 
 ## 单次扫描耗时拆分
 
@@ -111,7 +112,7 @@ GROUP BY LOWER(sensor_no), COALESCE(channel, '')
 
 ```text
 AlertDetectionWorker
-  -> AlertAnalyticsEngine._run_detection_window()
+  -> AlertAnalyticsEngine._scan_realtime_alerts()
       -> 准备 RuleContext
       -> OfflineAlertRule
       -> AlertRuleRegistry
@@ -119,8 +120,11 @@ AlertDetectionWorker
            -> OutOfRangeAlertRule
            -> StuckAlertRule
       -> DaqOfflineRule
-      -> 统一事务写库
+      -> 告警事务写库
       -> 提交后发布 channel_states
+  -> AlertAnalyticsEngine._record_statistics_window()
+      -> WINDOW_AGG_SQL 聚合 t_monitor
+      -> 批量 UPSERT t_stat_record
 ```
 
 依赖顺序：

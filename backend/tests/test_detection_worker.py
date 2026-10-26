@@ -147,13 +147,12 @@ def test_statistics_start_with_first_complete_window_after_startup() -> None:
     worker.initialize(datetime(2026, 10, 20, 15, 40, 30))
 
     current_time = datetime(2026, 10, 20, 15, 42, 30)
-    worker.scan_alerts_once(current_time)
     first = worker.process_statistics_once(current_time)
-    worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 31))
     second = worker.process_statistics_once(datetime(2026, 10, 20, 15, 42, 31))
 
     assert len(first) == 1
     assert second == []
+    assert engine.alert_scans == []
     assert engine.windows == [
         (datetime(2026, 10, 20, 15, 41), datetime(2026, 10, 20, 15, 42))
     ]
@@ -166,12 +165,27 @@ def test_detection_worker_supports_a_configurable_window() -> None:
     worker.initialize(datetime(2026, 10, 20, 15, 30, 30))
 
     current_time = datetime(2026, 10, 20, 15, 42, 30)
-    worker.scan_alerts_once(current_time)
     results = worker.process_statistics_once(current_time)
 
     assert results == []
+    assert engine.alert_scans == []
     assert worker._last_window_end == datetime(2026, 10, 20, 15, 40)
     assert engine.windows == []
+
+
+def test_statistics_loop_waits_for_the_next_complete_window() -> None:
+    engine = FakeEngine()
+    worker = make_worker(engine)
+    worker.initialize(datetime(2026, 10, 20, 15, 42))
+
+    assert worker._next_statistics_scan_at() == datetime(2026, 10, 20, 15, 43, 5)
+    assert worker._statistics_wait_seconds(
+        datetime(2026, 10, 20, 15, 42, 1)
+    ) == 64.0
+
+    worker.process_statistics_once(datetime(2026, 10, 20, 15, 43, 5))
+
+    assert worker._next_statistics_scan_at() == datetime(2026, 10, 20, 15, 44, 5)
 
 
 def test_startup_on_window_boundary_uses_next_complete_window() -> None:

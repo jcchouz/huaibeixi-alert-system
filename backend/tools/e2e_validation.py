@@ -5,7 +5,7 @@
 --------
 precheck : 只读检查数据库状态和规则集
 seed     : 写入模拟 ``t_monitor`` 数据，默认每秒 4000 行
-detect   : 按窗口驱动 ``AlertAnalyticsEngine.step_detection``
+detect   : 按窗口分别驱动实时告警扫描和统计窗口写入
 verify   : 校验生成的预警和一分钟统计
 clean    : 删除模拟数据并恢复 ``t_alert_record`` 快照
 all      : seed -> detect -> verify -> clean
@@ -353,11 +353,15 @@ def phase_detect(args: argparse.Namespace) -> bool:
     for win_idx in range(args.windows):
         ws = STREAM_START + timedelta(seconds=win_idx * WINDOW_SECONDS)
         we = ws + timedelta(seconds=WINDOW_SECONDS)
-        res = engine.step_detection(ws, we)
+        alert_res = engine.scan_realtime_alerts(ws, we)
+        statistics_res = engine.record_statistics_window(ws, we)
         print(
-            f"[detect] window {win_idx} @ {ws:%H:%M:%S}: raw={res['rawPointsProcessed']} "
-            f"stats={res['upsertedStatsCount']} alerts={res['triggeredAlertsCount']} "
-            f"elapsed={res['elapsedMs']}ms"
+            f"[detect] window {win_idx} @ {ws:%H:%M:%S}: "
+            f"alert_raw={alert_res['rawPointsProcessed']} "
+            f"stats_raw={statistics_res['rawPointsProcessed']} "
+            f"stats={statistics_res['upsertedStatsCount']} "
+            f"alerts={alert_res['triggeredAlertsCount']} "
+            f"elapsed={alert_res['elapsedMs'] + statistics_res['elapsedMs']}ms"
         )
         with get_db_cursor() as cur:
             cur.execute(
