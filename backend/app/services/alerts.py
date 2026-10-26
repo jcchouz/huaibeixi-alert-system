@@ -162,6 +162,7 @@ class AlertService:
             alert_type=alert_type,
             alert_level=alert_level,
             trigger_val=trigger_val,
+            rule_snapshot=self.engine.build_rule_snapshot(rule, alert_type),
         )
         enriched = self.engine.enrich_alert_row(created)
         return {"success": True, "alert": enriched}

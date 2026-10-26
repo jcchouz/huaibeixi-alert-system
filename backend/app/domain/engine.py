@@ -13,7 +13,7 @@ from collections import Counter
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
-from psycopg2.extras import execute_values
+from psycopg2.extras import Json, execute_values
 
 from app.core.serialization import serialize_row, serialize_val
 from app.domain.alert_rules import (
@@ -45,7 +45,6 @@ from app.domain.alert_types import (
     normalize_alert_type,
 )
 from app.infrastructure.database import get_db_cursor
-from app.repositories.detection_state import load_rule_version
 
 logger = logging.getLogger("alert_analysis.engine")
 
@@ -207,7 +206,6 @@ class AlertAnalyticsEngine:
         offline_seconds: float = 5.0,
         station_name: str = "玉环站",
         alert_type_switches: Optional[Dict[str, bool]] = None,
-        rule_refresh_seconds: float = 5.0,
         channel_rules: Optional[Iterable[AlertRule]] = None,
     ) -> None:
         # 检测、接口补充信息和总览统计共用这些元数据。
@@ -217,16 +215,13 @@ class AlertAnalyticsEngine:
         self._daq_condition_active: Dict[str, bool] = {}
         self._daq_state_known: Set[str] = set()
         self.total_monitor_rows: int = 398059510
-        self.last_reload_time: Optional[datetime] = None
+        self.last_rule_load_time: Optional[datetime] = None
         self.confirm_seconds = max(0.001, float(confirm_seconds))
         self.stuck_seconds = max(0.001, float(stuck_seconds))
         self.offline_seconds = max(0.001, float(offline_seconds))
         self.station_name = (station_name or "").strip() or "玉环站"
         self.station_code: Optional[str] = None
         self.detection_started_at: Optional[datetime] = None
-        self.rule_refresh_seconds = max(0.1, float(rule_refresh_seconds))
-        self.rule_version: Optional[int] = None
-        self._last_rule_check_monotonic = 0.0
         # 未显式配置的预警类型默认启用，避免新增类型被意外关闭。
         self.alert_type_switches: Dict[str, bool] = {
             (normalize_alert_type(name) or name): bool(enabled)
@@ -267,7 +262,7 @@ class AlertAnalyticsEngine:
     # ------------------------------------------------------------------
     def initialize(self) -> None:
         """加载规则和元数据，不恢复任何上次进程的运行状态。"""
-        self.reload_thresholds()
+        self.load_thresholds()
         self.refresh_monitor_row_count()
 
     def begin_detection_session(self, started_at: datetime) -> None:
@@ -360,8 +355,8 @@ class AlertAnalyticsEngine:
             )
         return station_code
 
-    def reload_thresholds(self) -> int:
-        """热更新规则和元数据，并保留现有运行状态。"""
+    def load_thresholds(self) -> int:
+        """在进程启动时加载一次规则和元数据。"""
         with get_db_cursor() as cur:
             cur.execute("SELECT LOCALTIMESTAMP AS now")
             runtime_now = cur.fetchone()["now"]
@@ -569,9 +564,7 @@ class AlertAnalyticsEngine:
             # 完整构建后一次性替换，避免读取到半加载状态。
             self.channel_states.replace_all(new_states)
             self._cache_sample_query(new_states.values())
-            self.rule_version = load_rule_version(cur)
-            self._last_rule_check_monotonic = time.monotonic()
-            self.last_reload_time = datetime.now()
+            self.last_rule_load_time = datetime.now()
             logger.info("Loaded %d threshold rules into memory.", len(new_states))
             return len(new_states)
 
@@ -590,33 +583,6 @@ class AlertAnalyticsEngine:
         for sensor_no, channel in targets:
             params.extend([sensor_no, channel])
         self._sample_query = (sample_sql, tuple(params))
-
-    def refresh_rules_if_changed(self, force: bool = False) -> bool:
-        """数据库中的规则版本变化时重新加载阈值规则。"""
-
-        now = time.monotonic()
-        if (
-            not force
-            and now - self._last_rule_check_monotonic < self.rule_refresh_seconds
-        ):
-            return False
-        with get_db_cursor() as cur:
-            current_version = load_rule_version(cur)
-        self._last_rule_check_monotonic = now
-        if current_version is None:
-            return False
-        if self.rule_version is None:
-            self.rule_version = current_version
-            return False
-        if current_version == self.rule_version:
-            return False
-        logger.info(
-            "Threshold rule version changed from %s to %s; reloading.",
-            self.rule_version,
-            current_version,
-        )
-        self.reload_thresholds()
-        return True
 
     @staticmethod
     def _parse_frequency_hz(value: Any) -> float:
@@ -957,6 +923,7 @@ class AlertAnalyticsEngine:
         alert_level: int,
         trigger_val: Optional[float],
         fire_time: datetime,
+        rule_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """新增或刷新未处理预警事件。
 
@@ -1010,11 +977,12 @@ class AlertAnalyticsEngine:
                 INSERT INTO public.t_alert_record (
                     id, seq, sensor_no, channel, threshold_id,
                     alert_type, alert_category, alert_level,
-                    trigger_val, create_time, alert_status, end_time
+                    trigger_val, create_time, alert_status, end_time,
+                    rule_snapshot
                 ) VALUES (
                     %s, nextval('public.seq_alert_record'), %s, %s, %s,
                     %s, %s, %s,
-                    %s, %s, 0, NULL
+                    %s, %s, 0, NULL, %s
                 )
                 RETURNING *
                 """,
@@ -1028,6 +996,7 @@ class AlertAnalyticsEngine:
                     alert_level,
                     trigger_val,
                     fire_time,
+                    Json(serialize_val(rule_snapshot or {})),
                 ),
             )
         row = cur.fetchone()
@@ -1199,10 +1168,49 @@ class AlertAnalyticsEngine:
             alert_level=alert_level,
             trigger_val=trigger_val,
             fire_time=fire_time,
+            rule_snapshot=self.build_rule_snapshot(rule, alert_type),
         )
         active_map[key] = alert
         triggered.append(alert)
         return alert
+
+    @staticmethod
+    def build_rule_snapshot(
+        rule: Dict[str, Any],
+        alert_type: str,
+    ) -> Dict[str, Any]:
+        """生成预警首次创建时保存的规则依据，不包含运行时状态。"""
+        fields = (
+            "id",
+            "sensor_no",
+            "channel",
+            "physical_quantity",
+            "unit",
+            "range_min",
+            "range_max",
+            "level1_upper",
+            "level1_lower",
+            "level2_upper",
+            "level2_lower",
+            "level3_upper",
+            "level3_lower",
+            "frequency",
+            "frequency_hz",
+            "confirm_seconds",
+            "threshold_confirm_samples",
+            "stuck_seconds",
+            "stuck_confirm_samples",
+            "oor_confirm_samples",
+            "offline_seconds",
+            "offline_confirm_periods",
+            "offline_timeout_ms",
+        )
+        snapshot = {"alert_type": alert_type}
+        for field in fields:
+            value = rule.get(field)
+            if value is not None:
+                snapshot[field] = serialize_val(value)
+        return snapshot
 
     def _apply_rule_evaluation(
         self,
@@ -1672,6 +1680,11 @@ class AlertAnalyticsEngine:
                         alert_level=NON_THRESHOLD_ALERT_LEVEL,
                         trigger_val=0.0,
                         fire_time=window_end,
+                        rule_snapshot={
+                            "alert_type": ALERT_TYPE_DAQ_OFFLINE,
+                            "offline_seconds": self.offline_seconds,
+                            "required_channel_count": total_channels,
+                        },
                     )
                     active_map[daq_key] = daq_alert
                     triggered_alerts.append(daq_alert)
@@ -1797,14 +1810,12 @@ class AlertAnalyticsEngine:
             "onlineChannels": online_cnt,
             "offlineChannels": offline_cnt,
             "totalMonitorRows": self.total_monitor_rows,
-            "lastReloadTime": serialize_val(self.last_reload_time),
+            "lastRuleLoadTime": serialize_val(self.last_rule_load_time),
             "detectionMode": "realtime_sample_groups",
             "detectionStartedAt": serialize_val(self.detection_started_at),
             "stationName": self.station_name,
             "stationCode": self.station_code,
             "alertTypeSwitches": dict(self.alert_type_switches),
-            "ruleVersion": self.rule_version,
-            "ruleRefreshSeconds": self.rule_refresh_seconds,
             "confirmSeconds": self.confirm_seconds,
             "thresholdConfirmMode": "frequency_sample_count",
             "thresholdConfirmMinimumSamples": MIN_CONFIRM_SAMPLES,

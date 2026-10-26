@@ -151,8 +151,6 @@ def downgrade() -> None:
           ADD COLUMN IF NOT EXISTS peak_val NUMERIC(15,5),
           ADD COLUMN IF NOT EXISTS peak_time TIMESTAMP(6),
           ADD COLUMN IF NOT EXISTS last_fire_time TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP,
-          ADD COLUMN IF NOT EXISTS rule_version INTEGER,
-          ADD COLUMN IF NOT EXISTS threshold_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
           ADD COLUMN IF NOT EXISTS timeline_log JSONB NOT NULL DEFAULT '[]'::jsonb,
           ADD COLUMN IF NOT EXISTS update_time TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP
         """

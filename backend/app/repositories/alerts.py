@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
+from psycopg2.extras import Json
+
 from app.domain.alert_types import (
     ALERT_TYPE_DAQ_OFFLINE,
     ALERT_TYPE_OFFLINE,
@@ -288,6 +290,7 @@ class AlertRepository:
         alert_type: str,
         alert_level: int,
         trigger_val: float,
+        rule_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """插入人工创建的预警记录。"""
         alert_category = alert_category_for_type(alert_type)
@@ -297,11 +300,11 @@ class AlertRepository:
                 INSERT INTO public.t_alert_record (
                     id, sensor_no, threshold_id, trigger_val, create_time,
                     alert_status, channel, seq, alert_type, alert_category,
-                    alert_level, end_time
+                    alert_level, end_time, rule_snapshot
                 ) VALUES (
                     %s, %s, %s, %s, NOW(),
                     0, %s, nextval('public.seq_alert_record'), %s, %s,
-                    %s, NULL
+                    %s, NULL, %s
                 )
                 RETURNING *
                 """,
@@ -314,6 +317,7 @@ class AlertRepository:
                     alert_type,
                     alert_category,
                     alert_level,
+                    Json(rule_snapshot or {}),
                 ),
             )
             return dict(cur.fetchone())

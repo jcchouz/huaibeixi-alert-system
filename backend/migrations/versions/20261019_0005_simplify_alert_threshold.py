@@ -79,9 +79,7 @@ def downgrade() -> None:
           ADD COLUMN IF NOT EXISTS recover_points INTEGER NOT NULL DEFAULT 3,
           ADD COLUMN IF NOT EXISTS hysteresis NUMERIC(15,5) NOT NULL DEFAULT 0,
           ADD COLUMN IF NOT EXISTS ext_params JSONB NOT NULL DEFAULT '{}'::jsonb,
-          ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1,
-          ADD COLUMN IF NOT EXISTS change_reason VARCHAR(255),
-          ADD COLUMN IF NOT EXISTS history_log JSONB NOT NULL DEFAULT '[]'::jsonb
+          ADD COLUMN IF NOT EXISTS change_reason VARCHAR(255)
         """
     )
     op.execute(

@@ -195,7 +195,6 @@ def database_time(conn: Any) -> datetime:
 def make_engine() -> AlertAnalyticsEngine:
     return AlertAnalyticsEngine(
         station_name=TEST_STATION_NAME,
-        rule_refresh_seconds=0.1,
     )
 
 
@@ -311,33 +310,3 @@ def test_threshold_lifecycle_and_recurrence_without_state_restore(db_conn: Any) 
     assert recurring["cnt"] == 2
     assert recurring["open_count"] == 1
     assert recurring["seq"] >= first_alert["seq"]
-
-
-def test_rule_version_change_reloads_thresholds(db_conn: Any) -> None:
-    sensor_no = f"{TEST_RUN_PREFIX}-rule-sync"
-    channel = "x"
-    insert_rule(
-        db_conn,
-        sensor_no=sensor_no,
-        channel=channel,
-        level3_upper=10.0,
-    )
-
-    engine = make_engine()
-    engine.initialize()
-    key = engine.make_key(sensor_no, channel)
-    assert engine.channel_states.get(key)["level3_upper"] == 10.0
-
-    with db_conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE public.t_alert_threshold
-            SET level3_upper = 7.5
-            WHERE LOWER(sensor_no) = %s AND channel = %s
-            """,
-            (sensor_no, channel),
-        )
-    db_conn.commit()
-
-    assert engine.refresh_rules_if_changed(force=True) is True
-    assert engine.channel_states.get(key)["level3_upper"] == 7.5

@@ -140,12 +140,6 @@ class AlertDetectionWorker:
             self._last_window_end,
         )
 
-    def _refresh_rules(self) -> None:
-        # 引擎支持热更新时再刷新，便于规则开关修改后无需重启 Worker。
-        refresh = getattr(self.engine, "refresh_rules_if_changed", None)
-        if refresh is not None:
-            refresh()
-
     def run_once(self, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """执行一次手动检测，用于测试或本地诊断。"""
         current_time = now or self._current_time()
@@ -162,7 +156,6 @@ class AlertDetectionWorker:
         """
         # 同一实例的实时扫描串行执行，避免并发轮次同时推进扫描水位。
         with self._alert_cycle_lock:
-            self._refresh_rules()
             with self._state_lock:
                 self._last_run_at = current_time
                 last_alert_scan_at = self._last_alert_scan_at
@@ -214,7 +207,6 @@ class AlertDetectionWorker:
     def process_statistics_once(self, current_time: datetime) -> List[Dict[str, Any]]:
         """按顺序处理当前所有已到期的统计窗口。"""
         with self._statistics_cycle_lock:
-            self._refresh_rules()
             return self._process_statistics_once(current_time)
 
     def _process_statistics_once(

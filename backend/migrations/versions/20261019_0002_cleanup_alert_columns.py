@@ -71,10 +71,6 @@ def upgrade() -> None:
           '最近一次命中或升级告警的时间';
         COMMENT ON COLUMN public.t_alert_record.trigger_count IS
           '本次告警累计触发次数';
-        COMMENT ON COLUMN public.t_alert_record.rule_version IS
-          '告警触发时生效的阈值规则版本号';
-        COMMENT ON COLUMN public.t_alert_record.threshold_snapshot IS
-          '告警触发时的阈值及算法参数快照';
         COMMENT ON COLUMN public.t_alert_record.timeline_log IS
           '告警生命周期日志数组，记录触发、升级、确认、恢复和抑制事件';
         COMMENT ON COLUMN public.t_alert_record.ack_by IS
@@ -130,14 +126,10 @@ def upgrade() -> None:
           '迟滞回差，恢复到阈值加减回差范围内才判定为正常';
         COMMENT ON COLUMN public.t_alert_threshold.ext_params IS
           '算法扩展参数JSON，例如物理量程、严格采样间隔和变化率参数';
-        COMMENT ON COLUMN public.t_alert_threshold.version IS
-          '阈值规则版本号，每次修改自动加一';
         COMMENT ON COLUMN public.t_alert_threshold.update_by IS
           '最近一次修改人';
         COMMENT ON COLUMN public.t_alert_threshold.change_reason IS
           '最近一次调参原因';
-        COMMENT ON COLUMN public.t_alert_threshold.history_log IS
-          '阈值规则历史修改快照数组，用于版本追踪和一键回滚';
         """
     )
 

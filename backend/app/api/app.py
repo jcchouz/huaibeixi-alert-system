@@ -33,7 +33,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_logging(settings)
 
     # 引擎是进程内唯一的检测状态持有者：
-    #   - reload_thresholds() 把 t_alert_threshold、t_sensor、t_sensor_channel
+    #   - load_thresholds() 在启动时把 t_alert_threshold、t_sensor、t_sensor_channel
     #     组装成 engine.channel_states 里的运行时规则；
     #   - 阈值连续命中、离线、死值等跨轮次状态同样保存在 channel_states；
     #   - REST 接口和后台 Worker 共用这一个实例，接口看到的就是检测状态。
@@ -42,8 +42,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         confirm_seconds=settings.detection_confirm_seconds,
         stuck_seconds=settings.detection_stuck_seconds,
         offline_seconds=settings.detection_offline_seconds,
-        # 运行时状态只保存在当前进程，规则元数据按指定周期自动刷新。
-        rule_refresh_seconds=settings.detection_rule_refresh_seconds,
         # 五类预警的独立开关来自 backend/.env。开关只决定“是否写预警”，
         # 样本读取、连续命中计数和 t_stat_record 统计都不受开关影响。
         station_name=settings.station_name,

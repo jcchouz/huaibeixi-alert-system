@@ -8,8 +8,8 @@ uses FastAPI, PostgreSQL/TimescaleDB and a modular service architecture.
 Detailed folder-by-folder and file-by-file documentation is available in
 [后端架构说明.md](后端架构说明.md).
 
-Persistent detection state, rule-version synchronization and the 10,000
-rows/second benchmark are documented in
+Detection startup boundaries, one-time rule loading, per-alert rule snapshots
+and the 10,000 rows/second benchmark are documented in
 [detection-state-and-10k-benchmark.md](docs/detection-state-and-10k-benchmark.md).
 
 ```text
@@ -68,9 +68,10 @@ To start only the backend and frontend:
 
 ### Threshold-only debugging
 
-`backend/.env` currently enables only `DETECTION_ALERT_THRESHOLD_ENABLED`.
-To debug the threshold chain with a single channel, stop any running backend,
-start the backend, then inject samples:
+`backend/.env` currently enables all five alert types so full-chain capacity
+tests can run. To debug only the threshold chain, stop the backend, set the
+other four `DETECTION_ALERT_*_ENABLED` switches to `false`, restart it, then
+inject samples:
 
 ```powershell
 cd backend

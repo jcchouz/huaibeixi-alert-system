@@ -1,4 +1,4 @@
-"""Persist detection state, worker watermarks and threshold rule versions.
+"""Persist detection state and worker watermarks.
 
 Revision ID: 20261021_0030
 Revises: 20261020_0028
@@ -49,69 +49,7 @@ def upgrade() -> None:
         """
     )
 
-    op.execute(
-        """
-        CREATE TABLE IF NOT EXISTS public.t_detection_rule_version (
-          id SMALLINT PRIMARY KEY DEFAULT 1,
-          version BIGINT NOT NULL DEFAULT 1,
-          updated_at TIMESTAMP(6) NOT NULL DEFAULT LOCALTIMESTAMP,
-          CONSTRAINT ck_detection_rule_version_singleton CHECK (id = 1)
-        )
-        """
-    )
-    op.execute(
-        """
-        INSERT INTO public.t_detection_rule_version (id, version)
-        VALUES (1, 1)
-        ON CONFLICT (id) DO NOTHING
-        """
-    )
-    op.execute(
-        """
-        CREATE OR REPLACE FUNCTION public.bump_detection_rule_version()
-        RETURNS TRIGGER
-        LANGUAGE plpgsql
-        AS $$
-        BEGIN
-          UPDATE public.t_detection_rule_version
-          SET version = version + 1,
-              updated_at = LOCALTIMESTAMP
-          WHERE id = 1;
-          RETURN NULL;
-        END;
-        $$
-        """
-    )
-    op.execute(
-        """
-        DROP TRIGGER IF EXISTS trg_detection_rule_version
-          ON public.t_alert_threshold
-        """
-    )
-    op.execute(
-        """
-        CREATE TRIGGER trg_detection_rule_version
-        AFTER INSERT OR UPDATE OR DELETE ON public.t_alert_threshold
-        FOR EACH STATEMENT
-        EXECUTE FUNCTION public.bump_detection_rule_version()
-        """
-    )
-    op.execute(
-        """
-        COMMENT ON TABLE public.t_detection_rule_version IS
-          '阈值规则版本；t_alert_threshold 发生语句级写入时自动递增'
-        """
-    )
-
 
 def downgrade() -> None:
-    op.execute(
-        """
-        DROP TRIGGER IF EXISTS trg_detection_rule_version
-          ON public.t_alert_threshold
-        """
-    )
-    op.execute("DROP FUNCTION IF EXISTS public.bump_detection_rule_version()")
-    op.execute("DROP TABLE IF EXISTS public.t_detection_rule_version")
     op.execute("DROP TABLE IF EXISTS public.t_detection_worker_state")
     op.execute("DROP TABLE IF EXISTS public.t_detection_channel_state")

@@ -85,7 +85,7 @@ class ThresholdService:
         threshold_id: str,
         body: ThresholdUpdateRequest,
     ) -> Dict[str, Any]:
-        """更新单条阈值规则，并重新加载引擎缓存。"""
+        """持久化单条阈值规则；运行中的检测规则保持不变。"""
         with get_db_cursor(commit=True) as cur:
             row = self.repository.fetch_rule(cur, threshold_id)
             if not row:
@@ -95,11 +95,7 @@ class ThresholdService:
             self._validate_thresholds(values)
             updated_row = self.repository.update_rule(cur, threshold_id, values)
 
-        # 返回补充后的响应前，先刷新检测规则。
-        self.engine.reload_thresholds()
-        key = self.engine.make_key(updated_row["sensor_no"], updated_row.get("channel"))
-        enriched = self.engine.channel_states.get(key) or serialize_row(updated_row)
-        return {"success": True, "threshold": enriched}
+        return {"success": True, "threshold": serialize_row(updated_row)}
 
     def batch_update(
         self,
@@ -138,7 +134,6 @@ class ThresholdService:
                 self._validate_thresholds(values)
                 self.repository.update_rule(cur, str(row["id"]), values)
 
-        self.engine.reload_thresholds()
         return {
             "success": True,
             "updatedCount": len(rows),

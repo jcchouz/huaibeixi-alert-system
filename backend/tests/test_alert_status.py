@@ -82,6 +82,9 @@ class FakeEngine:
     def make_key(self, sensor_no: str, channel: str) -> str:
         return f"{sensor_no}:{channel}"
 
+    def build_rule_snapshot(self, rule: dict, alert_type: str) -> dict:
+        return {"alert_type": alert_type, "rule_id": rule.get("id")}
+
     def enrich_alert_row(self, row: dict) -> dict:
         return row
 
@@ -163,6 +166,10 @@ def test_non_threshold_alert_is_forced_to_level_one() -> None:
 
     assert result["alert"]["alert_level"] == 1
     assert repository.created_payload["alert_level"] == 1
+    assert repository.created_payload["rule_snapshot"] == {
+        "alert_type": "传感器离线",
+        "rule_id": None,
+    }
 
 
 def test_alert_list_returns_counts_for_the_whole_filtered_scope() -> None:

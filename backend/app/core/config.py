@@ -66,14 +66,6 @@ class Settings(BaseSettings):
         le=60,
         validation_alias="DETECTION_ALERT_OVERLAP_SECONDS",
     )
-    # 检测进程检查阈值规则版本的周期。规则表触发器递增版本后，
-    # Worker 无需重启即可重新加载阈值。
-    detection_rule_refresh_seconds: float = Field(
-        default=5.0,
-        ge=0.1,
-        le=300,
-        validation_alias="DETECTION_RULE_REFRESH_SECONDS",
-    )
     # 统计窗口的落库延迟；实时预警扫描不使用该延迟。
     detection_lag_seconds: int = Field(
         default=5,

@@ -43,10 +43,8 @@ def upgrade() -> None:
           ADD COLUMN IF NOT EXISTS recover_points INTEGER NOT NULL DEFAULT 3,
           ADD COLUMN IF NOT EXISTS hysteresis NUMERIC(15,5) NOT NULL DEFAULT 0,
           ADD COLUMN IF NOT EXISTS ext_params JSONB NOT NULL DEFAULT '{}'::jsonb,
-          ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1,
           ADD COLUMN IF NOT EXISTS update_by VARCHAR(64),
-          ADD COLUMN IF NOT EXISTS change_reason VARCHAR(255),
-          ADD COLUMN IF NOT EXISTS history_log JSONB NOT NULL DEFAULT '[]'::jsonb
+          ADD COLUMN IF NOT EXISTS change_reason VARCHAR(255)
         """
     )
     op.execute(
@@ -84,8 +82,6 @@ def upgrade() -> None:
           ADD COLUMN IF NOT EXISTS peak_time TIMESTAMP(6),
           ADD COLUMN IF NOT EXISTS last_fire_time TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP,
           ADD COLUMN IF NOT EXISTS trigger_count INTEGER NOT NULL DEFAULT 1,
-          ADD COLUMN IF NOT EXISTS rule_version INTEGER,
-          ADD COLUMN IF NOT EXISTS threshold_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
           ADD COLUMN IF NOT EXISTS timeline_log JSONB NOT NULL DEFAULT '[]'::jsonb,
           ADD COLUMN IF NOT EXISTS ack_by VARCHAR(64),
           ADD COLUMN IF NOT EXISTS ack_time TIMESTAMP(6),
