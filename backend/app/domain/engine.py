@@ -341,7 +341,7 @@ class AlertAnalyticsEngine:
         return self.total_monitor_rows
 
     def _resolve_station_code(self, cur: Any) -> str:
-        """Resolve the configured station name to its station code."""
+        """将配置的站点名称解析为对应的站点编码。"""
         cur.execute(
             """
             SELECT number
@@ -576,7 +576,7 @@ class AlertAnalyticsEngine:
             return len(new_states)
 
     def _cache_sample_query(self, rules: Iterable[Dict[str, Any]]) -> None:
-        """Cache the configured channel filter used by realtime scans."""
+        """缓存实时扫描使用的已配置通道过滤条件。"""
         targets = [
             (rule["sensor_no_lower"], rule.get("channel") or "")
             for rule in rules
@@ -592,7 +592,7 @@ class AlertAnalyticsEngine:
         self._sample_query = (sample_sql, tuple(params))
 
     def refresh_rules_if_changed(self, force: bool = False) -> bool:
-        """Reload threshold rules when the database version changes."""
+        """数据库中的规则版本变化时重新加载阈值规则。"""
 
         now = time.monotonic()
         if (
@@ -1044,7 +1044,7 @@ class AlertAnalyticsEngine:
         alert_type: str,
         end_time: datetime,
     ) -> Optional[Dict[str, Any]]:
-        """Close the open alert incident when its condition recovers."""
+        """预警条件恢复后关闭对应的未结束预警事件。"""
 
         key = self._alert_key(sensor_no, channel, alert_type)
         existing = active_map.pop(key, None)
@@ -1216,7 +1216,7 @@ class AlertAnalyticsEngine:
         evaluation: RuleEvaluation,
         window_end: datetime,
     ) -> None:
-        """Persist one rule evaluation through the shared incident writer."""
+        """通过共享的预警事件写入逻辑持久化一次规则判定结果。"""
         trigger = evaluation.trigger
         if trigger is not None:
             self._apply_condition(
