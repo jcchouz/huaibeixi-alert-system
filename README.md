@@ -95,8 +95,18 @@ with `DETECTION_INTERVAL_SECONDS`, the commit-delay lookback with
 `alertBacklogSeconds` grows and the backend is not keeping up with ingestion.
 Continuous conditions use
 `DETECTION_CONFIRM_SECONDS`, `DETECTION_STUCK_SECONDS` and
-`DETECTION_OFFLINE_SECONDS` for threshold/out-of-range, stuck and offline
-detection. Each alert scenario can be disabled independently with
+`DETECTION_OFFLINE_SECONDS` for threshold, out-of-range, stuck and offline
+detection. Threshold, out-of-range and stuck confirmation convert their
+configured reference seconds to consecutive samples using
+`t_sensor.frequency`, with a minimum of three samples. For the default
+3-second threshold and out-of-range window, that means 3 samples at 1 Hz, 150
+samples at 50 Hz, and 3 samples at 1/60 Hz. Offline confirmation remains
+time-based, but its timeout is at least three sampling periods: with a
+5-second base, offline detection stays at 5 seconds for 1 Hz and 50 Hz and
+extends to 180 seconds at 1/60 Hz. The
+realtime scan cursor advances from the previous `scan_end`, so backlog is
+processed window by window instead of skipping to the current time. Each
+alert scenario can be disabled independently with
 `DETECTION_ALERT_THRESHOLD_ENABLED`,
 `DETECTION_ALERT_OFFLINE_ENABLED`, `DETECTION_ALERT_DAQ_OFFLINE_ENABLED`,
 `DETECTION_ALERT_STUCK_ENABLED` and `DETECTION_ALERT_OOR_ENABLED` (all default
@@ -158,6 +168,20 @@ npm run build
 ```
 
 Live database validation tools are in `backend/tools/`.
+
+For a compliant all-alert capacity test that uses only existing real sensors,
+channels and thresholds:
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe tools/stress_real_alerts.py --mode preflight
+.\.venv\Scripts\python.exe tools/stress_real_alerts.py --mode all `
+  --allow-write --confirm-database huaibeixi_db_test
+```
+
+The all-alert test requires a running backend with all five alert switches
+enabled. It verifies threshold, out-of-range, stuck, channel offline and
+collector offline alerts plus one-minute statistics, and keeps its test data.
 
 ## Docker
 

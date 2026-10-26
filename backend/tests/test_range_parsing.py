@@ -40,25 +40,48 @@ def test_multirange_sensor_matches_physical_quantity(
     ) == expected
 
 
-def test_offline_timeout_uses_configured_seconds() -> None:
+def test_offline_timeout_uses_at_least_three_sample_periods() -> None:
     engine = AlertAnalyticsEngine()
     assert engine._parse_frequency_hz("1/60") == pytest.approx(1 / 60)
     assert engine._offline_timeout_ms(
         {"frequency": "1/60", "offline_seconds": 100}
-    ) == pytest.approx(100_000)
+    ) == pytest.approx(180_000)
     assert engine._offline_timeout_ms({"frequency": "100"}) == pytest.approx(5_000)
 
 
-def test_threshold_seconds_uses_sample_timestamps() -> None:
+@pytest.mark.parametrize(
+    ("frequency_hz", "expected_ms"),
+    [
+        (1.0, 5_000),
+        (50.0, 5_000),
+        (1 / 60, 180_000),
+    ],
+)
+def test_offline_timeout_scales_to_three_periods_for_low_frequency(
+    frequency_hz: float,
+    expected_ms: float,
+) -> None:
+    engine = AlertAnalyticsEngine()
+
+    assert engine._offline_timeout_ms(
+        {
+            "frequency_hz": frequency_hz,
+            "offline_seconds": 5,
+        }
+    ) == pytest.approx(expected_ms)
+
+
+def test_threshold_confirmation_uses_sample_count_not_elapsed_time() -> None:
     engine = AlertAnalyticsEngine()
     rule = {
+        "frequency_hz": 1.0,
         "level1_upper": 10.0,
         "level2_upper": 8.0,
         "level3_upper": 6.0,
     }
     first_ts = datetime(2026, 10, 19, 10, 0, 0)
     samples = [
-        (first_ts + timedelta(seconds=index), 7.0)
+        (first_ts + timedelta(milliseconds=index), 7.0)
         for index in range(4)
     ]
 
@@ -77,11 +100,65 @@ def test_threshold_seconds_uses_sample_timestamps() -> None:
     assert snapshot is not None
 
 
-def test_stuck_seconds_uses_elapsed_duration() -> None:
+@pytest.mark.parametrize(
+    ("frequency_hz", "expected"),
+    [
+        (1.0, 3),
+        (50.0, 150),
+        (1 / 60, 3),
+    ],
+)
+def test_threshold_required_sample_count_uses_sensor_frequency(
+    frequency_hz: float,
+    expected: int,
+) -> None:
+    engine = AlertAnalyticsEngine()
+
+    assert engine._threshold_rule.required_sample_count(
+        frequency_hz,
+        reference_seconds=3,
+    ) == expected
+
+
+def test_threshold_at_50_hz_requires_150_consecutive_samples() -> None:
+    engine = AlertAnalyticsEngine()
+    rule = {
+        "frequency_hz": 50.0,
+        "level1_upper": 10.0,
+        "level2_upper": 8.0,
+        "level3_upper": 6.0,
+    }
+    first_ts = datetime(2026, 10, 19, 10, 0, 0)
+    samples = [
+        (first_ts + timedelta(seconds=index / 50.0), 7.0)
+        for index in range(150)
+    ]
+
+    count, _, active, _ = engine._evaluate_threshold_streak(
+        samples[:149],
+        rule,
+        previous_count=0,
+        target_seconds=3,
+    )
+    assert count == 149
+    assert active is False
+
+    count, _, active, snapshot = engine._evaluate_threshold_streak(
+        samples,
+        rule,
+        previous_count=0,
+        target_seconds=3,
+    )
+    assert count == 150
+    assert active is True
+    assert snapshot is not None
+
+
+def test_stuck_confirmation_uses_sample_count_not_elapsed_time() -> None:
     engine = AlertAnalyticsEngine()
     first_ts = datetime(2026, 10, 19, 10, 0, 0)
     samples = [
-        (first_ts + timedelta(seconds=index), 12.5)
+        (first_ts + timedelta(milliseconds=index), 12.5)
         for index in range(4)
     ]
 
@@ -100,11 +177,11 @@ def test_stuck_seconds_uses_elapsed_duration() -> None:
     assert snapshot == (12.5, samples[-1][0])
 
 
-def test_out_of_range_seconds_uses_elapsed_duration() -> None:
+def test_out_of_range_confirmation_uses_sample_count_not_elapsed_time() -> None:
     engine = AlertAnalyticsEngine()
     first_ts = datetime(2026, 10, 19, 10, 0, 0)
     samples = [
-        (first_ts + timedelta(seconds=index), 12.0)
+        (first_ts + timedelta(milliseconds=index), 12.0)
         for index in range(4)
     ]
 
@@ -121,6 +198,30 @@ def test_out_of_range_seconds_uses_elapsed_duration() -> None:
     assert started_at == first_ts
     assert active is True
     assert snapshot is not None
+
+
+@pytest.mark.parametrize(
+    ("reference_seconds", "frequency_hz", "expected"),
+    [
+        (3, 1.0, 3),
+        (3, 50.0, 150),
+        (3, 1 / 60, 3),
+        (100, 1.0, 100),
+        (100, 50.0, 5000),
+        (100, 1 / 60, 3),
+    ],
+)
+def test_confirm_sample_count_uses_rule_frequency(
+    reference_seconds: float,
+    frequency_hz: float,
+    expected: int,
+) -> None:
+    engine = AlertAnalyticsEngine()
+
+    assert engine._threshold_rule.required_sample_count(
+        frequency_hz,
+        reference_seconds=reference_seconds,
+    ) == expected
 
 
 def test_threshold_streak_continues_across_windows() -> None:
@@ -165,7 +266,7 @@ def test_threshold_streak_continues_across_windows() -> None:
     assert snapshot[0] == 3
 
 
-def test_stuck_streak_requires_configured_duration() -> None:
+def test_stuck_streak_requires_configured_sample_count() -> None:
     engine = AlertAnalyticsEngine()
     first_ts = datetime(2026, 10, 19, 10, 0, 0)
     samples = [

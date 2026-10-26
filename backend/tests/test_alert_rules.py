@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.domain.alert_rules import (
     AlertRuleRegistry,
@@ -92,6 +92,119 @@ def test_offline_rule_suppresses_other_channel_alerts() -> None:
     assert result.active is True
     assert result.suppress_other_alerts is True
     assert result.trigger is not None
+
+
+def test_threshold_rule_uses_frequency_based_sample_count() -> None:
+    first_ts = datetime(2026, 10, 23, 12, 0, 0)
+    rule = {
+        "frequency_hz": 50.0,
+        "sample_interval_ms": 20.0,
+        "level1_upper": 10.0,
+        "level2_upper": 8.0,
+        "level3_upper": 6.0,
+        "threshold_streak_count": 0,
+        "threshold_condition_active": False,
+    }
+    samples = [
+        (first_ts + timedelta(seconds=index / 50.0), 7.0)
+        for index in range(150)
+    ]
+    rule_instance = ThresholdAlertRule()
+
+    def evaluate(sample_batch):
+        return rule_instance.evaluate(
+            RuleContext(
+                rule=rule,
+                samples=sample_batch,
+                previous_last_seen=None,
+                window_end=first_ts + timedelta(seconds=3),
+                confirm_seconds=3.0,
+                stuck_seconds=100.0,
+                offline_timeout_ms=5_000.0,
+            )
+        )
+
+    below_target = evaluate(samples[:149])
+    at_target = evaluate(samples)
+
+    assert below_target.active is False
+    assert below_target.trigger is None
+    assert at_target.active is True
+    assert at_target.trigger is not None
+
+
+def test_out_of_range_rule_uses_frequency_based_sample_count() -> None:
+    first_ts = datetime(2026, 10, 23, 12, 0, 0)
+    rule = {
+        "frequency_hz": 50.0,
+        "sample_interval_ms": 20.0,
+        "physical_min": -10.0,
+        "physical_max": 10.0,
+        "oor_streak_count": 0,
+        "oor_condition_active": False,
+    }
+    samples = [
+        (first_ts + timedelta(seconds=index / 50.0), 12.0)
+        for index in range(150)
+    ]
+    rule_instance = OutOfRangeAlertRule()
+
+    def evaluate(sample_batch):
+        return rule_instance.evaluate(
+            RuleContext(
+                rule=rule,
+                samples=sample_batch,
+                previous_last_seen=None,
+                window_end=first_ts + timedelta(seconds=3),
+                confirm_seconds=3.0,
+                stuck_seconds=100.0,
+                offline_timeout_ms=5_000.0,
+            )
+        )
+
+    below_target = evaluate(samples[:149])
+    at_target = evaluate(samples)
+
+    assert below_target.active is False
+    assert below_target.trigger is None
+    assert at_target.active is True
+    assert at_target.trigger is not None
+
+
+def test_stuck_rule_uses_frequency_based_sample_count() -> None:
+    first_ts = datetime(2026, 10, 23, 12, 0, 0)
+    rule = {
+        "frequency_hz": 50.0,
+        "sample_interval_ms": 20.0,
+        "stuck_streak_count": 0,
+        "stuck_condition_active": False,
+    }
+    samples = [
+        (first_ts + timedelta(seconds=index / 50.0), 12.0)
+        for index in range(150)
+    ]
+    rule_instance = StuckAlertRule()
+
+    def evaluate(sample_batch):
+        return rule_instance.evaluate(
+            RuleContext(
+                rule=rule,
+                samples=sample_batch,
+                previous_last_seen=None,
+                window_end=first_ts + timedelta(seconds=3),
+                confirm_seconds=3.0,
+                stuck_seconds=3.0,
+                offline_timeout_ms=5_000.0,
+            )
+        )
+
+    below_target = evaluate(samples[:149])
+    at_target = evaluate(samples)
+
+    assert below_target.active is False
+    assert below_target.trigger is None
+    assert at_target.active is True
+    assert at_target.trigger is not None
 
 
 def test_daq_offline_requires_all_real_channels_offline() -> None:

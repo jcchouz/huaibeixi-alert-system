@@ -10,6 +10,7 @@ from app.domain.alert_rules.base import (
     RuleContext,
     RuleEvaluation,
     parse_datetime,
+    required_sample_count,
     serialize_runtime_datetime,
 )
 from app.domain.alert_types import ALERT_TYPE_STUCK, NON_THRESHOLD_ALERT_LEVEL
@@ -27,7 +28,7 @@ class StuckAlertRule:
         previous_value: Any,
         previous_count: Any,
         previous_since: Any,
-        target_seconds: float,
+        target_count: int,
         previous_sample_time: Any = None,
         max_gap_ms: Optional[float] = None,
     ) -> Tuple[
@@ -38,6 +39,7 @@ class StuckAlertRule:
         Optional[Tuple[float, datetime]],
     ]:
         count = max(0, int(previous_count or 0))
+        target_count = max(1, int(target_count))
         last_value = float(previous_value) if previous_value is not None else None
         since = parse_datetime(previous_since)
         active = False
@@ -60,22 +62,25 @@ class StuckAlertRule:
                 count = 1
                 since = sample_time
             last_value = value
-            if (
-                since is not None
-                and (sample_time - since).total_seconds() >= target_seconds
-            ):
+            if count >= target_count:
                 active = True
                 snapshot = (value, sample_time)
         return count, last_value, since, active, snapshot
 
     def evaluate(self, context: RuleContext) -> RuleEvaluation:
         rule = context.rule
+        target_count = int(rule.get("stuck_confirm_samples") or 0)
+        if target_count <= 0:
+            target_count = required_sample_count(
+                rule.get("frequency_hz") or rule.get("frequency"),
+                context.stuck_seconds,
+            )
         count, last_value, since, active, snapshot = self.evaluate_streak(
             context.samples,
             rule.get("stuck_last_value"),
             rule.get("stuck_streak_count"),
             rule.get("stuck_since"),
-            context.stuck_seconds,
+            target_count,
             previous_sample_time=context.previous_last_seen,
             max_gap_ms=float(rule.get("sample_interval_ms") or 1000) * 1.5,
         )

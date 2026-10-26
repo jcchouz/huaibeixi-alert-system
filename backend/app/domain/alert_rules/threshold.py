@@ -6,10 +6,12 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.domain.alert_rules.base import (
+    MIN_CONFIRM_SAMPLES,
     AlertTrigger,
     RuleContext,
     RuleEvaluation,
     parse_datetime,
+    required_sample_count,
     serialize_runtime_datetime,
 )
 from app.domain.alert_types import ALERT_TYPE_THRESHOLD
@@ -19,6 +21,20 @@ class ThresholdAlertRule:
     """Detect sustained threshold exceedance from raw samples."""
 
     alert_type = ALERT_TYPE_THRESHOLD
+    minimum_confirm_samples = MIN_CONFIRM_SAMPLES
+
+    @classmethod
+    def required_sample_count(
+        cls,
+        frequency_hz: Any,
+        reference_seconds: Any,
+    ) -> int:
+        """Convert the configured reference duration to consecutive samples."""
+        return required_sample_count(
+            frequency_hz,
+            reference_seconds,
+            minimum_samples=cls.minimum_confirm_samples,
+        )
 
     @staticmethod
     def level_for(
@@ -51,7 +67,7 @@ class ThresholdAlertRule:
         samples: List[Tuple[datetime, float]],
         rule: Dict[str, Any],
         previous_count: Any,
-        target_seconds: float,
+        target_count: int,
         previous_started_at: Any = None,
         previous_sample_time: Any = None,
         max_gap_ms: Optional[float] = None,
@@ -63,6 +79,7 @@ class ThresholdAlertRule:
     ]:
         """Accumulate threshold hits across samples and scan windows."""
         count = max(0, int(previous_count or 0))
+        target_count = max(1, int(target_count))
         started_at = parse_datetime(previous_started_at)
         active = False
         snapshot: Optional[Tuple[int, float, float, datetime]] = None
@@ -103,10 +120,7 @@ class ThresholdAlertRule:
                 run_best_value = eval_value
                 run_best_limit = float(limit or eval_value)
                 run_best_time = sample_time
-            if (
-                started_at is not None
-                and (sample_time - started_at).total_seconds() >= target_seconds
-            ):
+            if count >= target_count:
                 active = True
                 snapshot = (
                     run_best_level or level,
@@ -119,11 +133,17 @@ class ThresholdAlertRule:
 
     def evaluate(self, context: RuleContext) -> RuleEvaluation:
         rule = context.rule
+        target_count = int(rule.get("threshold_confirm_samples") or 0)
+        if target_count <= 0:
+            target_count = self.required_sample_count(
+                rule.get("frequency_hz") or rule.get("frequency"),
+                context.confirm_seconds,
+            )
         count, started_at, active, snapshot = self.evaluate_streak(
             context.samples,
             rule,
             rule.get("threshold_streak_count"),
-            context.confirm_seconds,
+            target_count,
             previous_started_at=rule.get("threshold_streak_started_at"),
             previous_sample_time=context.previous_last_seen,
             max_gap_ms=float(rule.get("sample_interval_ms") or 1000) * 1.5,

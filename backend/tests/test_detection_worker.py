@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.core.config import Settings
 from app.services.detection import AlertDetectionWorker
@@ -112,6 +112,33 @@ def test_alert_scan_processes_only_the_previous_one_second_window() -> None:
     assert result is not None
     assert result["backlogSeconds"] == 14.0
     assert worker._last_alert_scan_at == datetime(2026, 10, 20, 15, 42, 31)
+
+
+def test_alert_scan_resumes_from_previous_backlog_cursor_without_gaps() -> None:
+    engine = FakeEngine()
+    worker = make_worker(engine)
+    started_at = datetime(2026, 10, 20, 15, 42, 30)
+    worker.initialize(started_at)
+    worker.alert_overlap_seconds = 0
+    current_time = started_at + timedelta(seconds=10)
+
+    first = worker.scan_alerts_once(current_time)
+    second = worker.scan_alerts_once(current_time)
+    third = worker.scan_alerts_once(current_time)
+
+    expected_starts = [
+        started_at,
+        started_at + timedelta(seconds=1),
+        started_at + timedelta(seconds=2),
+    ]
+    assert engine.alert_scans == [
+        (start, start + timedelta(seconds=1))
+        for start in expected_starts
+    ]
+    assert worker._last_alert_scan_at == started_at + timedelta(seconds=3)
+    assert first is not None and first["backlogSeconds"] == 9.0
+    assert second is not None and second["backlogSeconds"] == 8.0
+    assert third is not None and third["backlogSeconds"] == 7.0
 
 
 def test_statistics_start_with_first_complete_window_after_startup() -> None:

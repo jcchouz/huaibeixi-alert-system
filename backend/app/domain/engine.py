@@ -25,11 +25,13 @@ from app.domain.alert_rules import (
     ThresholdAlertRule,
 )
 from app.domain.alert_rules.base import (
+    MIN_CONFIRM_SAMPLES,
     AlertRule,
     RuleContext,
     RuleEvaluation,
     max_sample_gap_ms,
     parse_datetime,
+    required_sample_count,
     serialize_runtime_datetime,
 )
 from app.domain.alert_types import (
@@ -105,7 +107,7 @@ GROUP BY s_no, ch
 
 # 实时预警专用的原始样本查询：按 time 升序返回窗口内的全部原始点。
 # 与 WINDOW_AGG_SQL 的区别：
-#   - 不聚合，保留每个点的时间，才能按时间跨度判断连续命中；
+#   - 不聚合，保留每个点的时间，才能按连续点数和持续时长判断；
 #   - value 为空的行直接排除，不参与阈值、量程和死值判定；
 #   - 排序由数据库保证，下游 _evaluate_*_streak() 依赖这个顺序累计状态。
 SAMPLE_BATCH_SQL = """
@@ -491,9 +493,30 @@ class AlertAnalyticsEngine:
                 frequency_hz = self._parse_frequency_hz(frequency_text)
                 sample_interval_ms = 1000.0 / frequency_hz
                 confirm_seconds = self.confirm_seconds
+                threshold_confirm_samples = (
+                    required_sample_count(
+                        frequency_hz,
+                        confirm_seconds,
+                    )
+                )
                 stuck_seconds = self.stuck_seconds
+                stuck_confirm_samples = required_sample_count(
+                    frequency_hz,
+                    stuck_seconds,
+                )
+                oor_confirm_samples = required_sample_count(
+                    frequency_hz,
+                    confirm_seconds,
+                )
                 offline_seconds = self.offline_seconds
-                offline_timeout_ms = offline_seconds * 1000.0
+                offline_confirm_periods = required_sample_count(
+                    frequency_hz,
+                    offline_seconds,
+                )
+                offline_timeout_ms = max(
+                    1.0,
+                    offline_confirm_periods / frequency_hz * 1000.0,
+                )
 
                 # 合并数据库规则、派生元数据和默认检测参数。
                 d.update(
@@ -514,9 +537,13 @@ class AlertAnalyticsEngine:
                         "unit": unit,                                           # 计量单位
                         "physical_min": range_min,                              # 物理量程下限
                         "physical_max": range_max,                              # 物理量程上限
-                        "confirm_seconds": confirm_seconds,                     # 通用连续确认时长（秒）
+                        "confirm_seconds": confirm_seconds,                     # 阈值确认基准时长（秒）
+                        "threshold_confirm_samples": threshold_confirm_samples, # 按频率折算的阈值连续点数
                         "stuck_seconds": stuck_seconds,                         # 死值连续确认时长（秒）
-                        "offline_seconds": offline_seconds,                     # 离线连续确认时长（秒）
+                        "stuck_confirm_samples": stuck_confirm_samples,         # 按频率折算的死值连续点数
+                        "oor_confirm_samples": oor_confirm_samples,             # 按频率折算的超量程连续点数
+                        "offline_seconds": offline_seconds,                     # 离线确认基准时长（秒）
+                        "offline_confirm_periods": offline_confirm_periods,     # 按频率折算的离线缺失周期数
                         "offline_timeout_ms": offline_timeout_ms,               # 离线超时阈值（毫秒）
                         "online_status": "ONLINE",                              # 初始在线状态
                         "last_ts": self._serialize_runtime_dt(runtime_now),     # 新规则的离线判断起点
@@ -609,11 +636,19 @@ class AlertAnalyticsEngine:
 
     @classmethod
     def _offline_timeout_ms(cls, rule: Dict[str, Any]) -> float:
-        """根据配置的持续秒数返回离线超时时间。"""
+        """按配置时长和采样频率返回离线超时时间，最少 3 个采样周期。"""
         configured = rule.get("offline_timeout_ms")
         if configured is not None:
             return max(1.0, float(configured))
-        return max(1.0, float(rule.get("offline_seconds") or 5.0) * 1000.0)
+        frequency_hz = cls._parse_frequency_hz(
+            rule.get("frequency_hz") or rule.get("frequency") or 1
+        )
+        offline_seconds = float(rule.get("offline_seconds") or 5.0)
+        missing_periods = required_sample_count(
+            frequency_hz,
+            offline_seconds,
+        )
+        return max(1.0, missing_periods / frequency_hz * 1000.0)
 
     # ------------------------------------------------------------------
     # 阈值、量程和死值连续命中判定
@@ -634,11 +669,15 @@ class AlertAnalyticsEngine:
         Optional[Tuple[int, float, float, datetime]],
     ]:
         """兼容旧调用入口，实际逻辑由 ThresholdAlertRule 提供。"""
+        target_count = required_sample_count(
+            rule.get("frequency_hz") or rule.get("frequency"),
+            target_seconds,
+        )
         return self._threshold_rule.evaluate_streak(
             samples,
             rule,
             previous_count,
-            target_seconds,
+            target_count,
             previous_started_at=previous_started_at,
             previous_sample_time=previous_sample_time,
             max_gap_ms=max_gap_ms,
@@ -667,11 +706,15 @@ class AlertAnalyticsEngine:
         Optional[Tuple[float, datetime]],
     ]:
         """兼容旧调用入口，实际逻辑由 OutOfRangeAlertRule 提供。"""
+        target_count = required_sample_count(
+            rule.get("frequency_hz") or rule.get("frequency"),
+            target_seconds,
+        )
         return self._out_of_range_rule.evaluate_streak(
             samples,
             rule,
             previous_count,
-            target_seconds,
+            target_count,
             previous_started_at=previous_started_at,
             previous_sample_time=previous_sample_time,
             max_gap_ms=max_gap_ms,
@@ -686,14 +729,19 @@ class AlertAnalyticsEngine:
         target_seconds: float,
         previous_sample_time: Any = None,
         max_gap_ms: Optional[float] = None,
+        frequency_hz: Any = 1.0,
     ) -> Tuple[int, Optional[float], Optional[datetime], bool, Optional[Tuple[float, datetime]]]:
         """兼容旧调用入口，实际逻辑由 StuckAlertRule 提供。"""
+        target_count = required_sample_count(
+            frequency_hz,
+            target_seconds,
+        )
         return StuckAlertRule.evaluate_streak(
             samples,
             previous_value,
             previous_count,
             previous_since,
-            target_seconds,
+            target_count,
             previous_sample_time=previous_sample_time,
             max_gap_ms=max_gap_ms,
         )
@@ -1758,6 +1806,14 @@ class AlertAnalyticsEngine:
             "ruleVersion": self.rule_version,
             "ruleRefreshSeconds": self.rule_refresh_seconds,
             "confirmSeconds": self.confirm_seconds,
+            "thresholdConfirmMode": "frequency_sample_count",
+            "thresholdConfirmMinimumSamples": MIN_CONFIRM_SAMPLES,
+            "stuckConfirmMode": "frequency_sample_count",
+            "stuckConfirmMinimumSamples": MIN_CONFIRM_SAMPLES,
+            "oorConfirmMode": "frequency_sample_count",
+            "oorConfirmMinimumSamples": MIN_CONFIRM_SAMPLES,
+            "offlineConfirmMode": "frequency_timeout",
+            "offlineConfirmMinimumPeriods": MIN_CONFIRM_SAMPLES,
             "stuckSeconds": self.stuck_seconds,
             "offlineSeconds": self.offline_seconds,
         }

@@ -10,6 +10,7 @@ from app.domain.alert_rules.base import (
     RuleContext,
     RuleEvaluation,
     parse_datetime,
+    required_sample_count,
     serialize_runtime_datetime,
 )
 from app.domain.alert_types import ALERT_TYPE_OOR, NON_THRESHOLD_ALERT_LEVEL
@@ -34,7 +35,7 @@ class OutOfRangeAlertRule:
         samples: List[Tuple[datetime, float]],
         rule: Dict[str, Any],
         previous_count: Any,
-        target_seconds: float,
+        target_count: int,
         previous_started_at: Any = None,
         previous_sample_time: Any = None,
         max_gap_ms: Optional[float] = None,
@@ -45,6 +46,7 @@ class OutOfRangeAlertRule:
         Optional[Tuple[float, datetime]],
     ]:
         count = max(0, int(previous_count or 0))
+        target_count = max(1, int(target_count))
         started_at = parse_datetime(previous_started_at)
         active = False
         snapshot: Optional[Tuple[float, datetime]] = None
@@ -66,21 +68,24 @@ class OutOfRangeAlertRule:
             count += 1
             if started_at is None:
                 started_at = sample_time
-            if (
-                started_at is not None
-                and (sample_time - started_at).total_seconds() >= target_seconds
-            ):
+            if count >= target_count:
                 active = True
                 snapshot = (value, sample_time)
         return count, started_at, active, snapshot
 
     def evaluate(self, context: RuleContext) -> RuleEvaluation:
         rule = context.rule
+        target_count = int(rule.get("oor_confirm_samples") or 0)
+        if target_count <= 0:
+            target_count = required_sample_count(
+                rule.get("frequency_hz") or rule.get("frequency"),
+                context.confirm_seconds,
+            )
         count, started_at, active, snapshot = self.evaluate_streak(
             context.samples,
             rule,
             rule.get("oor_streak_count"),
-            context.confirm_seconds,
+            target_count,
             previous_started_at=rule.get("oor_streak_started_at"),
             previous_sample_time=context.previous_last_seen,
             max_gap_ms=float(rule.get("sample_interval_ms") or 1000) * 1.5,

@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from app.core.config import Settings
 from app.core.serialization import serialize_val
+from app.domain.alert_rules.base import MIN_CONFIRM_SAMPLES
 from app.domain.engine import AlertAnalyticsEngine
 from app.infrastructure.database import get_db_cursor
 
@@ -156,6 +157,8 @@ class AlertDetectionWorker:
 
         每次扫描都会向前短回看一段重叠区间，以覆盖外部写入事务的提交延迟。
         重叠不会越过启动边界，重复样本由检索引擎依据 ``last_ts`` 去重。
+        当前时间超前于积压游标时，只推进一个检测周期；下一轮仍从上一轮
+        ``scan_end`` 继续，不会跳到数据库当前时间而漏扫中间窗口。
         """
         # 同一实例的实时扫描串行执行，避免并发轮次同时推进扫描水位。
         with self._alert_cycle_lock:
@@ -325,6 +328,14 @@ class AlertDetectionWorker:
                 "windowMinutes": self.window_minutes,
                 "detectionMode": "realtime_sample_groups",
                 "confirmSeconds": self.settings.detection_confirm_seconds,
+                "thresholdConfirmMode": "frequency_sample_count",
+                "thresholdConfirmMinimumSamples": MIN_CONFIRM_SAMPLES,
+                "stuckConfirmMode": "frequency_sample_count",
+                "stuckConfirmMinimumSamples": MIN_CONFIRM_SAMPLES,
+                "oorConfirmMode": "frequency_sample_count",
+                "oorConfirmMinimumSamples": MIN_CONFIRM_SAMPLES,
+                "offlineConfirmMode": "frequency_timeout",
+                "offlineConfirmMinimumPeriods": MIN_CONFIRM_SAMPLES,
                 "stuckSeconds": self.settings.detection_stuck_seconds,
                 "offlineSeconds": self.settings.detection_offline_seconds,
                 "cycles": self._alert_cycles + self._statistics_cycles,

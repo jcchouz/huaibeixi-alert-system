@@ -2,9 +2,43 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Protocol, Tuple
+
+MIN_CONFIRM_SAMPLES = 3
+
+
+def required_sample_count(
+    frequency_hz: Any,
+    reference_seconds: Any,
+    *,
+    minimum_samples: int = MIN_CONFIRM_SAMPLES,
+) -> int:
+    """Convert a reference duration into consecutive samples for one channel."""
+    try:
+        frequency = float(frequency_hz)
+    except (TypeError, ValueError):
+        text = str(frequency_hz or "").strip().lower().removesuffix("hz").strip()
+        try:
+            if "/" in text:
+                numerator, denominator = text.split("/", 1)
+                frequency = float(numerator) / float(denominator)
+            else:
+                frequency = float(text)
+        except (TypeError, ValueError, ZeroDivisionError):
+            frequency = 1.0
+    try:
+        seconds = float(reference_seconds)
+    except (TypeError, ValueError):
+        seconds = 1.0
+    if frequency <= 0:
+        frequency = 1.0
+    if seconds <= 0:
+        seconds = 1.0
+    estimated = math.ceil(frequency * seconds)
+    return max(max(1, int(minimum_samples)), estimated)
 
 
 def parse_datetime(value: Any) -> Optional[datetime]:

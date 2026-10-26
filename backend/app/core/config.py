@@ -88,19 +88,21 @@ class Settings(BaseSettings):
         le=1440,
         validation_alias="DETECTION_WINDOW_MINUTES",
     )
-    # 连续命中持续时间。
+    # 阈值超限和超量程确认的基准秒数；按频率折算为样本点数，最少 3 点。
     detection_confirm_seconds: float = Field(
         default=3.0,
         gt=0,
         le=86400,
         validation_alias="DETECTION_CONFIRM_SECONDS",
     )
+    # 死值确认的基准秒数；按频率折算为样本点数，最少 3 点。
     detection_stuck_seconds: float = Field(
         default=100.0,
         gt=0,
         le=86400,
         validation_alias="DETECTION_STUCK_SECONDS",
     )
+    # 离线确认的基准秒数；超时至少为 3 个采样周期。
     detection_offline_seconds: float = Field(
         default=5.0,
         gt=0,
