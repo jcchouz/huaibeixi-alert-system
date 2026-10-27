@@ -36,8 +36,13 @@ from app.core.config import get_settings
 
 DSN = get_settings().dsn
 
+# 用于识别加速度传感器；t_sensor.frequency 缺失时采用较高的默认采样率。
 ACCELERATION_SENSOR_PREFIXES = ("accl-", "zd-wg-", "zd-cg-")
+
+# 离线场景不写采样数据，由后端根据 t_monitor 中的缺测情况独立判定。
 OFFLINE_SCENARIOS = {"sensor_offline", "daq_offline"}
+
+# 固定启动日志中预警场景的展示顺序，未知场景排在最后。
 SCENARIO_ORDER = {
     "threshold": 0,
     "stuck": 1,
