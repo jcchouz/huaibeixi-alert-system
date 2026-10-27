@@ -125,7 +125,7 @@ class AlertDetectionWorker:
         每次扫描都会向前短回看一段重叠区间，以覆盖外部写入事务的提交延迟。
         重叠不会越过启动边界，重复样本由检索引擎依据 ``last_ts`` 去重。
         当前时间超前于积压游标时，只推进一个检测周期；下一轮仍从上一轮
-        ``scan_end`` 继续，不会跳到数据库当前时间而漏扫中间窗口。
+        ``window_end`` 继续，不会跳到数据库当前时间而漏扫中间窗口。
         """
         self._last_run_at = current_time
         last_alert_scan_at = self._last_alert_scan_at
@@ -137,7 +137,7 @@ class AlertDetectionWorker:
             return None
 
         started = time.perf_counter()
-        scan_end = min(
+        window_end = min(
             current_time,
             last_alert_scan_at + timedelta(seconds=self.interval_seconds),
         )
@@ -148,21 +148,21 @@ class AlertDetectionWorker:
         # 即使区间内没有采样点也照常扫描，使通道离线判定继续推进。
         result = self.engine.scan_realtime_alerts(
             window_start,
-            scan_end,
+            window_end,
         )
-        self._last_alert_scan_at = scan_end
+        self._last_alert_scan_at = window_end
 
         # 汇总本轮实际覆盖范围、处理量和耗时，供运行状态查询使用。
         summary = {
             "windowStart": serialize_val(window_start),
-            "windowEnd": serialize_val(scan_end),
+            "windowEnd": serialize_val(window_end),
             "rawPointsProcessed": int(result.get("rawPointsProcessed") or 0),
             "triggeredAlertsCount": int(
                 result.get("triggeredAlertsCount") or 0
             ),
             "elapsedMs": round((time.perf_counter() - started) * 1000, 2),
             "backlogSeconds": round(
-                max(0.0, (current_time - scan_end).total_seconds()),
+                max(0.0, (current_time - window_end).total_seconds()),
                 3,
             ),
         }

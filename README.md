@@ -105,7 +105,7 @@ samples at 50 Hz, and 3 samples at 1/60 Hz. Offline confirmation remains
 time-based, but its timeout is at least three sampling periods: with a
 5-second base, offline detection stays at 5 seconds for 1 Hz and 50 Hz and
 extends to 180 seconds at 1/60 Hz. The
-realtime scan cursor advances from the previous `scan_end`, so backlog is
+realtime scan cursor advances from the previous `window_end`, so backlog is
 processed window by window instead of skipping to the current time. Each
 alert scenario can be disabled independently with
 `DETECTION_ALERT_THRESHOLD_ENABLED`,
