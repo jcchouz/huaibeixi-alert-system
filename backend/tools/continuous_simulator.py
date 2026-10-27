@@ -77,6 +77,7 @@ def plan_key(plan: ChannelPlan) -> tuple[str, str]:
 
 def threshold_target(plan: ChannelPlan) -> tuple[float, float] | None:
     """生成位于三级阈值外、物理量程内的波形中心和振幅。"""
+    # 判断该通道是否有可用的三级阈值，并计算一个能让波形中心越过阈值、同时仍处于物理量程内的基准值和振幅。
     candidates: list[tuple[float, float]] = []
 
     if plan.level3_upper is not None:
@@ -167,6 +168,7 @@ def assign_alert_scenarios(plans: list[ChannelPlan]) -> list[ChannelPlan]:
     def first_available(
         predicate: Any,
     ) -> int | None:
+        # 遍历当前通道计划，排除已分配给离线等场景的通道
         candidates = [
             index
             for index, plan in enumerate(assigned)
@@ -180,6 +182,7 @@ def assign_alert_scenarios(plans: list[ChannelPlan]) -> list[ChannelPlan]:
     # 让波形中心越过阈值，但振幅仍控制在物理量程内。
     threshold_index = first_available(lambda plan: threshold_target(plan) is not None)
     if threshold_index is not None:
+        # 把该通道的 scenario 改成 "threshold"，并替换 base_value 和 amplitude，让模拟器持续写入触发阈值超限的采样数据
         plan = assigned[threshold_index]
         target = threshold_target(plan)
         if target is not None:
