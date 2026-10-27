@@ -60,7 +60,9 @@ class ChannelPlan:
     sample_rate: float
     scenario: str
     base_value: float
+    # 波形振幅缩放系数，单位与监测值一致；置为 0 时输出不变的死值。
     amplitude: float
+    # 主波形初始相位，单位为弧度；按传感器和通道稳定生成，用于错开各通道波形。
     phase: float
     level3_lower: float | None
     level3_upper: float | None
