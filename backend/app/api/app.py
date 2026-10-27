@@ -70,8 +70,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         # initialize() 只加载阈值、传感器元数据和概览数据量，不恢复历史状态。
         await asyncio.to_thread(engine_instance.initialize)
-        # test 环境只跑单元测试和本地联调，不启动后台检测线程。
-        if settings.detection_enabled and settings.environment != "test":
+        if settings.detection_enabled:
             # 以数据库当前时间为边界，只处理本次启动后的样本和完整窗口。
             await asyncio.to_thread(detection_worker.initialize)
             # start() 拉起两条 daemon 线程：

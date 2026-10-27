@@ -32,7 +32,7 @@ class Settings(BaseSettings):
         min_length=1,
         validation_alias="STATION_NAME",
     )
-    environment: Literal["development", "test", "staging", "production"] = Field(
+    environment: Literal["development", "staging", "production"] = Field(
         default="development",
         validation_alias="ENVIRONMENT",
     )

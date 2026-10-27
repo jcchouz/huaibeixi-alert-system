@@ -41,23 +41,6 @@
 - 统计只生成边界之后的完整窗口，启动时所在的半窗口直接跳过。
 - 不读取 `t_detection_worker_state`，也不恢复历史处理位置。
 
-## 集成测试
-
-集成测试会直接连接 `TEST_DATABASE_URL`，使用 `itest-det-` 前缀创建临时规则和采样，结束后按时间范围和前缀清理。
-
-```powershell
-cd backend
-$env:DEBUG = "false"
-$env:TEST_DATABASE_URL = "host=... port=5432 dbname=... user=... password=..."
-.\\.venv\\Scripts\\python.exe -m pytest -o addopts="" -m integration tests/test_detection_integration.py -q
-```
-
-当前覆盖：
-
-- 新引擎不恢复上次运行状态。
-- 阈值触发、恢复和再次发生。
-- 规则快照只在预警首次创建时写入。
-
 ## 1 万行/秒压测
 
 ```powershell

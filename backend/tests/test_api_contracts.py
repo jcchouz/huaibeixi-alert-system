@@ -22,7 +22,7 @@ class FakeOverviewService:
 
 def test_health_and_overview_are_open() -> None:
     settings = Settings(
-        environment="test",
+        environment="development",
         trusted_hosts="*",
         cors_origins="http://testserver",
     )
@@ -48,7 +48,7 @@ def test_health_and_overview_are_open() -> None:
 def test_station_name_is_configurable(monkeypatch) -> None:
     monkeypatch.setenv("STATION_NAME", "测试站")
 
-    settings = Settings(_env_file=None, environment="test")
+    settings = Settings(_env_file=None, environment="development")
     app = create_app(settings)
 
     assert settings.station_name == "测试站"
@@ -73,7 +73,7 @@ def test_engine_enriches_missing_station_with_configured_name() -> None:
 
 def test_alert_type_switches_are_wired_to_engine() -> None:
     settings = Settings(
-        environment="test",
+        environment="development",
         trusted_hosts="*",
         cors_origins="http://testserver",
         detection_alert_stuck_enabled=False,
@@ -89,7 +89,7 @@ def test_alert_type_switches_are_wired_to_engine() -> None:
 
 def test_validation_errors_use_stable_error_shape() -> None:
     settings = Settings(
-        environment="test",
+        environment="development",
         trusted_hosts="*",
         cors_origins="http://testserver",
     )
@@ -103,7 +103,7 @@ def test_validation_errors_use_stable_error_shape() -> None:
 
 def test_alert_api_uses_polling_and_has_no_removed_features() -> None:
     settings = Settings(
-        environment="test",
+        environment="development",
         trusted_hosts="*",
         cors_origins="http://testserver",
     )

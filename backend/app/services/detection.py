@@ -104,9 +104,6 @@ class AlertDetectionWorker:
     def initialize(self, now: Optional[datetime] = None) -> None:
         """以当前时间为边界初始化检测，不读取或追赶历史状态。"""
         if now is None:
-            if self.settings.environment == "test":
-                # 测试环境通过注入时间初始化，避免访问真实数据库。
-                return
             now = self._current_time()
 
         begin_session = getattr(self.engine, "begin_detection_session", None)
@@ -282,10 +279,7 @@ class AlertDetectionWorker:
             for thread in (self._alert_thread, self._statistics_thread)
         )
         return {
-            "enabled": bool(
-                self.settings.detection_enabled
-                and self.settings.environment != "test"
-            ),
+            "enabled": bool(self.settings.detection_enabled),
             "running": running,
             "intervalSeconds": self.interval_seconds,
             "alertOverlapSeconds": self.alert_overlap_seconds,

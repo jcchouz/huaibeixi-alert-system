@@ -177,7 +177,7 @@ channels and thresholds:
 cd backend
 .\.venv\Scripts\python.exe tools/stress_real_alerts.py --mode preflight
 .\.venv\Scripts\python.exe tools/stress_real_alerts.py --mode all `
-  --allow-write --confirm-database huaibeixi_db_test
+  --allow-write --confirm-database huaibeixi_db
 ```
 
 The all-alert test requires a running backend with all five alert switches

@@ -50,7 +50,7 @@ def make_worker(
     window_minutes: int = 1,
 ) -> AlertDetectionWorker:
     settings = Settings(
-        environment="test",
+        environment="development",
         detection_enabled=True,
         detection_interval_seconds=1,
         detection_alert_overlap_seconds=1,

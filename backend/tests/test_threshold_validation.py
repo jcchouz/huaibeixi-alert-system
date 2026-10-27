@@ -52,18 +52,23 @@ def test_valid_threshold_hierarchy_is_accepted() -> None:
 
 
 def test_detection_durations_are_configured_and_positive() -> None:
-    settings = Settings(environment="test")
+    settings = Settings(environment="development")
     assert settings.detection_confirm_seconds == 3.0
     assert settings.detection_stuck_seconds == 100.0
     assert settings.detection_offline_seconds == 5.0
 
     with pytest.raises(ValidationError):
-        Settings(environment="test", detection_confirm_seconds=0)
+        Settings(environment="development", detection_confirm_seconds=0)
     with pytest.raises(ValidationError):
         Settings(
-            environment="test",
+            environment="development",
             detection_stuck_seconds=0,
         )
+
+
+def test_test_environment_is_not_supported() -> None:
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"environment": "test"})
 
 
 def test_alert_type_switches_default_to_enabled(monkeypatch) -> None:
@@ -77,7 +82,7 @@ def test_alert_type_switches_default_to_enabled(monkeypatch) -> None:
     ):
         monkeypatch.delenv(name, raising=False)
 
-    settings = Settings(_env_file=None, environment="test")
+    settings = Settings(_env_file=None, environment="development")
     assert settings.detection_alert_threshold_enabled is True
     assert settings.detection_alert_offline_enabled is True
     assert settings.detection_alert_daq_offline_enabled is True
@@ -85,7 +90,7 @@ def test_alert_type_switches_default_to_enabled(monkeypatch) -> None:
     assert settings.detection_alert_oor_enabled is True
 
     monkeypatch.setenv("DETECTION_ALERT_STUCK_ENABLED", "false")
-    disabled = Settings(_env_file=None, environment="test")
+    disabled = Settings(_env_file=None, environment="development")
     assert disabled.detection_alert_stuck_enabled is False
     assert disabled.detection_alert_threshold_enabled is True
     assert disabled.detection_alert_offline_enabled is True
