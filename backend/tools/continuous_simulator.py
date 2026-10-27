@@ -404,12 +404,17 @@ def main() -> int:
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
 
+    # 所有模拟样本的时间基准：数据库当前时间（截断到秒），也可通过参数提前到未来。
     simulation_start = database_now().replace(microsecond=0) + timedelta(
         seconds=args.timestamp_lead_seconds
     )
+    # 下一批数据的单调时钟目标点；按 1 秒固定推进，避免受系统时间校准影响。
     next_tick = time.monotonic()
+    # 当前逻辑秒序号（从 0 开始），同时用于计算时间窗口、限制运行时长和生成采样序号。
     second_index = 0
+    # 已成功写入 t_monitor 的累计采样点数。
     total_rows = 0
+    # 上次输出进度日志的单调时间，用于把日志频率限制为约每 10 秒一次。
     last_report = time.monotonic()
 
     print(f"[simulator] started at {simulation_start:%Y-%m-%d %H:%M:%S}", flush=True)
@@ -418,14 +423,20 @@ def main() -> int:
             if args.max_seconds and second_index >= args.max_seconds:
                 break
 
+            # 本批处理开始时的单调时间，仅用于统计本批写入吞吐量。
             tick_start = time.monotonic()
+            # 本批对应的逻辑秒起点，也是进度日志中显示的数据时间。
             second_start = simulation_start + timedelta(seconds=second_index)
+            # 本批待写入的数据，元组依次为传感器编号、通道、值和时间戳。
             rows: list[tuple[str, str, float, datetime]] = []
             # 模拟数据：按 t_sensor.frequency 生成当前一秒内的全部采样点。
             for plan in active_plans:
+                # 把全局采样序号切分到 [second_index, second_index + 1) 秒；
+                # 使用 ceil 可兼容小数采样率，并避免不同批次重复或遗漏样本。
                 first_index = math.ceil(second_index * plan.sample_rate)
                 last_index = math.ceil((second_index + 1) * plan.sample_rate)
                 for sample_index in range(first_index, last_index):
+                    # 全局采样序号换算为相对 simulation_start 的精确秒偏移。
                     elapsed_seconds = sample_index / plan.sample_rate
                     # 模拟数据：当前场景决定样本值，时间戳按采样序号精确推进。
                     rows.append(
@@ -439,11 +450,14 @@ def main() -> int:
 
             # 模拟器只写数据库，检测由后端读取 t_monitor 独立完成。
             insert_rows(rows)
+            # 仅在整批写入成功后累计，保证该值表示已落库的样本数。
             total_rows += len(rows)
+            # 推进逻辑秒；下一批将生成紧随其后的时间窗口。
             second_index += 1
 
             now_monotonic = time.monotonic()
             if now_monotonic - last_report >= 10:
+                # 本批实际耗时不小于 1 秒，避免短批次把瞬时写入速率放大。
                 elapsed = max(1.0, time.monotonic() - tick_start)
                 print(
                     f"[simulator] rows={total_rows} "
@@ -454,7 +468,9 @@ def main() -> int:
                 last_report = now_monotonic
 
             # 对齐下一批数据，保持稳定的一秒节奏。
+            # next_tick 是绝对目标时间，而不是相对 sleep 叠加；处理延迟时可自动追赶。
             next_tick += 1.0
+            # 若本批尚未用完 1 秒，则补足剩余时间；已超时则不等待并立即处理下一批。
             sleep_seconds = next_tick - time.monotonic()
             if sleep_seconds > 0:
                 time.sleep(sleep_seconds)
