@@ -87,7 +87,7 @@ class Settings(BaseSettings):
         le=86400,
         validation_alias="DETECTION_STUCK_SECONDS",
     )
-    # 离线确认的基准秒数；超时至少为 3 个采样周期。
+    # 离线确认的基准秒数；超时至少为 5 个采样周期。
     detection_offline_seconds: float = Field(
         default=5.0,
         gt=0,

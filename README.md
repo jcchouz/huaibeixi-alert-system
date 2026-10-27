@@ -101,9 +101,9 @@ configured reference seconds to consecutive samples using
 `t_sensor.frequency`, with a minimum of three samples. For the default
 3-second threshold and out-of-range window, that means 3 samples at 1 Hz, 150
 samples at 50 Hz, and 3 samples at 1/60 Hz. Offline confirmation remains
-time-based, but its timeout is at least three sampling periods: with a
+time-based, but its timeout is at least five sampling periods: with a
 5-second base, offline detection stays at 5 seconds for 1 Hz and 50 Hz and
-extends to 180 seconds at 1/60 Hz. The
+extends to 300 seconds at 1/60 Hz. The
 realtime scan cursor advances from the previous `window_end`, so backlog is
 processed window by window instead of skipping to the current time. Each
 alert scenario can be disabled independently with

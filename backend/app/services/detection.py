@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from app.core.config import Settings
 from app.core.serialization import serialize_val
-from app.domain.alert_rules.base import MIN_CONFIRM_SAMPLES
+from app.domain.alert_rules.base import MIN_CONFIRM_SAMPLES, MIN_OFFLINE_PERIODS
 from app.domain.engine import AlertAnalyticsEngine
 from app.infrastructure.database import get_db_cursor
 
@@ -286,7 +286,7 @@ class AlertDetectionWorker:
             "oorConfirmMode": "frequency_sample_count",
             "oorConfirmMinimumSamples": MIN_CONFIRM_SAMPLES,
             "offlineConfirmMode": "frequency_timeout",
-            "offlineConfirmMinimumPeriods": MIN_CONFIRM_SAMPLES,
+            "offlineConfirmMinimumPeriods": MIN_OFFLINE_PERIODS,
             "stuckSeconds": self.settings.detection_stuck_seconds,
             "offlineSeconds": self.settings.detection_offline_seconds,
             "cycles": self._alert_cycles + self._statistics_cycles,

@@ -45,13 +45,16 @@ def test_multirange_sensor_matches_physical_quantity(
     ) == expected
 
 
-def test_offline_timeout_uses_at_least_three_sample_periods() -> None:
+def test_offline_timeout_uses_at_least_five_sample_periods() -> None:
     engine = AlertAnalyticsEngine()
     assert engine._parse_frequency_hz("1/60") == pytest.approx(1 / 60)
     assert engine._offline_timeout_ms(
         {"frequency": "1/60", "offline_seconds": 100}
-    ) == pytest.approx(180_000)
+    ) == pytest.approx(300_000)
     assert engine._offline_timeout_ms({"frequency": "100"}) == pytest.approx(5_000)
+    assert engine._offline_timeout_ms(
+        {"frequency": "1/60", "offline_timeout_ms": 5_000}
+    ) == pytest.approx(300_000)
 
 
 @pytest.mark.parametrize(
@@ -59,10 +62,10 @@ def test_offline_timeout_uses_at_least_three_sample_periods() -> None:
     [
         (1.0, 5_000),
         (50.0, 5_000),
-        (1 / 60, 180_000),
+        (1 / 60, 300_000),
     ],
 )
-def test_offline_timeout_scales_to_three_periods_for_low_frequency(
+def test_offline_timeout_scales_to_five_periods_for_low_frequency(
     frequency_hz: float,
     expected_ms: float,
 ) -> None:

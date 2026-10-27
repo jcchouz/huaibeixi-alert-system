@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 MIN_CONFIRM_SAMPLES = 3
+MIN_OFFLINE_PERIODS = 5
 
 
 def parse_frequency_hz(value: Any) -> float:

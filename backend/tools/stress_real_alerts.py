@@ -27,7 +27,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app.core.config import Settings
-from app.domain.alert_rules.base import required_sample_count
+from app.domain.alert_rules.base import MIN_OFFLINE_PERIODS, required_sample_count
 from app.domain.alert_types import (
     ALERT_TYPE_DAQ_OFFLINE,
     ALERT_TYPE_OFFLINE,
@@ -315,6 +315,7 @@ def load_channels(conn: Any, station_code: str) -> list[RealChannel]:
                 offline_timeout_ms=required_sample_count(
                     frequency_hz,
                     5.0,
+                    minimum_samples=MIN_OFFLINE_PERIODS,
                 )
                 / frequency_hz
                 * 1000.0,

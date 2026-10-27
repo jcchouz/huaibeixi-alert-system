@@ -22,6 +22,7 @@ from app.domain.alert_rules import (
 )
 from app.domain.alert_rules.base import (
     MIN_CONFIRM_SAMPLES,
+    MIN_OFFLINE_PERIODS,
     AlertRule,
     RuleContext,
     RuleEvaluation,
@@ -378,6 +379,7 @@ class AlertAnalyticsEngine:
                 offline_confirm_periods = required_sample_count(
                     frequency_hz,
                     offline_seconds,
+                    minimum_samples=MIN_OFFLINE_PERIODS,
                 )
                 offline_timeout_ms = max(
                     1.0,
@@ -454,19 +456,25 @@ class AlertAnalyticsEngine:
 
     @classmethod
     def _offline_timeout_ms(cls, rule: Dict[str, Any]) -> float:
-        """按配置时长和采样频率返回离线超时时间，最少 3 个采样周期。"""
-        configured = rule.get("offline_timeout_ms")
-        if configured is not None:
-            return max(1.0, float(configured))
+        """按配置时长和采样频率返回离线超时时间，最少 5 个采样周期。"""
         frequency_hz = cls._parse_frequency_hz(
             rule.get("frequency_hz") or rule.get("frequency") or 1
         )
+        minimum_timeout_ms = MIN_OFFLINE_PERIODS / frequency_hz * 1000.0
+        configured = rule.get("offline_timeout_ms")
+        if configured is not None:
+            return max(1.0, float(configured), minimum_timeout_ms)
         offline_seconds = float(rule.get("offline_seconds") or 5.0)
         missing_periods = required_sample_count(
             frequency_hz,
             offline_seconds,
+            minimum_samples=MIN_OFFLINE_PERIODS,
         )
-        return max(1.0, missing_periods / frequency_hz * 1000.0)
+        return max(
+            1.0,
+            minimum_timeout_ms,
+            missing_periods / frequency_hz * 1000.0,
+        )
 
     @classmethod
     def _parse_physical_range(
@@ -1399,7 +1407,7 @@ class AlertAnalyticsEngine:
             "oorConfirmMode": "frequency_sample_count",
             "oorConfirmMinimumSamples": MIN_CONFIRM_SAMPLES,
             "offlineConfirmMode": "frequency_timeout",
-            "offlineConfirmMinimumPeriods": MIN_CONFIRM_SAMPLES,
+            "offlineConfirmMinimumPeriods": MIN_OFFLINE_PERIODS,
             "stuckSeconds": self.stuck_seconds,
             "offlineSeconds": self.offline_seconds,
         }

@@ -39,6 +39,8 @@ def test_health_and_overview_are_open() -> None:
     assert health.json()["status"] == "ok"
     assert health.json()["detection"]["running"] is False
     assert health.json()["engine"]["stationName"] == "玉环站"
+    assert health.json()["engine"]["offlineConfirmMinimumPeriods"] == 5
+    assert health.json()["detection"]["offlineConfirmMinimumPeriods"] == 5
 
     response = client.get("/api/overview")
     assert response.status_code == 200
