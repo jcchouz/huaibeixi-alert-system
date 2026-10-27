@@ -411,6 +411,7 @@ def main() -> int:
     # 下一批数据的单调时钟目标点；按 1 秒固定推进，避免受系统时间校准影响。
     next_tick = time.monotonic()
     # 当前逻辑秒序号（从 0 开始），同时用于计算时间窗口、限制运行时长和生成采样序号。
+    # second_index 决定采样时间窗口，next_tick 只控制实际写入节奏
     second_index = 0
     # 已成功写入 t_monitor 的累计采样点数。
     total_rows = 0
