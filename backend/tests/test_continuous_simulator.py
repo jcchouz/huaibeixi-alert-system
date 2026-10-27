@@ -6,12 +6,22 @@ import tools.continuous_simulator as continuous_simulator
 from tools.continuous_simulator import (
     ChannelPlan,
     assign_alert_scenarios,
+    env_bool,
     out_of_range_target,
     parse_args,
     plan_key,
     should_skip,
     threshold_target,
 )
+
+
+@pytest.fixture(autouse=True)
+def _enable_all_alert_scenarios(monkeypatch) -> None:
+    monkeypatch.setattr(continuous_simulator, "ENABLE_THRESHOLD_ALERT", True)
+    monkeypatch.setattr(continuous_simulator, "ENABLE_STUCK_ALERT", True)
+    monkeypatch.setattr(continuous_simulator, "ENABLE_OOR_ALERT", True)
+    monkeypatch.setattr(continuous_simulator, "ENABLE_SENSOR_OFFLINE_ALERT", True)
+    monkeypatch.setattr(continuous_simulator, "ENABLE_DAQ_OFFLINE_ALERT", True)
 
 
 def channel_plan(
@@ -41,6 +51,21 @@ def channel_plan(
         range_min=range_min,
         range_max=range_max,
     )
+
+
+def test_env_bool_parses_supported_values(monkeypatch) -> None:
+    monkeypatch.setenv("TEST_ALERT_ENABLED", "yes")
+    assert env_bool("TEST_ALERT_ENABLED", False) is True
+
+    monkeypatch.setenv("TEST_ALERT_ENABLED", "off")
+    assert env_bool("TEST_ALERT_ENABLED", True) is False
+
+    monkeypatch.delenv("TEST_ALERT_ENABLED")
+    assert env_bool("TEST_ALERT_ENABLED", True) is True
+
+    monkeypatch.setenv("TEST_ALERT_ENABLED", "invalid")
+    with pytest.raises(ValueError, match="TEST_ALERT_ENABLED"):
+        env_bool("TEST_ALERT_ENABLED", True)
 
 
 def test_assign_alert_scenarios_uses_only_existing_threshold_channels() -> None:

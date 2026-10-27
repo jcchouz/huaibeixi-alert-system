@@ -10,13 +10,14 @@
   * 传感器离线
   * 采集仪离线
 
-各类场景由文件顶部的 ``ENABLE_*_ALERT`` 常量单独控制，默认全部开启。
+各类场景由 ``ENABLE_*_ALERT`` 环境变量单独控制，未设置时默认全部开启。
 """
 
 from __future__ import annotations
 
 import argparse
 import math
+import os
 import signal
 import sys
 import time
@@ -51,12 +52,26 @@ SCENARIO_ORDER = {
     "daq_offline": 4,
 }
 
-# 预警场景开关，需要关闭某类场景时直接改为 False。
-ENABLE_THRESHOLD_ALERT = True
-ENABLE_STUCK_ALERT = True
-ENABLE_OOR_ALERT = True
-ENABLE_SENSOR_OFFLINE_ALERT = True
-ENABLE_DAQ_OFFLINE_ALERT = True
+
+def env_bool(name: str, default: bool) -> bool:
+    """读取布尔环境变量，非法值直接报错。"""
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value, got {value!r}")
+
+
+ENABLE_THRESHOLD_ALERT = env_bool("ENABLE_THRESHOLD_ALERT", True)
+ENABLE_STUCK_ALERT = env_bool("ENABLE_STUCK_ALERT", True)
+ENABLE_OOR_ALERT = env_bool("ENABLE_OOR_ALERT", True)
+ENABLE_SENSOR_OFFLINE_ALERT = env_bool("ENABLE_SENSOR_OFFLINE_ALERT", True)
+ENABLE_DAQ_OFFLINE_ALERT = env_bool("ENABLE_DAQ_OFFLINE_ALERT", True)
 
 
 @dataclass(frozen=True)
