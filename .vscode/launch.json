@@ -2,6 +2,13 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "Python 调试程序: 当前文件",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal"
+    },
+    {
       "name": "后端：调试 (8090)",
       "type": "debugpy",
       "request": "launch",
@@ -16,32 +23,5 @@
       "console": "integratedTerminal",
       "justMyCode": true
     },
-    {
-      "name": "注入器：单通道阈值样本",
-      "type": "debugpy",
-      "request": "launch",
-      "module": "tools.inject_threshold",
-      "args": ["--level", "3", "--seconds", "20"],
-      "cwd": "${workspaceFolder}/backend",
-      "python": "${workspaceFolder}/backend/.venv/Scripts/python.exe",
-      "envFile": "${workspaceFolder}/backend/.env",
-      "env": {
-        "PYTHONIOENCODING": "utf-8"
-      },
-      "console": "integratedTerminal",
-      "justMyCode": true
-    },
-    {
-      "name": "单元测试：阈值连续命中",
-      "type": "debugpy",
-      "request": "launch",
-      "module": "pytest",
-      "args": ["tests/test_realtime_detection.py", "-k", "threshold", "-s"],
-      "cwd": "${workspaceFolder}/backend",
-      "python": "${workspaceFolder}/backend/.venv/Scripts/python.exe",
-      "envFile": "${workspaceFolder}/backend/.env",
-      "console": "integratedTerminal",
-      "justMyCode": true
-    }
   ]
 }
