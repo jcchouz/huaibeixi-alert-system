@@ -1073,11 +1073,8 @@ class AlertAnalyticsEngine:
             rules = self.channel_states.values()
             samples_by_key: Dict[str, List[Tuple[datetime, float]]] = {}
 
-            # 采样 SQL 只随规则集变化；首次扫描时生成缓存，后续轮次直接复用。
+            # 采样 SQL 在 load_thresholds() 中随规则集一次性生成，扫描路径只读。
             sample_query = self._sample_query
-            if sample_query is None and rules:
-                self._cache_sample_query(rules)
-                sample_query = self._sample_query
             if sample_query is not None:
                 sample_sql, sample_params_tail = sample_query
                 # 查询左闭右开窗口，并按通道返回按时间升序排列的原始点。

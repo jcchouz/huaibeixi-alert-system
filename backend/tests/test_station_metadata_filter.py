@@ -97,6 +97,9 @@ def test_load_thresholds_filters_all_metadata_by_station_code(monkeypatch) -> No
     assert set(engine.instrument_meta) == {"instrument-yh"}
     assert set(engine.sensor_meta) == {"sensor-yh"}
     assert next(iter(engine.sensor_meta.values()))["station_code"] == "YHZ"
+    assert engine._sample_query is not None
+    _, sample_params = engine._sample_query
+    assert sample_params == ("sensor-yh", "x")
 
     instrument_sql, instrument_params = next(
         statement

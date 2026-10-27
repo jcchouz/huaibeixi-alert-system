@@ -240,6 +240,7 @@ def test_realtime_threshold_streak_continues_across_one_second_scans(
         "stuck_condition_active": False,
         "offline_condition_active": False,
     }
+    engine._cache_sample_query(engine.channel_states.values())
     cursor = RealtimeCursor()
 
     @contextmanager
@@ -252,8 +253,12 @@ def test_realtime_threshold_streak_continues_across_one_second_scans(
         applied.append(kwargs)
         return kwargs
 
+    def fail_cache(*args, **kwargs):
+        raise AssertionError("sample query must be prepared before scanning")
+
     monkeypatch.setattr(engine_module, "get_db_cursor", fake_get_db_cursor)
     monkeypatch.setattr(engine, "_apply_condition", fake_apply)
+    monkeypatch.setattr(engine, "_cache_sample_query", fail_cache)
 
     base = datetime(2026, 10, 20, 12, 0, 0)
     for offset in range(4):
@@ -338,6 +343,7 @@ def test_scan_does_not_advance_channel_state_when_commit_fails(
         "stuck_condition_active": False,
         "offline_condition_active": False,
     }
+    engine._cache_sample_query(engine.channel_states.values())
     cursor = RealtimeCursor()
 
     @contextmanager
