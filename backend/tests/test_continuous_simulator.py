@@ -31,7 +31,6 @@ def channel_plan(
         channel=channel,
         instrument_id=instrument_id,
         sample_rate=1.0,
-        is_acceleration=False,
         scenario="normal",
         base_value=base,
         amplitude=0.1,

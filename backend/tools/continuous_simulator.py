@@ -33,11 +33,9 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app.core.config import get_settings
+from app.domain.alert_rules.base import parse_frequency_hz
 
 DSN = get_settings().dsn
-
-# 用于识别加速度传感器；t_sensor.frequency 缺失时采用较高的默认采样率。
-ACCELERATION_SENSOR_PREFIXES = ("accl-", "zd-wg-", "zd-cg-")
 
 # 离线场景不写采样数据，由后端根据 t_monitor 中的缺测情况独立判定。
 OFFLINE_SCENARIOS = {"sensor_offline", "daq_offline"}
@@ -60,7 +58,6 @@ class ChannelPlan:
     channel: str
     instrument_id: str
     sample_rate: float
-    is_acceleration: bool
     scenario: str
     base_value: float
     amplitude: float
@@ -223,9 +220,8 @@ def load_channel_plans() -> list[ChannelPlan]:
     """加载阈值和传感器元数据，并生成模拟计划。"""
     query = """
         SELECT t.sensor_no, COALESCE(t.channel, '') AS channel,
-               t.physical_quantity, t.level3_lower, t.level3_upper,
-               t.range_min, t.range_max, s.name AS sensor_name, s.frequency,
-               s.instrument_id
+               t.level3_lower, t.level3_upper, t.range_min, t.range_max,
+               s.frequency, s.instrument_id
         FROM public.t_alert_threshold t
         LEFT JOIN public.t_sensor s
           ON LOWER(s.sensor_no) = LOWER(t.sensor_no)
@@ -241,33 +237,16 @@ def load_channel_plans() -> list[ChannelPlan]:
     for (
         sensor_no,
         channel,
-        quantity,
         level3_lower,
         level3_upper,
         range_min,
         range_max,
-        sensor_name,
         frequency,
         instrument_id,
     ) in rows:
         sensor_key = str(sensor_no).strip().lower()
         channel_key = str(channel or "").strip()
-        sensor_text = f"{sensor_no} {sensor_name or ''}".lower()
-        is_acceleration = (
-            "加速度" in str(quantity or "")
-            or sensor_key.startswith(ACCELERATION_SENSOR_PREFIXES)
-            or "加速度" in sensor_text
-        )
-        try:
-            if "/" in str(frequency or ""):
-                numerator, denominator = str(frequency).split("/", 1)
-                sample_rate = float(numerator) / float(denominator)
-            else:
-                sample_rate = float(frequency)
-        except (TypeError, ValueError, ZeroDivisionError):
-            sample_rate = 100.0 if is_acceleration else 1.0
-        if sample_rate <= 0:
-            sample_rate = 1.0
+        sample_rate = parse_frequency_hz(frequency)
 
         lower = float(level3_lower) if level3_lower is not None else None
         upper = float(level3_upper) if level3_upper is not None else None
@@ -292,7 +271,6 @@ def load_channel_plans() -> list[ChannelPlan]:
                 channel=channel_key,
                 instrument_id=str(instrument_id or "").strip(),
                 sample_rate=sample_rate,
-                is_acceleration=is_acceleration,
                 scenario="normal",
                 base_value=base_value,
                 amplitude=amplitude,
@@ -382,12 +360,9 @@ def main() -> int:
     active_plans = [plan for plan in plans if not should_skip(plan)]
     skipped_plans = [plan for plan in plans if should_skip(plan)]
     rows_per_second = sum(plan.sample_rate for plan in active_plans)
-    accel_channels = sum(1 for plan in plans if plan.is_acceleration)
-    other_channels = len(plans) - accel_channels
 
     print(
-        f"[simulator] channels={len(plans)} acceleration={accel_channels} "
-        f"other={other_channels} skipped={len(skipped_plans)} "
+        f"[simulator] channels={len(plans)} skipped={len(skipped_plans)} "
         f"rows_per_second={rows_per_second:.3f}",
         flush=True,
     )
