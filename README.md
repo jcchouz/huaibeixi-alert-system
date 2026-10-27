@@ -89,8 +89,7 @@ statistics to `t_stat_record`. The service is designed for a single backend
 instance. On startup it creates a database-time boundary and only processes
 samples and complete statistics windows after that boundary; historical
 watermarks and catch-up processing are not used. Configure the realtime alert interval
-with `DETECTION_INTERVAL_SECONDS`, the commit-delay lookback with
-`DETECTION_ALERT_OVERLAP_SECONDS`, and the statistics window with
+with `DETECTION_INTERVAL_SECONDS` and the statistics window with
 `DETECTION_WINDOW_MINUTES`. Each alert loop advances at most one
 `DETECTION_INTERVAL_SECONDS` window; if a window takes longer than that,
 `alertBacklogSeconds` grows and the backend is not keeping up with ingestion.

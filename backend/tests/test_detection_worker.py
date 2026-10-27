@@ -53,7 +53,6 @@ def make_worker(
         environment="development",
         detection_enabled=True,
         detection_interval_seconds=1,
-        detection_alert_overlap_seconds=1,
         detection_lag_seconds=5,
         detection_window_minutes=window_minutes,
     )
@@ -74,7 +73,7 @@ def test_initialize_starts_from_current_time_without_historical_state() -> None:
     assert worker._last_window_end == datetime(2026, 10, 20, 15, 43)
 
 
-def test_alert_scan_never_reaches_before_startup_boundary() -> None:
+def test_alert_scan_windows_start_at_the_detection_boundary_without_overlap() -> None:
     engine = FakeEngine()
     worker = make_worker(engine)
     worker.initialize(datetime(2026, 10, 20, 15, 42, 30))
@@ -84,7 +83,7 @@ def test_alert_scan_never_reaches_before_startup_boundary() -> None:
 
     assert engine.alert_scans == [
         (datetime(2026, 10, 20, 15, 42, 30), datetime(2026, 10, 20, 15, 42, 31)),
-        (datetime(2026, 10, 20, 15, 42, 30), datetime(2026, 10, 20, 15, 42, 32)),
+        (datetime(2026, 10, 20, 15, 42, 31), datetime(2026, 10, 20, 15, 42, 32)),
     ]
 
 
@@ -118,7 +117,6 @@ def test_alert_scan_resumes_from_previous_backlog_cursor_without_gaps() -> None:
     worker = make_worker(engine)
     started_at = datetime(2026, 10, 20, 15, 42, 30)
     worker.initialize(started_at)
-    worker.alert_overlap_seconds = 0
     current_time = started_at + timedelta(seconds=10)
 
     first = worker.scan_alerts_once(current_time)
@@ -209,21 +207,6 @@ def test_startup_on_window_boundary_uses_next_complete_window() -> None:
     worker.initialize(datetime(2026, 10, 20, 15, 30))
 
     assert worker._last_window_end == datetime(2026, 10, 20, 15, 30)
-
-
-def test_alert_scan_windows_reuse_a_short_overlap() -> None:
-    engine = FakeEngine()
-    worker = make_worker(engine)
-    worker.initialize(datetime(2026, 10, 20, 15, 42, 30))
-    worker.alert_overlap_seconds = 0
-
-    assert worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 31)) is not None
-    assert worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 32)) is not None
-
-    assert engine.alert_scans == [
-        (datetime(2026, 10, 20, 15, 42, 30), datetime(2026, 10, 20, 15, 42, 31)),
-        (datetime(2026, 10, 20, 15, 42, 31), datetime(2026, 10, 20, 15, 42, 32)),
-    ]
 
 
 def test_worker_starts_separate_realtime_and_statistics_threads(monkeypatch) -> None:

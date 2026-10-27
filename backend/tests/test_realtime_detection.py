@@ -309,60 +309,6 @@ def test_no_data_still_alerts_offline_once_per_unrecovered_incident(
     assert applied[0]["alert_type"] == ALERT_TYPE_OFFLINE
 
 
-def test_overlap_window_does_not_replay_an_already_processed_sample(
-    monkeypatch,
-) -> None:
-    engine = AlertAnalyticsEngine()
-    key = engine.make_key("sensor-1", "x")
-    previous_sample_time = datetime(2026, 10, 20, 11, 59, 59)
-    engine.channel_states[key] = {
-        "key": key,
-        "sensor_no_lower": "sensor-1",
-        "channel": "x",
-        "instrument_id": None,
-        "sample_interval_ms": 1000.0,
-        "level1_upper": 30.0,
-        "level2_upper": 20.0,
-        "level3_upper": 10.0,
-        "level1_lower": None,
-        "level2_lower": None,
-        "level3_lower": None,
-        "physical_min": -100.0,
-        "physical_max": 100.0,
-        "last_ts": previous_sample_time,
-        "threshold_streak_count": 0,
-        "threshold_condition_active": False,
-        "threshold_condition_level": None,
-        "oor_streak_count": 0,
-        "oor_condition_active": False,
-        "stuck_streak_count": 0,
-        "stuck_condition_active": False,
-        "offline_condition_active": False,
-    }
-    cursor = RealtimeCursor()
-
-    @contextmanager
-    def fake_get_db_cursor(commit: bool = False):
-        yield cursor
-
-    applied: list[dict[str, Any]] = []
-
-    def fake_apply(cur, active_map, triggered, **kwargs):
-        applied.append(kwargs)
-        return kwargs
-
-    monkeypatch.setattr(engine_module, "get_db_cursor", fake_get_db_cursor)
-    monkeypatch.setattr(engine, "_apply_condition", fake_apply)
-
-    engine.scan_realtime_alerts(
-        previous_sample_time.replace(second=55),
-        previous_sample_time.replace(second=59) + timedelta(seconds=1),
-    )
-
-    assert applied == []
-    assert engine.channel_states.get(key)["last_ts"] == previous_sample_time
-
-
 def test_scan_does_not_advance_channel_state_when_commit_fails(
     monkeypatch,
 ) -> None:

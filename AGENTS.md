@@ -15,7 +15,6 @@
 - 阈值超限和超物理量程使用 `DETECTION_CONFIRM_SECONDS`，传感器死值使用 `DETECTION_STUCK_SECONDS`，按 `t_sensor.frequency` 折算为连续采样点数（最少 3 点）；通道离线使用 `DETECTION_OFFLINE_SECONDS`，超时至少为 3 个采样周期，采集仪离线复用通道离线结果。
 - 实时预警扫描周期由 `DETECTION_INTERVAL_SECONDS` 配置，统计窗口只影响 `t_stat_record`，不得阻塞实时预警。
 - 实时扫描每轮最多推进一个检测周期，并从上一轮 `window_end` 继续处理；单轮耗时超过周期时，通过 `alertBacklogSeconds` 暴露积压，不得跳到数据库当前时间而漏扫中间窗口。
-- 实时扫描通过 `DETECTION_ALERT_OVERLAP_SECONDS` 短回看以覆盖外部事务提交延迟，重复样本必须依据 `last_ts` 去重。
 - 各类预警可通过 `DETECTION_ALERT_THRESHOLD_ENABLED`、`DETECTION_ALERT_OFFLINE_ENABLED`、`DETECTION_ALERT_DAQ_OFFLINE_ENABLED`、`DETECTION_ALERT_STUCK_ENABLED` 和 `DETECTION_ALERT_OOR_ENABLED` 独立开关，默认全部开启；关闭某类预警只停止写入该类预警，采样和统计不受影响。
 - `continuous_simulator.py` 只负责持续向 `t_monitor` 写入测试数据，并周期性制造各类预警场景，不执行检测，不写入统计或预警表。
 - 项目按单实例部署，不使用多实例 advisory lock 选主。

@@ -1096,22 +1096,6 @@ class AlertAnalyticsEngine:
                         )
                     )
 
-            # 回看查询可能带回已处理样本，仅在 last_ts 之后继续累计状态。
-            for key, samples in list(samples_by_key.items()):
-                previous_last_seen = parse_datetime(
-                    self.channel_states[key].get("last_ts")
-                )
-                if previous_last_seen is not None:
-                    samples = [
-                        sample
-                        for sample in samples
-                        if sample[0] > previous_last_seen
-                    ]
-                if samples:
-                    samples_by_key[key] = samples
-                else:
-                    del samples_by_key[key]
-
             if self._active_alert_cache is not None:
                 active_map = dict(self._active_alert_cache)
             else:

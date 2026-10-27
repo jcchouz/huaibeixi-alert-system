@@ -59,13 +59,6 @@ class Settings(BaseSettings):
         le=60,
         validation_alias="DETECTION_INTERVAL_SECONDS",
     )
-    # 实时扫描可选向前回看的时间，用于覆盖外部事务提交延迟；当前写入按时间顺序提交。
-    detection_alert_overlap_seconds: int = Field(
-        default=0,
-        ge=0,
-        le=60,
-        validation_alias="DETECTION_ALERT_OVERLAP_SECONDS",
-    )
     # 统计窗口的落库延迟；实时预警扫描不使用该延迟。
     detection_lag_seconds: int = Field(
         default=5,

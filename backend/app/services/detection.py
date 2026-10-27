@@ -36,7 +36,6 @@ class AlertDetectionWorker:
         self.settings = settings
         self.clock = clock
         self.interval_seconds = settings.detection_interval_seconds
-        self.alert_overlap_seconds = settings.detection_alert_overlap_seconds
         self.lag_seconds = settings.detection_lag_seconds
         self.window_minutes = settings.detection_window_minutes
 
@@ -80,9 +79,8 @@ class AlertDetectionWorker:
             thread.start()
         logger.info(
             "Alert detection worker started "
-            "(alerts=%ss, overlap=%ss, statistics=%sm, stats-lag=%ss).",
+            "(alerts=%ss, statistics=%sm, stats-lag=%ss).",
             self.interval_seconds,
-            self.alert_overlap_seconds,
             self.window_minutes,
             self.lag_seconds,
         )
@@ -122,8 +120,6 @@ class AlertDetectionWorker:
     def scan_alerts_once(self, current_time: datetime) -> Optional[Dict[str, Any]]:
         """扫描启动边界之后的实时样本。
 
-        每次扫描都会向前短回看一段重叠区间，以覆盖外部写入事务的提交延迟。
-        重叠不会越过启动边界，重复样本由检索引擎依据 ``last_ts`` 去重。
         当前时间超前于积压游标时，只推进一个检测周期；下一轮仍从上一轮
         ``window_end`` 继续，不会跳到数据库当前时间而漏扫中间窗口。
         """
@@ -141,10 +137,7 @@ class AlertDetectionWorker:
             current_time,
             last_alert_scan_at + timedelta(seconds=self.interval_seconds),
         )
-        window_start = max(
-            detection_started_at,
-            last_alert_scan_at - timedelta(seconds=self.alert_overlap_seconds),
-        )
+        window_start = last_alert_scan_at
         # 即使区间内没有采样点也照常扫描，使通道离线判定继续推进。
         result = self.engine.scan_realtime_alerts(
             window_start,
@@ -282,7 +275,6 @@ class AlertDetectionWorker:
             "enabled": bool(self.settings.detection_enabled),
             "running": running,
             "intervalSeconds": self.interval_seconds,
-            "alertOverlapSeconds": self.alert_overlap_seconds,
             "lagSeconds": self.lag_seconds,
             "windowMinutes": self.window_minutes,
             "detectionMode": "realtime_sample_groups",
