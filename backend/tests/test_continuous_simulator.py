@@ -2,6 +2,7 @@ import sys
 
 import pytest
 
+import tools.continuous_simulator as continuous_simulator
 from tools.continuous_simulator import (
     ChannelPlan,
     assign_alert_scenarios,
@@ -108,6 +109,26 @@ def test_assign_alert_scenarios_keeps_sensor_offline_instrument_online() -> None
 
     assert siblings
     assert all(plan.scenario != "daq_offline" for plan in siblings)
+
+
+def test_assign_alert_scenarios_respects_macro_switches(monkeypatch) -> None:
+    plans = [
+        channel_plan("sensor-a", "x", "instrument-a", level3_upper=8.0),
+        channel_plan("sensor-a", "y", "instrument-a", level3_upper=8.0),
+        channel_plan("sensor-b", "x", "instrument-b", level3_upper=8.0),
+        channel_plan("sensor-b", "y", "instrument-b", level3_upper=8.0),
+    ]
+    monkeypatch.setattr(continuous_simulator, "ENABLE_THRESHOLD_ALERT", True)
+    monkeypatch.setattr(continuous_simulator, "ENABLE_STUCK_ALERT", False)
+    monkeypatch.setattr(continuous_simulator, "ENABLE_OOR_ALERT", False)
+    monkeypatch.setattr(continuous_simulator, "ENABLE_SENSOR_OFFLINE_ALERT", False)
+    monkeypatch.setattr(continuous_simulator, "ENABLE_DAQ_OFFLINE_ALERT", False)
+
+    assigned = assign_alert_scenarios(plans)
+
+    assert {plan.scenario for plan in assigned} <= {"normal", "threshold"}
+    assert any(plan.scenario == "threshold" for plan in assigned)
+    assert not any(should_skip(plan) for plan in assigned)
 
 
 def test_parse_args_accepts_timestamp_lead(monkeypatch) -> None:

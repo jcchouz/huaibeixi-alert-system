@@ -9,6 +9,8 @@
   * 超物理量程
   * 传感器离线
   * 采集仪离线
+
+各类场景由文件顶部的 ``ENABLE_*_ALERT`` 常量单独控制，默认全部开启。
 """
 
 from __future__ import annotations
@@ -48,6 +50,13 @@ SCENARIO_ORDER = {
     "sensor_offline": 3,
     "daq_offline": 4,
 }
+
+# 预警场景开关，需要关闭某类场景时直接改为 False。
+ENABLE_THRESHOLD_ALERT = True
+ENABLE_STUCK_ALERT = True
+ENABLE_OOR_ALERT = True
+ENABLE_SENSOR_OFFLINE_ALERT = True
+ENABLE_DAQ_OFFLINE_ALERT = True
 
 
 @dataclass(frozen=True)
@@ -137,7 +146,7 @@ def assign_alert_scenarios(plans: list[ChannelPlan]) -> list[ChannelPlan]:
         if len(indexes) >= 2
     ]
     daq_instrument = ""
-    if daq_candidates:
+    if ENABLE_DAQ_OFFLINE_ALERT and daq_candidates:
         daq_instrument, daq_indexes = min(
             daq_candidates,
             key=lambda item: (len(item[1]), item[0]),
@@ -153,7 +162,7 @@ def assign_alert_scenarios(plans: list[ChannelPlan]) -> list[ChannelPlan]:
         for instrument_id, indexes in by_instrument.items()
         if instrument_id != daq_instrument and len(indexes) >= 2
     ]
-    if offline_candidates:
+    if ENABLE_SENSOR_OFFLINE_ALERT and offline_candidates:
         _, offline_indexes = min(
             offline_candidates,
             key=lambda item: (-len(item[1]), item[0]),
@@ -180,7 +189,11 @@ def assign_alert_scenarios(plans: list[ChannelPlan]) -> list[ChannelPlan]:
 
     # 模拟预警（阈值超限）：选一个存在三级阈值的真实通道，
     # 让波形中心越过阈值，但振幅仍控制在物理量程内。
-    threshold_index = first_available(lambda plan: threshold_target(plan) is not None)
+    threshold_index = (
+        first_available(lambda plan: threshold_target(plan) is not None)
+        if ENABLE_THRESHOLD_ALERT
+        else None
+    )
     if threshold_index is not None:
         # 把该通道的 scenario 改成 "threshold"，并替换 base_value 和 amplitude，让模拟器持续写入触发阈值超限的采样数据
         plan = assigned[threshold_index]
@@ -197,7 +210,11 @@ def assign_alert_scenarios(plans: list[ChannelPlan]) -> list[ChannelPlan]:
 
     # 模拟预警（超物理量程）：选另一个真实通道，
     # 让波形中心落在 range_min/range_max 之外。
-    oor_index = first_available(lambda plan: out_of_range_target(plan) is not None)
+    oor_index = (
+        first_available(lambda plan: out_of_range_target(plan) is not None)
+        if ENABLE_OOR_ALERT
+        else None
+    )
     if oor_index is not None:
         plan = assigned[oor_index]
         target = out_of_range_target(plan)
@@ -213,7 +230,7 @@ def assign_alert_scenarios(plans: list[ChannelPlan]) -> list[ChannelPlan]:
 
     # 模拟预警（传感器死值）：再选一个真实通道并把振幅置零，
     # channel_value() 会持续输出相同的 base_value。
-    stuck_index = first_available(lambda _plan: True)
+    stuck_index = first_available(lambda _plan: True) if ENABLE_STUCK_ALERT else None
     if stuck_index is not None:
         plan = assigned[stuck_index]
         assigned[stuck_index] = replace(plan, scenario="stuck", amplitude=0.0)
@@ -372,7 +389,12 @@ def main() -> int:
         flush=True,
     )
     print(
-        "[simulator] active alert scenarios: threshold, stuck, OOR, sensor offline, DAQ offline",
+        "[simulator] alert switches: "
+        f"threshold={ENABLE_THRESHOLD_ALERT}, "
+        f"stuck={ENABLE_STUCK_ALERT}, "
+        f"oor={ENABLE_OOR_ALERT}, "
+        f"sensor_offline={ENABLE_SENSOR_OFFLINE_ALERT}, "
+        f"daq_offline={ENABLE_DAQ_OFFLINE_ALERT}",
         flush=True,
     )
     scenario_plans = sorted(
