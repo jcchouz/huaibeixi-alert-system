@@ -1073,21 +1073,25 @@ class AlertAnalyticsEngine:
             rules = self.channel_states.values()
             samples_by_key: Dict[str, List[Tuple[datetime, float]]] = {}
 
+            # 采样 SQL 只随规则集变化；首次扫描时生成缓存，后续轮次直接复用。
             sample_query = self._sample_query
             if sample_query is None and rules:
                 self._cache_sample_query(rules)
                 sample_query = self._sample_query
             if sample_query is not None:
                 sample_sql, sample_params_tail = sample_query
+                # 查询左闭右开窗口，并按通道返回按时间升序排列的原始点。
                 cur.execute(
                     sample_sql,
                     (window_start, window_end, *sample_params_tail),
                 )
                 for row in cur.fetchall():
+                    # 统计本窗口内参与实时检测的非空原始点数量。
                     raw_points_processed += int(row["sample_cnt"] or 0)
                     key = self.make_key(row["s_no"], row["ch"])
                     if key not in self.channel_states:
                         continue
+                    # 复用同一组查询结果构造“采样时间-值”序列，供连续命中规则累计状态。
                     samples_by_key[key] = list(
                         zip(
                             row["sample_times"],
@@ -1097,15 +1101,19 @@ class AlertAnalyticsEngine:
                     )
 
             if self._active_alert_cache is not None:
+                # 复用上一轮写库后维护的活动预警快照，避免每轮重复查询。
                 active_map = dict(self._active_alert_cache)
             else:
+                # 首次扫描时从数据库加载当前活动预警。
                 active_map = self._load_active_alerts(cur)
 
+            # 记录每个采集仪下的已配置通道数，作为采集仪离线判定的分母。
             instrument_totals = Counter(
                 r.get("instrument_id")
                 for r in rules
                 if (r.get("instrument_id") or "").strip()
             )
+            # 汇总本轮已判定离线的通道键，循环结束后据此聚合采集仪级离线预警。
             offline_by_instrument: Dict[str, Set[str]] = {}
 
             # 没有样本的通道也必须继续推进，否则无法判定通道离线。
