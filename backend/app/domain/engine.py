@@ -122,7 +122,6 @@ class AlertAnalyticsEngine:
         self.instrument_meta: Dict[str, Dict[str, Any]] = {}
         self._daq_condition_active: Dict[str, bool] = {}
         self._daq_state_known: Set[str] = set()
-        self.total_monitor_rows: int = 398059510
         self.last_rule_load_time: Optional[datetime] = None
         self.confirm_seconds = max(0.001, float(confirm_seconds))
         self.stuck_seconds = max(0.001, float(stuck_seconds))
@@ -166,7 +165,6 @@ class AlertAnalyticsEngine:
     def initialize(self) -> None:
         """加载规则和元数据，不恢复任何上次进程的运行状态。"""
         self.load_thresholds()
-        self.refresh_monitor_row_count()
 
     def begin_detection_session(self, started_at: datetime) -> None:
         """以启动时间为新基线重置内存状态。
@@ -216,26 +214,6 @@ class AlertAnalyticsEngine:
                 "Closed %d open alert incidents at detection session boundary.",
                 closed,
             )
-
-    def refresh_monitor_row_count(self) -> int:
-        """通过元数据刷新监测数据量，避免全表扫描。"""
-        try:
-            # 优先读取 TimescaleDB 元数据，失败后使用 PostgreSQL 估算值。
-            with get_db_cursor() as cur:
-                cur.execute("SELECT hypertable_approximate_row_count('public.t_monitor') AS cnt")
-                row = cur.fetchone()
-                if row and row["cnt"]:
-                    self.total_monitor_rows = int(row["cnt"])
-        except Exception:
-            try:
-                with get_db_cursor() as cur:
-                    cur.execute("SELECT reltuples::bigint AS cnt FROM pg_class WHERE relname = 't_monitor'")
-                    row = cur.fetchone()
-                    if row and row["cnt"] and int(row["cnt"]) > 0:
-                        self.total_monitor_rows = int(row["cnt"])
-            except Exception as exc:
-                logger.warning("Could not refresh monitor row count: %s", exc)
-        return self.total_monitor_rows
 
     def _resolve_station_code(self, cur: Any) -> str:
         """将配置的站点名称解析为对应的站点编码。"""
@@ -1418,7 +1396,6 @@ class AlertAnalyticsEngine:
             "loadedRulesCount": len(rules),
             "onlineChannels": online_cnt,
             "offlineChannels": offline_cnt,
-            "totalMonitorRows": self.total_monitor_rows,
             "lastRuleLoadTime": serialize_val(self.last_rule_load_time),
             "detectionMode": "realtime_sample_groups",
             "detectionStartedAt": serialize_val(self.detection_started_at),

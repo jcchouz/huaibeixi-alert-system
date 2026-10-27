@@ -90,8 +90,6 @@ class OverviewService:
             "totalLevel1Count": int(kpi["total_l1"] or 0),
             "totalLevel2Count": int(kpi["total_l2"] or 0),
             "totalLevel3Count": int(kpi["total_l3"] or 0),
-            "totalMonitorRows": self.engine.total_monitor_rows,
-            "total_monitor_rows": self.engine.total_monitor_rows,
             "statRecordCount": snapshot["stat_count"],
             "stat_record_count": snapshot["stat_count"],
             "engineStatus": engine_status,
