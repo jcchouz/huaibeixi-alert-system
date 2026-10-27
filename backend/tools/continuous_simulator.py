@@ -124,7 +124,8 @@ def assign_alert_scenarios(plans: list[ChannelPlan]) -> list[ChannelPlan]:
         if plan.instrument_id:
             by_instrument[plan.instrument_id].append(index)
 
-    # 优先选择通道数最少的多通道采集仪，用它验证整台采集仪离线。
+    # 模拟预警（采集仪离线）：优先选择通道数最少的多通道采集仪，
+    # 将其全部通道标记为跳过写入，后端会按缺少采样判定整台采集仪离线。
     daq_candidates = [
         (instrument_id, indexes)
         for instrument_id, indexes in by_instrument.items()
@@ -140,7 +141,8 @@ def assign_alert_scenarios(plans: list[ChannelPlan]) -> list[ChannelPlan]:
             assigned[index] = replace(assigned[index], scenario="daq_offline")
             used.add(plan_key(assigned[index]))
 
-    # 传感器离线只停写一个通道，并确保同一采集仪还有其他通道持续上报。
+    # 模拟预警（传感器离线）：只停写一个通道，并确保同一采集仪
+    # 还有其他通道持续上报，以便后端区分单通道离线与采集仪离线。
     offline_candidates = [
         (instrument_id, indexes)
         for instrument_id, indexes in by_instrument.items()
@@ -170,6 +172,8 @@ def assign_alert_scenarios(plans: list[ChannelPlan]) -> list[ChannelPlan]:
             return None
         return min(candidates, key=lambda item: plan_key(assigned[item]))
 
+    # 模拟预警（阈值超限）：选一个存在三级阈值的真实通道，
+    # 让波形中心越过阈值，但振幅仍控制在物理量程内。
     threshold_index = first_available(lambda plan: threshold_target(plan) is not None)
     if threshold_index is not None:
         plan = assigned[threshold_index]
@@ -184,6 +188,8 @@ def assign_alert_scenarios(plans: list[ChannelPlan]) -> list[ChannelPlan]:
             )
             used.add(plan_key(plan))
 
+    # 模拟预警（超物理量程）：选另一个真实通道，
+    # 让波形中心落在 range_min/range_max 之外。
     oor_index = first_available(lambda plan: out_of_range_target(plan) is not None)
     if oor_index is not None:
         plan = assigned[oor_index]
@@ -198,6 +204,8 @@ def assign_alert_scenarios(plans: list[ChannelPlan]) -> list[ChannelPlan]:
             )
             used.add(plan_key(plan))
 
+    # 模拟预警（传感器死值）：再选一个真实通道并把振幅置零，
+    # channel_value() 会持续输出相同的 base_value。
     stuck_index = first_available(lambda _plan: True)
     if stuck_index is not None:
         plan = assigned[stuck_index]
@@ -300,6 +308,8 @@ def should_skip(plan: ChannelPlan) -> bool:
 
 def channel_value(plan: ChannelPlan, elapsed_seconds: float) -> float:
     """生成一个正常、死值或超量程样本。"""
+    # 模拟数据：死值场景每个采样点都返回相同值；其余场景叠加两条正弦波，
+    # 正常、阈值超限和超量程的差异由分配场景时设置的 base_value/amplitude 决定。
     if plan.scenario == "stuck":
         return plan.base_value
     t = elapsed_seconds
@@ -315,6 +325,7 @@ def insert_rows(rows: list[tuple[str, str, float, datetime]]) -> None:
         return
     with psycopg2.connect(DSN) as conn:
         with conn.cursor() as cur:
+            # 模拟数据：仅写入 t_monitor；预警记录和统计记录由后端独立检测生成。
             execute_values(
                 cur,
                 """
@@ -362,6 +373,7 @@ def main() -> int:
     if not plans:
         raise SystemExit("No threshold channels found")
 
+    # 离线场景不写入采样点，由后端根据 t_monitor 缺少新数据来判定离线。
     active_plans = [plan for plan in plans if not should_skip(plan)]
     skipped_plans = [plan for plan in plans if should_skip(plan)]
     rows_per_second = sum(plan.sample_rate for plan in active_plans)
@@ -424,12 +436,13 @@ def main() -> int:
             tick_start = time.monotonic()
             second_start = simulation_start + timedelta(seconds=second_index)
             rows: list[tuple[str, str, float, datetime]] = []
-            # 生成当前一秒内应写入的全部样本。
+            # 模拟数据：按 t_sensor.frequency 生成当前一秒内的全部采样点。
             for plan in active_plans:
                 first_index = math.ceil(second_index * plan.sample_rate)
                 last_index = math.ceil((second_index + 1) * plan.sample_rate)
                 for sample_index in range(first_index, last_index):
                     elapsed_seconds = sample_index / plan.sample_rate
+                    # 模拟数据：当前场景决定样本值，时间戳按采样序号精确推进。
                     rows.append(
                         (
                             plan.sensor_no,
