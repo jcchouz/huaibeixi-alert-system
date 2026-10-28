@@ -1,4 +1,4 @@
-"""Out-of-range alert rule."""
+"""超物理量程预警规则。"""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from app.domain.alert_types import ALERT_TYPE_OOR, NON_THRESHOLD_ALERT_LEVEL
 
 
 class OutOfRangeAlertRule:
-    """Detect sustained samples outside the configured physical range."""
+    """检测持续超出配置物理量程的采样点。"""
 
     alert_type = ALERT_TYPE_OOR
 

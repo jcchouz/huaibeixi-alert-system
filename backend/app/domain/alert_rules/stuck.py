@@ -1,4 +1,4 @@
-"""Stuck-value alert rule."""
+"""传感器死值预警规则。"""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from app.domain.alert_types import ALERT_TYPE_STUCK, NON_THRESHOLD_ALERT_LEVEL
 
 
 class StuckAlertRule:
-    """Detect sustained identical sensor readings."""
+    """检测连续不变的传感器读数。"""
 
     alert_type = ALERT_TYPE_STUCK
 

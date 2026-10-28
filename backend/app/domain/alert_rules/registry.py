@@ -1,4 +1,4 @@
-"""Alert rule registry and evaluation orchestration."""
+"""预警规则注册表及评估调度。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from app.domain.alert_rules.threshold import ThresholdAlertRule
 
 
 def default_alert_rules() -> tuple[AlertRule, ...]:
-    """Return the default independent per-channel rule set."""
+    """返回默认的独立单通道预警规则集合。"""
     return (
         ThresholdAlertRule(),
         OutOfRangeAlertRule(),
@@ -20,11 +20,10 @@ def default_alert_rules() -> tuple[AlertRule, ...]:
 
 
 class AlertRuleRegistry:
-    """Evaluate independent alert rules in a stable order.
+    """按稳定顺序评估各条独立的预警规则。
 
-    New alert types can be added by implementing ``AlertRule`` and passing the
-    instance into this registry. Database writes remain centralized in the scan
-    orchestrator.
+    新增预警类型时，实现 ``AlertRule`` 并将实例传入本注册表即可。
+    数据库写入仍统一由扫描调度器负责。
     """
 
     def __init__(self, rules: Optional[Iterable[AlertRule]] = None) -> None:

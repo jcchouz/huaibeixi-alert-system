@@ -1,4 +1,4 @@
-"""Instrument-level offline aggregation rule."""
+"""采集仪级别的离线汇总规则。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Set
 
 @dataclass(frozen=True)
 class DaqOfflineEvaluation:
-    """Instrument offline decision consumed by the scan orchestrator."""
+    """扫描调度器使用的采集仪离线判定结果。"""
 
     active: bool
     previous_active: bool
@@ -17,7 +17,7 @@ class DaqOfflineEvaluation:
 
 
 class DaqOfflineRule:
-    """Create one instrument alert only when every configured channel is offline."""
+    """仅在全部已配置通道都离线时创建一个采集仪预警。"""
 
     def evaluate(
         self,

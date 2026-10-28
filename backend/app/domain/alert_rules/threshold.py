@@ -1,4 +1,4 @@
-"""Threshold alert rule."""
+"""阈值超限预警规则。"""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from app.domain.alert_types import ALERT_TYPE_THRESHOLD
 
 
 class ThresholdAlertRule:
-    """Detect sustained threshold exceedance from raw samples."""
+    """基于原始采样点检测持续性的阈值超限。"""
 
     alert_type = ALERT_TYPE_THRESHOLD
     minimum_confirm_samples = MIN_CONFIRM_SAMPLES
@@ -29,7 +29,7 @@ class ThresholdAlertRule:
         frequency_hz: Any,
         reference_seconds: Any,
     ) -> int:
-        """Convert the configured reference duration to consecutive samples."""
+        """将配置的参考时长折算为需要连续命中的采样点数。"""
         return required_sample_count(
             frequency_hz,
             reference_seconds,
@@ -42,7 +42,12 @@ class ThresholdAlertRule:
         eval_upper: float,
         eval_lower: float,
     ) -> Tuple[Optional[int], Optional[float], Optional[float]]:
-        """Return the most severe threshold level hit by one value."""
+        """返回单个值命中的最高严重等级及其数值和限值。
+
+        等级数值越小表示越严重。上下限判断均使用严格不等号，因此数值等于
+        限值时不视为超限。
+        """
+        # 按等级从高到低依次匹配，首个命中的等级即为当前值的最高严重等级。
         for level in (1, 2, 3):
             upper = rule.get(f"level{level}_upper")
             if upper is not None and eval_upper > float(upper):
@@ -58,7 +63,7 @@ class ThresholdAlertRule:
         rule: Dict[str, Any],
         value: float,
     ) -> Tuple[Optional[int], Optional[float], Optional[float]]:
-        """Evaluate a raw sample against threshold limits."""
+        """使用同一原始采样值同时评估阈值上限和下限。"""
         return cls.level_for(rule, value, value)
 
     @classmethod
@@ -77,12 +82,18 @@ class ThresholdAlertRule:
         bool,
         Optional[Tuple[int, float, float, datetime]],
     ]:
-        """Accumulate threshold hits across samples and scan windows."""
+        """跨采样点和扫描窗口累计连续阈值命中次数。
+
+        ``previous_count`` 和 ``previous_started_at`` 来自上一轮扫描状态；
+        ``max_gap_ms`` 用于识别采样中断，间隔过大时应重新开始连续命中计数。
+        """
+        # 防御性地修正历史状态和目标点数，避免异常值导致无法触发预警。
         count = max(0, int(previous_count or 0))
         target_count = max(1, int(target_count))
         started_at = parse_datetime(previous_started_at)
         active = False
         snapshot: Optional[Tuple[int, float, float, datetime]] = None
+        # 记录本轮连续命中区间内最严重的等级，以及该等级首次出现时的值。
         run_best_level: Optional[int] = None
         run_best_value: Optional[float] = None
         run_best_limit: Optional[float] = None
@@ -90,6 +101,7 @@ class ThresholdAlertRule:
         last_sample_time = parse_datetime(previous_sample_time)
 
         for sample_time, value in samples:
+            # 采样间隔超过允许值时视为数据不连续，已累计的命中次数全部失效。
             if (
                 max_gap_ms is not None
                 and last_sample_time is not None
@@ -105,6 +117,7 @@ class ThresholdAlertRule:
             last_sample_time = sample_time
             level, eval_value, limit = cls.sample_level(rule, value)
             if level is None:
+                # 正常采样点会中断连续命中，后续超限必须重新累计确认点数。
                 count = 0
                 started_at = None
                 run_best_level = None
@@ -115,12 +128,14 @@ class ThresholdAlertRule:
             count += 1
             if started_at is None:
                 started_at = sample_time
+            # 同一连续命中区间内保留最严重的等级；同等级时保留首次出现的样本。
             if run_best_level is None or level < run_best_level:
                 run_best_level = level
                 run_best_value = eval_value
                 run_best_limit = float(limit or eval_value)
                 run_best_time = sample_time
             if count >= target_count:
+                # 达到确认点数后持续标记为激活，并以当前连续区间的最严重命中生成快照。
                 active = True
                 snapshot = (
                     run_best_level or level,
@@ -133,6 +148,7 @@ class ThresholdAlertRule:
 
     def evaluate(self, context: RuleContext) -> RuleEvaluation:
         rule = context.rule
+        # 确认点数由采集频率和确认时长预先折算，最少需要连续命中三个采样点。
         target_count = int(rule["threshold_confirm_samples"])
         count, started_at, active, snapshot = self.evaluate_streak(
             context.samples,
@@ -141,6 +157,7 @@ class ThresholdAlertRule:
             target_count,
             previous_started_at=rule.get("threshold_streak_started_at"),
             previous_sample_time=context.previous_last_seen,
+            # 允许 1.5 个采样周期的间隔，以容忍正常的采集时间抖动。
             max_gap_ms=float(rule.get("sample_interval_ms") or 1000) * 1.5,
         )
         previous_active = bool(rule.get("threshold_condition_active"))
@@ -161,6 +178,7 @@ class ThresholdAlertRule:
             previous_level_value = (
                 int(previous_level) if previous_level is not None else None
             )
+            # 当前事件保持已记录的最高严重等级，避免回落采样把事件等级降级。
             active_level = (
                 level
                 if previous_level_value is None
@@ -174,6 +192,7 @@ class ThresholdAlertRule:
                     "threshold_condition_level": active_level,
                 }
             )
+            # 首次确认、迟滞状态下首次获得等级或等级升级时，创建或刷新预警事件。
             if (
                 not previous_active
                 or previous_level_value is None

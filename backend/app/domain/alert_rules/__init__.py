@@ -1,4 +1,4 @@
-"""Composable alert rule implementations."""
+"""可组合的预警规则实现。"""
 
 from app.domain.alert_rules.daq_offline import DaqOfflineRule
 from app.domain.alert_rules.offline import OfflineAlertRule

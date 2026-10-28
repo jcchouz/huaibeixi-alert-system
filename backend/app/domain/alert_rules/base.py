@@ -1,4 +1,4 @@
-"""Shared contracts and utilities for alert rules."""
+"""预警规则共用的协议、数据结构和工具函数。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ MIN_OFFLINE_PERIODS = 5
 
 
 def parse_frequency_hz(value: Any) -> float:
-    """Parse ``t_sensor.frequency`` values such as ``50`` or ``1/60``."""
+    """解析 ``t_sensor.frequency`` 中的 ``50`` 或 ``1/60`` 等频率值。"""
     text = str(value or "").strip().lower().removesuffix("hz").strip()
     try:
         if "/" in text:
@@ -31,7 +31,7 @@ def required_sample_count(
     *,
     minimum_samples: int = MIN_CONFIRM_SAMPLES,
 ) -> int:
-    """Convert a reference duration into consecutive samples for one channel."""
+    """将参考时长折算为单个通道需要连续命中的采样点数。"""
     frequency = parse_frequency_hz(frequency_hz)
     try:
         seconds = float(reference_seconds)
@@ -44,7 +44,7 @@ def required_sample_count(
 
 
 def parse_datetime(value: Any) -> Optional[datetime]:
-    """Parse database, JSON or serialized runtime datetime values."""
+    """解析数据库、JSON 或运行时序列化格式的日期时间值。"""
     if value is None:
         return None
     if isinstance(value, datetime):
@@ -66,13 +66,13 @@ def parse_datetime(value: Any) -> Optional[datetime]:
 
 
 def serialize_runtime_datetime(value: datetime) -> str:
-    """Keep full microsecond precision for strict sample de-duplication."""
+    """保留完整微秒精度，以便严格进行采样点去重。"""
     return value.isoformat(sep=" ", timespec="microseconds")
 
 
 @dataclass(frozen=True)
 class AlertTrigger:
-    """Alert data needed to create or refresh one incident."""
+    """创建或刷新一个预警事件所需的数据。"""
 
     alert_type: str
     level: int
@@ -83,7 +83,7 @@ class AlertTrigger:
 
 @dataclass
 class RuleEvaluation:
-    """Pure evaluation result returned by one alert rule."""
+    """单条预警规则返回的纯计算结果。"""
 
     alert_type: str
     active: bool
@@ -95,7 +95,7 @@ class RuleEvaluation:
 
 @dataclass(frozen=True)
 class RuleContext:
-    """Input shared by per-channel alert rules."""
+    """各通道预警规则共用的输入数据。"""
 
     rule: Dict[str, Any]
     samples: List[Tuple[datetime, float]]
@@ -107,9 +107,9 @@ class RuleContext:
 
 
 class AlertRule(Protocol):
-    """Protocol implemented by each per-channel alert rule."""
+    """各通道预警规则需要实现的协议。"""
 
     alert_type: str
 
     def evaluate(self, context: RuleContext) -> RuleEvaluation:
-        """Evaluate one channel window without writing to the database."""
+        """计算单个通道窗口，但不写入数据库。"""
