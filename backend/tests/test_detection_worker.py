@@ -295,6 +295,49 @@ def test_statistics_loop_waits_for_the_next_complete_window() -> None:
     assert worker._next_statistics_scan_at() == datetime(2026, 10, 20, 15, 44, 5)
 
 
+def test_statistics_loop_uses_a_monotonic_window_deadline(monkeypatch) -> None:
+    engine = FakeEngine()
+    worker = make_worker(engine)
+    worker.initialize(datetime(2026, 10, 20, 15, 42))
+    current_times = iter(
+        (
+            datetime(2026, 10, 20, 15, 43),
+            datetime(2026, 10, 20, 15, 43, 5, 100000),
+        )
+    )
+    # 每轮依次读取开始、数据库时间采样完成和处理结束三个单调时刻。
+    monotonic_values = iter((10.0, 10.2, 10.8, 15.3, 15.5, 16.0))
+    wait_calls: list[float] = []
+
+    def process_statistics_once(current_time: datetime) -> list[dict]:
+        if current_time >= datetime(2026, 10, 20, 15, 43, 5):
+            worker._last_window_end = datetime(2026, 10, 20, 15, 43)
+        return []
+
+    monkeypatch.setattr(worker, "_current_time", lambda: next(current_times))
+    monkeypatch.setattr(
+        worker,
+        "process_statistics_once",
+        process_statistics_once,
+    )
+    monkeypatch.setattr(
+        "app.services.detection.time.monotonic",
+        lambda: next(monotonic_values),
+    )
+
+    def wait_with_oversleep(wait_seconds: float) -> bool:
+        wait_calls.append(wait_seconds)
+        if len(wait_calls) == 2:
+            worker._stop_event.set()
+        return worker._stop_event.is_set()
+
+    monkeypatch.setattr(worker._stop_event, "wait", wait_with_oversleep)
+    worker._run_statistics_loop()
+
+    # 第一轮等待到 15.2；晚醒后下一窗口仍对齐 15:44:05。
+    assert wait_calls == [pytest.approx(4.4), pytest.approx(59.4)]
+
+
 def test_startup_on_window_boundary_uses_next_complete_window() -> None:
     engine = FakeEngine()
     worker = make_worker(engine, window_minutes=10)

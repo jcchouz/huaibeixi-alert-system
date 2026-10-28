@@ -288,7 +288,7 @@ class AlertDetectionWorker:
         if next_scan_at is None:
             return max(0.1, self.interval_seconds)
         remaining = (next_scan_at - current_time).total_seconds() - elapsed_seconds
-        return max(0.1, remaining)
+        return max(0.0, remaining)
 
     def _current_time(self) -> datetime:
         """优先使用注入时钟，否则使用数据库时钟确定扫描边界。"""
@@ -386,19 +386,30 @@ class AlertDetectionWorker:
         """持续处理完整统计窗口，直到收到停止信号。"""
         while not self._stop_event.is_set():
             started = time.monotonic()
-            # 默认按失败重试间隔等待，成功后再切换到下一窗口的处理时间。
-            wait_seconds = max(1.0, self.interval_seconds)
+            processing_succeeded = False
             try:
                 current_time = self._current_time()
+                sampled_at = time.monotonic()
                 self.process_statistics_once(current_time)
+                processing_succeeded = True
             except Exception as exc:
                 logger.exception("Statistics window processing failed")
                 self._last_statistics_error = str(exc)
                 self._last_error = str(exc)
+            finished = time.monotonic()
+            if not processing_succeeded:
+                # 失败后从本轮结束时刻重新等待，避免异常时立即空转。
+                wait_seconds = max(1.0, self.interval_seconds)
             else:
-                elapsed = time.monotonic() - started
-                wait_seconds = self._statistics_wait_seconds(
-                    current_time,
-                    elapsed_seconds=elapsed,
+                # 将数据库时间目标映射到单调时钟，处理耗时不会叠加到等待时间。
+                next_scan_at = sampled_at + self._statistics_wait_seconds(
+                    current_time
                 )
+                wait_seconds = max(0.0, next_scan_at - finished)
+            elapsed = finished - started
+            logger.info(
+                "Statistics loop waiting: elapsed_seconds=%s, wait_seconds=%s.",
+                round(elapsed, 3),
+                wait_seconds,
+            )
             self._stop_event.wait(wait_seconds)
