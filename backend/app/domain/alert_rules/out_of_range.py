@@ -10,7 +10,6 @@ from app.domain.alert_rules.base import (
     RuleContext,
     RuleEvaluation,
     parse_datetime,
-    required_sample_count,
     serialize_runtime_datetime,
 )
 from app.domain.alert_types import ALERT_TYPE_OOR, NON_THRESHOLD_ALERT_LEVEL
@@ -75,12 +74,7 @@ class OutOfRangeAlertRule:
 
     def evaluate(self, context: RuleContext) -> RuleEvaluation:
         rule = context.rule
-        target_count = int(rule.get("oor_confirm_samples") or 0)
-        if target_count <= 0:
-            target_count = required_sample_count(
-                rule.get("frequency_hz") or rule.get("frequency"),
-                context.confirm_seconds,
-            )
+        target_count = int(rule["oor_confirm_samples"])
         count, started_at, active, snapshot = self.evaluate_streak(
             context.samples,
             rule,

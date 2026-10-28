@@ -10,7 +10,6 @@ from app.domain.alert_rules.base import (
     RuleContext,
     RuleEvaluation,
     parse_datetime,
-    required_sample_count,
     serialize_runtime_datetime,
 )
 from app.domain.alert_types import ALERT_TYPE_STUCK, NON_THRESHOLD_ALERT_LEVEL
@@ -69,12 +68,7 @@ class StuckAlertRule:
 
     def evaluate(self, context: RuleContext) -> RuleEvaluation:
         rule = context.rule
-        target_count = int(rule.get("stuck_confirm_samples") or 0)
-        if target_count <= 0:
-            target_count = required_sample_count(
-                rule.get("frequency_hz") or rule.get("frequency"),
-                context.stuck_seconds,
-            )
+        target_count = int(rule["stuck_confirm_samples"])
         count, last_value, since, active, snapshot = self.evaluate_streak(
             context.samples,
             rule.get("stuck_last_value"),

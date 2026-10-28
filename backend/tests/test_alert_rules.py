@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import pytest
+
 from app.domain.alert_rules import (
     AlertRuleRegistry,
     DaqOfflineRule,
@@ -128,6 +130,7 @@ def test_threshold_rule_uses_frequency_based_sample_count() -> None:
         "level3_upper": 6.0,
         "threshold_streak_count": 0,
         "threshold_condition_active": False,
+        "threshold_confirm_samples": 150,
     }
     samples = [
         (first_ts + timedelta(seconds=index / 50.0), 7.0)
@@ -166,6 +169,7 @@ def test_out_of_range_rule_uses_frequency_based_sample_count() -> None:
         "physical_max": 10.0,
         "oor_streak_count": 0,
         "oor_condition_active": False,
+        "oor_confirm_samples": 150,
     }
     samples = [
         (first_ts + timedelta(seconds=index / 50.0), 12.0)
@@ -202,6 +206,7 @@ def test_stuck_rule_uses_frequency_based_sample_count() -> None:
         "sample_interval_ms": 20.0,
         "stuck_streak_count": 0,
         "stuck_condition_active": False,
+        "stuck_confirm_samples": 150,
     }
     samples = [
         (first_ts + timedelta(seconds=index / 50.0), 12.0)
@@ -229,6 +234,32 @@ def test_stuck_rule_uses_frequency_based_sample_count() -> None:
     assert below_target.trigger is None
     assert at_target.active is True
     assert at_target.trigger is not None
+
+
+@pytest.mark.parametrize(
+    ("rule_instance", "confirm_samples_field"),
+    [
+        (ThresholdAlertRule(), "threshold_confirm_samples"),
+        (OutOfRangeAlertRule(), "oor_confirm_samples"),
+        (StuckAlertRule(), "stuck_confirm_samples"),
+    ],
+)
+def test_channel_rules_require_initialized_confirm_samples(
+    rule_instance: object,
+    confirm_samples_field: str,
+) -> None:
+    context = RuleContext(
+        rule={},
+        samples=[],
+        previous_last_seen=None,
+        window_end=datetime(2026, 10, 23, 12, 0, 0),
+        confirm_seconds=3.0,
+        stuck_seconds=3.0,
+        offline_timeout_ms=5_000.0,
+    )
+
+    with pytest.raises(KeyError, match=confirm_samples_field):
+        rule_instance.evaluate(context)
 
 
 def test_daq_offline_requires_all_real_channels_offline() -> None:
