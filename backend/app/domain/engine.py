@@ -455,28 +455,6 @@ class AlertAnalyticsEngine:
     _parse_frequency_hz = staticmethod(parse_frequency_hz)
 
     @classmethod
-    def _offline_timeout_ms(cls, rule: Dict[str, Any]) -> float:
-        """按配置时长和采样频率返回离线超时时间，最少 5 个采样周期。"""
-        frequency_hz = cls._parse_frequency_hz(
-            rule.get("frequency_hz") or rule.get("frequency") or 1
-        )
-        minimum_timeout_ms = MIN_OFFLINE_PERIODS / frequency_hz * 1000.0
-        configured = rule.get("offline_timeout_ms")
-        if configured is not None:
-            return max(1.0, float(configured), minimum_timeout_ms)
-        offline_seconds = float(rule.get("offline_seconds") or 5.0)
-        missing_periods = required_sample_count(
-            frequency_hz,
-            offline_seconds,
-            minimum_samples=MIN_OFFLINE_PERIODS,
-        )
-        return max(
-            1.0,
-            minimum_timeout_ms,
-            missing_periods / frequency_hz * 1000.0,
-        )
-
-    @classmethod
     def _parse_physical_range(
         cls,
         range_text: Optional[str],
@@ -1029,7 +1007,7 @@ class AlertAnalyticsEngine:
                 window_end=window_end,
                 confirm_seconds=self.confirm_seconds,
                 stuck_seconds=self.stuck_seconds,
-                offline_timeout_ms=self._offline_timeout_ms(rule),
+                offline_timeout_ms=rule["offline_timeout_ms"],
             )
         )
         if not evaluation.active:
@@ -1155,7 +1133,7 @@ class AlertAnalyticsEngine:
                     window_end=window_end,
                     confirm_seconds=confirm_seconds,
                     stuck_seconds=stuck_seconds,
-                    offline_timeout_ms=self._offline_timeout_ms(rule),
+                    offline_timeout_ms=rule["offline_timeout_ms"],
                 )
                 # 通道离线或采样中断：使用原始样点时间检查静默时长和最大采样间隔。
                 offline_evaluation = self._offline_rule.evaluate(context)

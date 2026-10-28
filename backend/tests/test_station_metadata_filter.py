@@ -4,14 +4,17 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
 
+import pytest
+
 import app.domain.engine as engine_module
 from app.domain.engine import AlertAnalyticsEngine
 
 
 class MetadataCursor:
-    def __init__(self) -> None:
+    def __init__(self, *, frequency: str = "1") -> None:
         self.result: list[dict[str, Any]] = []
         self.statements: list[tuple[str, tuple[Any, ...]]] = []
+        self.frequency = frequency
 
     def execute(
         self,
@@ -49,7 +52,7 @@ class MetadataCursor:
                     "manufacturer": None,
                     "range": None,
                     "precision": None,
-                    "frequency": "1",
+                    "frequency": self.frequency,
                     "position": None,
                     "instrument_id": "instrument-yh",
                     "instrument_name": "instrument-yh",
@@ -123,3 +126,31 @@ def test_load_thresholds_filters_all_metadata_by_station_code(monkeypatch) -> No
     assert sensor_params == ("玉环站", "YHZ")
     assert "AND cb.station = %s" in threshold_sql
     assert threshold_params == ("YHZ",)
+
+
+@pytest.mark.parametrize(
+    ("frequency", "expected_ms"),
+    [
+        ("1", 5_000),
+        ("50", 5_000),
+        ("1/60", 300_000),
+    ],
+)
+def test_load_thresholds_derives_offline_timeout(
+    monkeypatch,
+    frequency: str,
+    expected_ms: float,
+) -> None:
+    cursor = MetadataCursor(frequency=frequency)
+
+    @contextmanager
+    def fake_get_db_cursor(commit: bool = False):
+        yield cursor
+
+    monkeypatch.setattr(engine_module, "get_db_cursor", fake_get_db_cursor)
+
+    engine = AlertAnalyticsEngine(station_name="玉环站")
+    engine.load_thresholds()
+
+    rule = next(iter(engine.channel_states.values()))
+    assert rule["offline_timeout_ms"] == pytest.approx(expected_ms)

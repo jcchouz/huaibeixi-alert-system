@@ -50,6 +50,7 @@ def test_offline_alert_uses_force_refresh_for_new_incident() -> None:
         "instrument_id": None,
         "last_ts": "2026-10-21 11:59:00",
         "offline_seconds": 5.0,
+        "offline_timeout_ms": 5_000.0,
         "offline_condition_active": False,
     }
     calls: list[dict[str, Any]] = []
