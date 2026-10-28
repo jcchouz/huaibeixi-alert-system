@@ -136,17 +136,47 @@ class AlertDetectionWorker:
         if eligible_end <= last_alert_scan_at:
             return None
 
-        started = time.perf_counter()
         window_end = min(
             eligible_end,
             last_alert_scan_at + timedelta(seconds=self.interval_seconds),
         )
         window_start = last_alert_scan_at
+        scan_started = time.perf_counter()
+        scan_succeeded = False
+        result: Dict[str, Any] = {}
         # 即使区间内没有采样点也照常扫描，使通道离线判定继续推进。
-        result = self.engine.scan_realtime_alerts(
-            window_start,
-            window_end,
-        )
+        try:
+            result = self.engine.scan_realtime_alerts(
+                window_start,
+                window_end,
+            )
+            scan_succeeded = True
+        finally:
+            measured_elapsed_ms = round(
+                (time.perf_counter() - scan_started) * 1000,
+                2,
+            )
+            scan_elapsed_ms = (
+                round(float(result.get("elapsedMs") or measured_elapsed_ms), 2)
+                if scan_succeeded
+                else measured_elapsed_ms
+            )
+            logger.info(
+                "Realtime alert scan finished: scan_at=%s, window_start=%s, "
+                "window_end=%s, elapsed_ms=%s, succeeded=%s.",
+                current_time,
+                window_start,
+                window_end,
+                scan_elapsed_ms,
+                scan_succeeded,
+                extra={
+                    "scan_at": serialize_val(current_time),
+                    "window_start": serialize_val(window_start),
+                    "window_end": serialize_val(window_end),
+                    "scan_elapsed_ms": scan_elapsed_ms,
+                    "scan_succeeded": scan_succeeded,
+                },
+            )
         self._last_alert_scan_at = window_end
 
         # 汇总本轮实际覆盖范围、处理量和耗时，供运行状态查询使用。
@@ -157,7 +187,7 @@ class AlertDetectionWorker:
             "triggeredAlertsCount": int(
                 result.get("triggeredAlertsCount") or 0
             ),
-            "elapsedMs": round((time.perf_counter() - started) * 1000, 2),
+            "elapsedMs": scan_elapsed_ms,
             "backlogSeconds": round(
                 max(0.0, (eligible_end - window_end).total_seconds()),
                 3,
@@ -327,25 +357,28 @@ class AlertDetectionWorker:
 
     def _run_alert_loop(self) -> None:
         """持续执行实时扫描，直到收到停止信号。"""
+        next_scan_at = time.monotonic()
         while not self._stop_event.is_set():
             started = time.monotonic()
-            backlog_seconds = 0.0
             try:
                 # 即使当前没有新样本，也要执行扫描以持续推进通道离线判定。
-                result = self.scan_alerts_once(self._current_time())
-                if result is not None:
-                    backlog_seconds = float(result.get("backlogSeconds") or 0.0)
+                self.scan_alerts_once(self._current_time())
             except Exception as exc:
                 # 单次扫描失败不终止后台线程，记录异常后在下一轮继续重试。
                 logger.exception("Realtime alert scan failed")
                 self._last_alert_error = str(exc)
                 self._last_error = str(exc)
-            elapsed = time.monotonic() - started
-            # 正常情况保持每秒一个窗口；存在积压时连续追赶。
-            wait_seconds = (
-                0.1
-                if backlog_seconds > 0
-                else max(0.1, self.interval_seconds - elapsed)
+            finished = time.monotonic()
+            elapsed = finished - started
+            # 按累计单调时钟时间点调度，避免每次等待的调度误差持续累积。
+            next_scan_at += self.interval_seconds
+            wait_seconds = max(0.0, next_scan_at - finished)
+            logger.info(
+                "Realtime alert loop waiting: interval_seconds=%s, "
+                "elapsed_seconds=%s, wait_seconds=%s.",
+                self.interval_seconds,
+                round(elapsed, 3),
+                wait_seconds,
             )
             self._stop_event.wait(wait_seconds)
 

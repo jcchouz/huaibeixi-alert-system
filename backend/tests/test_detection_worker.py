@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 import threading
 from datetime import datetime, timedelta
+
+import pytest
 
 from app.core.config import Settings
 from app.services.detection import AlertDetectionWorker
@@ -87,6 +90,45 @@ def test_alert_scan_windows_are_delayed_by_one_interval_without_overlap() -> Non
     ]
 
 
+def test_alert_scan_logs_the_database_scan_time_and_elapsed(caplog) -> None:
+    engine = FakeEngine()
+    worker = make_worker(engine)
+    worker.initialize(datetime(2026, 10, 20, 15, 42, 30))
+
+    with caplog.at_level(logging.INFO, logger="alert_analysis.detection"):
+        worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 32))
+
+    assert "scan_at=2026-10-20 15:42:32" in caplog.text
+    assert "window_start=2026-10-20 15:42:30" in caplog.text
+    assert "window_end=2026-10-20 15:42:31" in caplog.text
+    assert "elapsed_ms=0.5" in caplog.text
+    assert "succeeded=True" in caplog.text
+
+
+def test_alert_scan_logs_elapsed_when_the_engine_fails(
+    monkeypatch,
+    caplog,
+) -> None:
+    engine = FakeEngine()
+    worker = make_worker(engine)
+    worker.initialize(datetime(2026, 10, 20, 15, 42, 30))
+
+    def fail_scan(window_start: datetime, window_end: datetime) -> dict:
+        raise RuntimeError("scan failed")
+
+    monkeypatch.setattr(engine, "scan_realtime_alerts", fail_scan)
+
+    with (
+        caplog.at_level(logging.INFO, logger="alert_analysis.detection"),
+        pytest.raises(RuntimeError, match="scan failed"),
+    ):
+        worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 32))
+
+    assert "elapsed_ms=" in caplog.text
+    assert "succeeded=False" in caplog.text
+    assert worker._last_alert_scan_at == datetime(2026, 10, 20, 15, 42, 30)
+
+
 def test_alert_scan_waits_for_the_previous_period_to_become_eligible() -> None:
     engine = FakeEngine()
     worker = make_worker(engine)
@@ -142,6 +184,39 @@ def test_alert_scan_resumes_from_previous_backlog_cursor_without_gaps() -> None:
     assert first is not None and first["backlogSeconds"] == 8.0
     assert second is not None and second["backlogSeconds"] == 7.0
     assert third is not None and third["backlogSeconds"] == 6.0
+
+
+def test_alert_loop_compensates_for_wait_oversleep(
+    monkeypatch,
+) -> None:
+    engine = FakeEngine()
+    worker = make_worker(engine)
+    current_time = datetime(2026, 10, 20, 15, 42, 45)
+    monotonic_values = iter((10.0, 10.0, 10.034, 11.014, 11.048))
+    wait_calls: list[float] = []
+
+    monkeypatch.setattr(worker, "_current_time", lambda: current_time)
+    monkeypatch.setattr(
+        worker,
+        "scan_alerts_once",
+        lambda scan_time: {},
+    )
+    monkeypatch.setattr(
+        "app.services.detection.time.monotonic",
+        lambda: next(monotonic_values),
+    )
+
+    def wait_with_oversleep(wait_seconds: float) -> bool:
+        wait_calls.append(wait_seconds)
+        if len(wait_calls) == 2:
+            worker._stop_event.set()
+        return worker._stop_event.is_set()
+
+    monkeypatch.setattr(worker._stop_event, "wait", wait_with_oversleep)
+    worker._run_alert_loop()
+
+    # 第一轮晚醒 14ms 后，第二轮等待主动扣除这部分误差。
+    assert wait_calls == [pytest.approx(0.966), pytest.approx(0.952)]
 
 
 def test_alert_status_does_not_report_the_intentional_scan_delay_as_backlog() -> None:

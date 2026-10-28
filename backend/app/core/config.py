@@ -125,6 +125,8 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
     log_json: bool = Field(default=True, validation_alias="LOG_JSON")
+    # 日志文件目录，默认为后端的 logs 目录。
+    log_dir: Path = Field(default=BACKEND_DIR / "logs", validation_alias="LOG_DIR")
 
     @property
     def dsn(self) -> str:

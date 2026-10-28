@@ -17,6 +17,8 @@ COPY app ./app
 COPY migrations ./migrations
 COPY tools ./tools
 
+RUN mkdir -p /app/logs && chown app:app /app/logs
+
 USER app
 
 EXPOSE 8090
