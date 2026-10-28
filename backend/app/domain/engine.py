@@ -1143,7 +1143,7 @@ class AlertAnalyticsEngine:
                     "last_ts": serialize_runtime_datetime(samples[-1][0]),
                     "last_val": round(samples[-1][1], 5),
                     "online_status": "ONLINE",
-                    **offline_evaluation.state_updates,
+                    **offline_evaluation.state_updates, # 解包
                 }
                 # 在线时按注册表固定顺序判定：
                 # 1. ThresholdAlertRule   -> 阈值超限（level1/2/3）；
