@@ -73,13 +73,13 @@ def test_initialize_starts_from_current_time_without_historical_state() -> None:
     assert worker._last_window_end == datetime(2026, 10, 20, 15, 43)
 
 
-def test_alert_scan_windows_start_at_the_detection_boundary_without_overlap() -> None:
+def test_alert_scan_windows_are_delayed_by_one_interval_without_overlap() -> None:
     engine = FakeEngine()
     worker = make_worker(engine)
     worker.initialize(datetime(2026, 10, 20, 15, 42, 30))
 
-    worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 31))
     worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 32))
+    worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 33))
 
     assert engine.alert_scans == [
         (datetime(2026, 10, 20, 15, 42, 30), datetime(2026, 10, 20, 15, 42, 31)),
@@ -87,13 +87,19 @@ def test_alert_scan_windows_start_at_the_detection_boundary_without_overlap() ->
     ]
 
 
-def test_alert_scan_does_not_replay_data_before_start() -> None:
+def test_alert_scan_waits_for_the_previous_period_to_become_eligible() -> None:
     engine = FakeEngine()
     worker = make_worker(engine)
     worker.initialize(datetime(2026, 10, 20, 15, 42, 30))
 
     assert worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 30)) is None
+    assert worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 31)) is None
     assert engine.alert_scans == []
+
+    worker.scan_alerts_once(datetime(2026, 10, 20, 15, 42, 32))
+    assert engine.alert_scans == [
+        (datetime(2026, 10, 20, 15, 42, 30), datetime(2026, 10, 20, 15, 42, 31))
+    ]
 
 
 def test_alert_scan_processes_only_the_previous_one_second_window() -> None:
@@ -108,7 +114,7 @@ def test_alert_scan_processes_only_the_previous_one_second_window() -> None:
         (started_at, datetime(2026, 10, 20, 15, 42, 31))
     ]
     assert result is not None
-    assert result["backlogSeconds"] == 14.0
+    assert result["backlogSeconds"] == 13.0
     assert worker._last_alert_scan_at == datetime(2026, 10, 20, 15, 42, 31)
 
 
@@ -133,9 +139,22 @@ def test_alert_scan_resumes_from_previous_backlog_cursor_without_gaps() -> None:
         for start in expected_starts
     ]
     assert worker._last_alert_scan_at == started_at + timedelta(seconds=3)
-    assert first is not None and first["backlogSeconds"] == 9.0
-    assert second is not None and second["backlogSeconds"] == 8.0
-    assert third is not None and third["backlogSeconds"] == 7.0
+    assert first is not None and first["backlogSeconds"] == 8.0
+    assert second is not None and second["backlogSeconds"] == 7.0
+    assert third is not None and third["backlogSeconds"] == 6.0
+
+
+def test_alert_status_does_not_report_the_intentional_scan_delay_as_backlog() -> None:
+    engine = FakeEngine()
+    worker = make_worker(engine)
+    started_at = datetime(2026, 10, 20, 15, 42, 30)
+    worker.initialize(started_at)
+
+    worker.scan_alerts_once(started_at + timedelta(seconds=2))
+
+    status = worker.get_status()
+    assert status["lastAlertScanAt"] == "2026-10-20 15:42:31"
+    assert status["alertBacklogSeconds"] == 0.0
 
 
 def test_statistics_start_with_first_complete_window_after_startup() -> None:

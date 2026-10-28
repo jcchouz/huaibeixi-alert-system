@@ -59,7 +59,7 @@ class Settings(BaseSettings):
         le=60,
         validation_alias="DETECTION_INTERVAL_SECONDS",
     )
-    # 统计窗口的落库延迟；实时预警扫描不使用该延迟。
+    # 统计窗口的落库延迟；实时预警固定保留一个扫描周期的落库缓冲。
     detection_lag_seconds: int = Field(
         default=5,
         ge=0,

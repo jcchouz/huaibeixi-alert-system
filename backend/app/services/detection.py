@@ -120,7 +120,9 @@ class AlertDetectionWorker:
     def scan_alerts_once(self, current_time: datetime) -> Optional[Dict[str, Any]]:
         """扫描启动边界之后的实时样本。
 
-        当前时间超前于积压游标时，只推进一个检测周期；下一轮仍从上一轮
+        实时预警固定延后一个检测周期读取，默认处理
+        ``[current_time - 2s, current_time - 1s)``，给外部数据留出落库时间。
+        当前时间超前于可处理边界时，只推进一个检测周期；下一轮仍从上一轮
         ``window_end`` 继续，不会跳到数据库当前时间而漏扫中间窗口。
         """
         self._last_run_at = current_time
@@ -129,12 +131,14 @@ class AlertDetectionWorker:
 
         if last_alert_scan_at is None or detection_started_at is None:
             return None
-        if current_time <= last_alert_scan_at:
+
+        eligible_end = current_time - timedelta(seconds=self.interval_seconds)
+        if eligible_end <= last_alert_scan_at:
             return None
 
         started = time.perf_counter()
         window_end = min(
-            current_time,
+            eligible_end,
             last_alert_scan_at + timedelta(seconds=self.interval_seconds),
         )
         window_start = last_alert_scan_at
@@ -155,7 +159,7 @@ class AlertDetectionWorker:
             ),
             "elapsedMs": round((time.perf_counter() - started) * 1000, 2),
             "backlogSeconds": round(
-                max(0.0, (current_time - window_end).total_seconds()),
+                max(0.0, (eligible_end - window_end).total_seconds()),
                 3,
             ),
         }
@@ -299,7 +303,9 @@ class AlertDetectionWorker:
                 max(
                     0.0,
                     (
-                        self._last_run_at - self._last_alert_scan_at
+                        self._last_run_at
+                        - timedelta(seconds=self.interval_seconds)
+                        - self._last_alert_scan_at
                     ).total_seconds(),
                 ),
                 3,

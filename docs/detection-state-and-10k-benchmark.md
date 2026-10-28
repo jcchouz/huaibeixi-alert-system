@@ -36,8 +36,10 @@
 检测进程启动时读取数据库当前时间作为边界：
 
 - 实时预警只查询边界之后的样本。
-- 每轮最多推进一个 `DETECTION_INTERVAL_SECONDS` 窗口；扫描耗时超过该周期时，
-  `alertBacklogSeconds` 会显示积压秒数。
+- 实时预警固定延后一个 `DETECTION_INTERVAL_SECONDS` 周期读取，默认处理
+  `[current_time - 2s, current_time - 1s)`，给外部数据留出落库时间。
+- 每轮最多推进一个检测周期；扫描耗时超过该周期时，`alertBacklogSeconds`
+  会显示扣除主动延迟后的积压秒数。
 - 统计只生成边界之后的完整窗口，启动时所在的半窗口直接跳过。
 - 不读取 `t_detection_worker_state`，也不恢复历史处理位置。
 

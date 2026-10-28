@@ -90,8 +90,10 @@ instance. On startup it creates a database-time boundary and only processes
 samples and complete statistics windows after that boundary; historical
 watermarks and catch-up processing are not used. Configure the realtime alert interval
 with `DETECTION_INTERVAL_SECONDS` and the statistics window with
-`DETECTION_WINDOW_MINUTES`. Each alert loop advances at most one
-`DETECTION_INTERVAL_SECONDS` window; if a window takes longer than that,
+`DETECTION_WINDOW_MINUTES`. Each alert loop delays scanning by one
+`DETECTION_INTERVAL_SECONDS` window to allow external samples to be committed;
+with the default one-second interval it processes `[now-2s, now-1s)`. Each
+loop advances at most one interval, and if a window takes longer than that,
 `alertBacklogSeconds` grows and the backend is not keeping up with ingestion.
 Continuous conditions use
 `DETECTION_CONFIRM_SECONDS`, `DETECTION_STUCK_SECONDS` and
