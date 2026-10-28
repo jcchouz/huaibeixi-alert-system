@@ -316,6 +316,84 @@ def test_no_data_still_alerts_offline_once_per_unrecovered_incident(
     assert applied[0]["alert_type"] == ALERT_TYPE_OFFLINE
 
 
+def test_any_sample_in_current_scan_keeps_channel_online(monkeypatch) -> None:
+    engine = AlertAnalyticsEngine()
+    key = engine.make_key("sensor-1", "x")
+    engine.channel_states[key] = {
+        "key": key,
+        "sensor_no_lower": "sensor-1",
+        "channel": "x",
+        "instrument_id": None,
+        "sample_interval_ms": 1000.0,
+        "offline_timeout_ms": 1000.0,
+        "last_ts": "2026-10-20 11:59:00",
+        "level1_upper": 30.0,
+        "level2_upper": 20.0,
+        "level3_upper": 10.0,
+        "level1_lower": None,
+        "level2_lower": None,
+        "level3_lower": None,
+        "physical_min": -100.0,
+        "physical_max": 100.0,
+        "threshold_condition_active": False,
+        "threshold_condition_level": None,
+        "oor_condition_active": False,
+        "stuck_condition_active": False,
+        "offline_condition_active": False,
+    }
+    engine._cache_sample_query(engine.channel_states.values())
+    offline_key = engine._alert_key("sensor-1", "x", ALERT_TYPE_OFFLINE)
+    engine._active_alert_cache = {
+        offline_key: {
+            "id": "offline-alert",
+            "sensor_no": "sensor-1",
+            "channel": "x",
+            "alert_type": ALERT_TYPE_OFFLINE,
+        }
+    }
+    cursor = RealtimeCursor()
+
+    @contextmanager
+    def fake_get_db_cursor(commit: bool = False):
+        yield cursor
+
+    applied: list[dict[str, Any]] = []
+
+    def fake_apply(cur, active_map, triggered, **kwargs):
+        applied.append(kwargs)
+        return kwargs
+
+    closed: list[dict[str, Any]] = []
+
+    def fake_close(cur, active_map, **kwargs):
+        closed.append(kwargs)
+        active_map.pop(offline_key, None)
+
+    monkeypatch.setattr(engine_module, "get_db_cursor", fake_get_db_cursor)
+    monkeypatch.setattr(engine, "_apply_condition", fake_apply)
+    monkeypatch.setattr(engine, "_close_alert_incident", fake_close)
+
+    window_start = datetime(2026, 10, 20, 12, 0, 0)
+    engine.scan_realtime_alerts(
+        window_start,
+        window_start + timedelta(seconds=10),
+    )
+
+    assert not any(
+        item["alert_type"] == ALERT_TYPE_OFFLINE for item in applied
+    )
+    assert engine.channel_states[key]["online_status"] == "ONLINE"
+    assert engine.channel_states[key]["offline_condition_active"] is False
+    assert closed == [
+        {
+            "sensor_no": "sensor-1",
+            "channel": "x",
+            "alert_type": ALERT_TYPE_OFFLINE,
+            "end_time": window_start + timedelta(seconds=10),
+        }
+    ]
+
+
 def test_scan_does_not_advance_channel_state_when_commit_fails(
     monkeypatch,
 ) -> None:

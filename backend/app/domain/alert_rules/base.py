@@ -70,17 +70,6 @@ def serialize_runtime_datetime(value: datetime) -> str:
     return value.isoformat(sep=" ", timespec="microseconds")
 
 
-def max_sample_gap_ms(samples: List[Tuple[datetime, float]]) -> float:
-    """Return the largest gap between adjacent samples."""
-    return max(
-        (
-            (current[0] - previous[0]).total_seconds() * 1000.0
-            for previous, current in zip(samples, samples[1:], strict=False)
-        ),
-        default=0.0,
-    )
-
-
 @dataclass(frozen=True)
 class AlertTrigger:
     """Alert data needed to create or refresh one incident."""

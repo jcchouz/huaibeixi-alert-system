@@ -94,6 +94,30 @@ def test_offline_rule_suppresses_other_channel_alerts() -> None:
     assert result.trigger is not None
 
 
+def test_offline_rule_treats_any_current_sample_as_online() -> None:
+    window_end = datetime(2026, 10, 23, 12, 0, 10)
+    result = OfflineAlertRule().evaluate(
+        RuleContext(
+            rule={
+                "last_ts": "2026-10-23 11:59:00",
+                "offline_condition_active": True,
+            },
+            samples=[(window_end - timedelta(seconds=10), 1.0)],
+            previous_last_seen=datetime(2026, 10, 23, 11, 59, 0),
+            window_end=window_end,
+            confirm_seconds=3.0,
+            stuck_seconds=100.0,
+            offline_timeout_ms=1_000.0,
+        )
+    )
+
+    assert result.active is False
+    assert result.previous_active is True
+    assert result.trigger is None
+    assert result.suppress_other_alerts is False
+    assert result.state_updates["offline_condition_active"] is False
+
+
 def test_threshold_rule_uses_frequency_based_sample_count() -> None:
     first_ts = datetime(2026, 10, 23, 12, 0, 0)
     rule = {

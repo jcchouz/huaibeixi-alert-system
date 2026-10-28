@@ -34,6 +34,7 @@ from app.domain.alert_rules.base import (
 from app.domain.alert_types import (
     ALERT_CATEGORY_LABELS,
     ALERT_TYPE_DAQ_OFFLINE,
+    ALERT_TYPE_OFFLINE,
     ALERT_TYPE_OOR,
     ALERT_TYPE_STUCK,
     ALERT_TYPE_THRESHOLD,
@@ -997,7 +998,7 @@ class AlertAnalyticsEngine:
         key: str,
         window_end: datetime,
     ) -> bool:
-        """超过离线超时时间仍无样本时创建离线预警。"""
+        """当前扫描无样本且超过离线超时时间时创建离线预警。"""
         last_seen = parse_datetime(rule.get("last_ts"))
         evaluation = self._offline_rule.evaluate(
             RuleContext(
@@ -1045,9 +1046,9 @@ class AlertAnalyticsEngine:
     ) -> Dict[str, Any]:
         """只扫描原始采样点并执行实时预警规则，不读写统计记录。"""
         # 本方法每轮按固定顺序判定五类预警：
-        # 1. 无新样本：_apply_offline_if_due() 判通道离线；
-        # 2. 有新样本：OfflineAlertRule 判通道离线或采样中断；
-        # 3. 未离线：AlertRuleRegistry 依次判阈值超限、超物理量程、传感器死值；
+        # 1. 无新样本：_apply_offline_if_due() 按 last_ts 判通道离线；
+        # 2. 有新样本：通道直接视为在线；
+        # 3. 在线通道由 AlertRuleRegistry 依次判阈值超限、超物理量程、传感器死值；
         # 4. 本轮末尾：DaqOfflineRule 汇总全部通道均离线后的采集仪离线；
         # 5. 条件恢复时，_apply_rule_evaluation() 关闭对应的活动预警。
         triggered_alerts: List[Dict[str, Any]] = []
@@ -1135,61 +1136,50 @@ class AlertAnalyticsEngine:
                     stuck_seconds=stuck_seconds,
                     offline_timeout_ms=rule["offline_timeout_ms"],
                 )
-                # 通道离线或采样中断：使用原始样点时间检查静默时长和最大采样间隔。
+                # 当前扫描存在样本，通道直接视为在线；该判定同时关闭上一轮
+                # 仍处于活动状态的通道离线预警。
                 offline_evaluation = self._offline_rule.evaluate(context)
                 state_updates: Dict[str, Any] = {
                     "last_ts": serialize_runtime_datetime(samples[-1][0]),
                     "last_val": round(samples[-1][1], 5),
                     "online_status": "ONLINE",
+                    **offline_evaluation.state_updates,
                 }
-                if offline_evaluation.suppress_other_alerts:
-                    # 通道已离线时，离线预警优先，并关闭尚未结束的阈值、死值和超量程事件。
-                    state_updates.update(offline_evaluation.state_updates)
-                    self._close_channel_data_alerts(
+                # 在线时按注册表固定顺序判定：
+                # 1. ThresholdAlertRule   -> 阈值超限（level1/2/3）；
+                # 2. OutOfRangeAlertRule  -> 超物理量程（physical_min/max）；
+                # 3. StuckAlertRule       -> 传感器死值（连续相同读数）。
+                for evaluation in self.channel_rule_registry.evaluate(context):
+                    state_updates.update(evaluation.state_updates)
+                    self._apply_rule_evaluation(
                         cur,
                         active_map,
-                        rule,
+                        triggered_alerts,
+                        rule=rule,
+                        sensor_no=sensor_no,
+                        channel=channel,
+                        evaluation=evaluation,
+                        window_end=window_end,
+                    )
+                # 有样本时关闭仍存在的通道离线事件。除运行状态外同时检查
+                # active_map，确保进程重启后尚未恢复的离线事件也能结束。
+                offline_alert_key = self._alert_key(
+                    sensor_no,
+                    channel,
+                    ALERT_TYPE_OFFLINE,
+                )
+                if (
+                    offline_evaluation.previous_active
+                    or offline_alert_key in active_map
+                ):
+                    self._close_alert_incident(
+                        cur,
+                        active_map,
+                        sensor_no=sensor_no,
+                        channel=channel,
+                        alert_type=ALERT_TYPE_OFFLINE,
                         end_time=window_end,
                     )
-                else:
-                    # 通道在线时按注册表固定顺序判定：
-                    # 1. ThresholdAlertRule   -> 阈值超限（level1/2/3）；
-                    # 2. OutOfRangeAlertRule  -> 超物理量程（physical_min/max）；
-                    # 3. StuckAlertRule       -> 传感器死值（连续相同读数）。
-                    for evaluation in self.channel_rule_registry.evaluate(context):
-                        state_updates.update(evaluation.state_updates)
-                        # 新建、升级或关闭上述三类预警，并同步 t_alert_record。
-                        self._apply_rule_evaluation(
-                            cur,
-                            active_map,
-                            triggered_alerts,
-                            rule=rule,
-                            sensor_no=sensor_no,
-                            channel=channel,
-                            evaluation=evaluation,
-                            window_end=window_end,
-                        )
-                    state_updates.update(offline_evaluation.state_updates)
-
-                if offline_evaluation.active:
-                    # 记录真正离线的通道，供本轮采集仪离线聚合使用。
-                    instrument_id = (rule.get("instrument_id") or "").strip()
-                    if instrument_id:
-                        offline_by_instrument.setdefault(
-                            instrument_id,
-                            set(),
-                        ).add(key)
-                # 通道离线预警同样通过统一写库入口创建或关闭。
-                self._apply_rule_evaluation(
-                    cur,
-                    active_map,
-                    triggered_alerts,
-                    rule=rule,
-                    sensor_no=sensor_no,
-                    channel=channel,
-                    evaluation=offline_evaluation,
-                    window_end=window_end,
-                )
                 pending_state_updates.setdefault(key, {}).update(state_updates)
 
             # 采集仪离线：同一采集仪下所有已配置通道都离线时，只生成一条设备级预警。
