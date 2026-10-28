@@ -131,7 +131,7 @@ def test_threshold_at_50_hz_requires_150_consecutive_samples() -> None:
 def test_stuck_confirmation_uses_sample_count_not_elapsed_time() -> None:
     first_ts = datetime(2026, 10, 19, 10, 0, 0)
     samples = [
-        (first_ts + timedelta(milliseconds=index), 12.5)
+        (first_ts + timedelta(hours=index), 12.5)
         for index in range(4)
     ]
 
@@ -153,7 +153,7 @@ def test_stuck_confirmation_uses_sample_count_not_elapsed_time() -> None:
 def test_out_of_range_confirmation_uses_sample_count_not_elapsed_time() -> None:
     first_ts = datetime(2026, 10, 19, 10, 0, 0)
     samples = [
-        (first_ts + timedelta(milliseconds=index), 12.0)
+        (first_ts + timedelta(hours=index), 12.0)
         for index in range(4)
     ]
 
@@ -257,7 +257,7 @@ def test_stuck_streak_requires_configured_sample_count() -> None:
     assert snapshot == (12.5, samples[-1][0])
 
 
-def test_missing_sample_groups_break_threshold_streak() -> None:
+def test_sample_interval_does_not_break_threshold_streak() -> None:
     rule = {
         "level1_upper": 10.0,
         "level2_upper": 8.0,
@@ -266,14 +266,12 @@ def test_missing_sample_groups_break_threshold_streak() -> None:
     previous_ts = datetime(2026, 10, 19, 10, 0, 0)
 
     count, started_at, active, snapshot = ThresholdAlertRule.evaluate_streak(
-        [(previous_ts + timedelta(seconds=2), 7.0)],
+        [(previous_ts + timedelta(hours=1), 7.0)],
         rule,
         previous_count=2,
         target_count=3,
-        previous_sample_time=previous_ts,
-        max_gap_ms=1500,
     )
 
-    assert count == 1
-    assert active is False
-    assert snapshot is None
+    assert count == 3
+    assert active is True
+    assert snapshot is not None

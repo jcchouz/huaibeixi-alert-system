@@ -124,7 +124,6 @@ def test_threshold_rule_uses_frequency_based_sample_count() -> None:
     first_ts = datetime(2026, 10, 23, 12, 0, 0)
     rule = {
         "frequency_hz": 50.0,
-        "sample_interval_ms": 20.0,
         "level1_upper": 10.0,
         "level2_upper": 8.0,
         "level3_upper": 6.0,
@@ -164,7 +163,6 @@ def test_out_of_range_rule_uses_frequency_based_sample_count() -> None:
     first_ts = datetime(2026, 10, 23, 12, 0, 0)
     rule = {
         "frequency_hz": 50.0,
-        "sample_interval_ms": 20.0,
         "physical_min": -10.0,
         "physical_max": 10.0,
         "oor_streak_count": 0,
@@ -203,7 +201,6 @@ def test_stuck_rule_uses_frequency_based_sample_count() -> None:
     first_ts = datetime(2026, 10, 23, 12, 0, 0)
     rule = {
         "frequency_hz": 50.0,
-        "sample_interval_ms": 20.0,
         "stuck_streak_count": 0,
         "stuck_condition_active": False,
         "stuck_confirm_samples": 150,

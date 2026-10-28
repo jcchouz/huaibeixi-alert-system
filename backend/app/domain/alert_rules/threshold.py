@@ -74,8 +74,6 @@ class ThresholdAlertRule:
         previous_count: Any,
         target_count: int,
         previous_started_at: Any = None,
-        previous_sample_time: Any = None,
-        max_gap_ms: Optional[float] = None,
     ) -> Tuple[
         int,
         Optional[datetime],
@@ -84,8 +82,7 @@ class ThresholdAlertRule:
     ]:
         """跨采样点和扫描窗口累计连续阈值命中次数。
 
-        ``previous_count`` 和 ``previous_started_at`` 来自上一轮扫描状态；
-        ``max_gap_ms`` 用于识别采样中断，间隔过大时应重新开始连续命中计数。
+        ``previous_count`` 和 ``previous_started_at`` 来自上一轮扫描状态。
         """
         # 防御性地修正历史状态和目标点数，避免异常值导致无法触发预警。
         count = max(0, int(previous_count or 0))
@@ -98,23 +95,8 @@ class ThresholdAlertRule:
         run_best_value: Optional[float] = None
         run_best_limit: Optional[float] = None
         run_best_time: Optional[datetime] = None
-        last_sample_time = parse_datetime(previous_sample_time)
 
         for sample_time, value in samples:
-            # 采样间隔超过允许值时视为数据不连续，已累计的命中次数全部失效。
-            if (
-                max_gap_ms is not None
-                and last_sample_time is not None
-                and (sample_time - last_sample_time).total_seconds() * 1000.0
-                > max_gap_ms
-            ):
-                count = 0
-                started_at = None
-                run_best_level = None
-                run_best_value = None
-                run_best_limit = None
-                run_best_time = None
-            last_sample_time = sample_time
             level, eval_value, limit = cls.sample_level(rule, value)
             if level is None:
                 # 正常采样点会中断连续命中，后续超限必须重新累计确认点数。
@@ -156,9 +138,6 @@ class ThresholdAlertRule:
             rule.get("threshold_streak_count"),
             target_count,
             previous_started_at=rule.get("threshold_streak_started_at"),
-            previous_sample_time=context.previous_last_seen,
-            # 允许 1.5 个采样周期的间隔，以容忍正常的采集时间抖动。
-            max_gap_ms=float(rule.get("sample_interval_ms") or 1000) * 1.5,
         )
         previous_active = bool(rule.get("threshold_condition_active"))
         state_updates: Dict[str, Any] = {

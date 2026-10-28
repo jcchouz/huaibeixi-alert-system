@@ -36,8 +36,6 @@ class OutOfRangeAlertRule:
         previous_count: Any,
         target_count: int,
         previous_started_at: Any = None,
-        previous_sample_time: Any = None,
-        max_gap_ms: Optional[float] = None,
     ) -> Tuple[
         int,
         Optional[datetime],
@@ -49,17 +47,7 @@ class OutOfRangeAlertRule:
         started_at = parse_datetime(previous_started_at)
         active = False
         snapshot: Optional[Tuple[float, datetime]] = None
-        last_sample_time = parse_datetime(previous_sample_time)
         for sample_time, value in samples:
-            if (
-                max_gap_ms is not None
-                and last_sample_time is not None
-                and (sample_time - last_sample_time).total_seconds() * 1000.0
-                > max_gap_ms
-            ):
-                count = 0
-                started_at = None
-            last_sample_time = sample_time
             if not cls.is_out_of_range(rule, value):
                 count = 0
                 started_at = None
@@ -81,8 +69,6 @@ class OutOfRangeAlertRule:
             rule.get("oor_streak_count"),
             target_count,
             previous_started_at=rule.get("oor_streak_started_at"),
-            previous_sample_time=context.previous_last_seen,
-            max_gap_ms=float(rule.get("sample_interval_ms") or 1000) * 1.5,
         )
         previous_active = bool(rule.get("oor_condition_active"))
         state_updates: Dict[str, Any] = {

@@ -28,8 +28,6 @@ class StuckAlertRule:
         previous_count: Any,
         previous_since: Any,
         target_count: int,
-        previous_sample_time: Any = None,
-        max_gap_ms: Optional[float] = None,
     ) -> Tuple[
         int,
         Optional[float],
@@ -43,18 +41,7 @@ class StuckAlertRule:
         since = parse_datetime(previous_since)
         active = False
         snapshot: Optional[Tuple[float, datetime]] = None
-        last_sample_time = parse_datetime(previous_sample_time)
         for sample_time, value in samples:
-            if (
-                max_gap_ms is not None
-                and last_sample_time is not None
-                and (sample_time - last_sample_time).total_seconds() * 1000.0
-                > max_gap_ms
-            ):
-                count = 0
-                last_value = None
-                since = None
-            last_sample_time = sample_time
             if last_value is not None and abs(value - last_value) <= 1e-9:
                 count += 1
             else:
@@ -75,8 +62,6 @@ class StuckAlertRule:
             rule.get("stuck_streak_count"),
             rule.get("stuck_since"),
             target_count,
-            previous_sample_time=context.previous_last_seen,
-            max_gap_ms=float(rule.get("sample_interval_ms") or 1000) * 1.5,
         )
         previous_active = bool(rule.get("stuck_condition_active"))
         state_updates = {

@@ -365,7 +365,6 @@ class AlertAnalyticsEngine:
                     )
                 frequency_text = sm.get("frequency") or "1"
                 frequency_hz = self._parse_frequency_hz(frequency_text)
-                sample_interval_ms = 1000.0 / frequency_hz
                 confirm_seconds = self.confirm_seconds
                 confirm_samples = required_sample_count(
                     frequency_hz,
@@ -400,7 +399,6 @@ class AlertAnalyticsEngine:
                         "range": sm.get("range") or "-",                        # 量程文本，空值使用占位符
                         "frequency": str(frequency_text),                       # 采样频率文本
                         "frequency_hz": frequency_hz,                           # 采样频率（Hz）
-                        "sample_interval_ms": sample_interval_ms,               # 采样间隔（毫秒）
                         "position": sm.get("position") or "-",                  # 安装位置，空值使用占位符
                         "physical_quantity": physical_quantity,                 # 物理量名称
                         "unit": unit,                                           # 计量单位
