@@ -117,8 +117,7 @@ class ThresholdAlertRule:
                 run_best_limit = float(limit or eval_value)
                 run_best_time = sample_time
             if count >= target_count:
-                # 达到确认点数后持续标记为激活，并以当前连续区间的最严重命中生成快照。
-                active = True
+                # 记录批次内达到确认点数后的最严重命中，用于触发或升级事件。
                 snapshot = (
                     run_best_level or level,
                     run_best_value if run_best_value is not None else eval_value,
@@ -126,6 +125,9 @@ class ThresholdAlertRule:
                     run_best_time or sample_time,
                 )
 
+        # 事件是否仍活动必须以批次最后一个采样点的连续命中状态为准。
+        # snapshot 继续保留，确保批次内短暂达到确认点后恢复的事件仍可落库。
+        active = count >= target_count
         return count, started_at, active, snapshot
 
     def evaluate(self, context: RuleContext) -> RuleEvaluation:
@@ -168,7 +170,7 @@ class ThresholdAlertRule:
                     "threshold_last_level": level,
                     "threshold_last_value": value,
                     "threshold_last_limit": limit,
-                    "threshold_condition_level": active_level,
+                    "threshold_condition_level": active_level if active else None,
                 }
             )
             # 首次确认、迟滞状态下首次获得等级或等级升级时，创建或刷新预警事件。

@@ -159,6 +159,80 @@ def test_threshold_rule_uses_frequency_based_sample_count() -> None:
     assert at_target.trigger is not None
 
 
+@pytest.mark.parametrize(
+    ("rule_instance", "rule", "samples", "active_field"),
+    [
+        (
+            ThresholdAlertRule(),
+            {
+                "level1_upper": 30.0,
+                "level2_upper": 20.0,
+                "level3_upper": 10.0,
+                "level1_lower": None,
+                "level2_lower": None,
+                "level3_lower": None,
+                "threshold_confirm_samples": 3,
+                "threshold_streak_count": 0,
+                "threshold_condition_active": False,
+            },
+            [(12.0, 0), (12.0, 100), (12.0, 200), (5.0, 300)],
+            "threshold_condition_active",
+        ),
+        (
+            OutOfRangeAlertRule(),
+            {
+                "physical_min": -10.0,
+                "physical_max": 10.0,
+                "oor_confirm_samples": 3,
+                "oor_streak_count": 0,
+                "oor_condition_active": False,
+            },
+            [(12.0, 0), (12.0, 100), (12.0, 200), (5.0, 300)],
+            "oor_condition_active",
+        ),
+        (
+            StuckAlertRule(),
+            {
+                "stuck_confirm_samples": 3,
+                "stuck_streak_count": 0,
+                "stuck_since": None,
+                "stuck_condition_active": False,
+            },
+            [(12.0, 0), (12.0, 100), (12.0, 200), (11.0, 300)],
+            "stuck_condition_active",
+        ),
+    ],
+)
+def test_channel_rule_uses_final_sample_state_after_recovery(
+    rule_instance: object,
+    rule: dict[str, object],
+    samples: list[tuple[float, int]],
+    active_field: str,
+) -> None:
+    first_ts = datetime(2026, 10, 23, 12, 0, 0)
+    parsed_samples = [
+        (first_ts + timedelta(milliseconds=offset), value)
+        for value, offset in samples
+    ]
+
+    result = rule_instance.evaluate(
+        RuleContext(
+            rule=rule,
+            samples=parsed_samples,
+            previous_last_seen=None,
+            window_end=first_ts + timedelta(seconds=1),
+            confirm_seconds=3.0,
+            stuck_seconds=3.0,
+            offline_timeout_ms=5_000.0,
+        )
+    )
+
+    assert result.state_updates[active_field] is False
+    assert result.active is False
+    # 批次内曾达到确认点，仍保留触发快照用于生成短事件。
+    assert result.trigger is not None
+
+
 def test_out_of_range_rule_uses_frequency_based_sample_count() -> None:
     first_ts = datetime(2026, 10, 23, 12, 0, 0)
     rule = {

@@ -756,40 +756,33 @@ class AlertAnalyticsEngine:
     ) -> Optional[Dict[str, Any]]:
         """预警条件恢复后关闭对应的未结束预警事件。"""
 
+        alert_type = normalize_alert_type(alert_type) or alert_type
         key = self._alert_key(sensor_no, channel, alert_type)
-        existing = active_map.pop(key, None)
-        alert_id = existing.get("id") if existing else None
-        if alert_id is None:
-            cur.execute(
-                """
-                SELECT id
-                FROM public.t_alert_record
-                WHERE LOWER(sensor_no) = %s
-                  AND COALESCE(channel, '') = %s
-                  AND alert_type = %s
-                  AND end_time IS NULL
-                ORDER BY seq DESC
-                LIMIT 1
-                FOR UPDATE
-                """,
-                (sensor_no.lower(), channel or "", alert_type),
-            )
-            row = cur.fetchone()
-            alert_id = row["id"] if row else None
-        if alert_id is None:
-            return None
+        # 直接按活动事件唯一键关闭，避免内存缓存中的 id 过期时 UPDATE
+        # 零行命中，却已经提前从 active_map 删除而无法在后续扫描重试。
         cur.execute(
             """
             UPDATE public.t_alert_record
             SET end_time = %s
-            WHERE id = %s
+            WHERE LOWER(sensor_no) = %s
+              AND COALESCE(channel, '') = %s
+              AND alert_type = %s
               AND end_time IS NULL
             RETURNING *
             """,
-            (end_time, alert_id),
+            (end_time, sensor_no.lower(), channel or "", alert_type),
         )
         row = cur.fetchone()
-        return dict(row) if row else None
+        active_map.pop(key, None)
+        if row is None:
+            logger.warning(
+                "No open alert incident found while closing %s/%s/%s.",
+                sensor_no,
+                channel,
+                alert_type,
+            )
+            return None
+        return dict(row)
 
     @staticmethod
     def _alert_key(
@@ -950,7 +943,9 @@ class AlertAnalyticsEngine:
                 fire_time=trigger.fire_time,
                 force_refresh=not evaluation.previous_active,
             )
-        if evaluation.previous_active and not evaluation.active:
+        # 原本活动的预警恢复时必须关闭；批次内短暂触发后恢复的新事件也要
+        # 在同一个事务内完成创建和关闭，避免内存状态与数据库记录不一致。
+        if (evaluation.previous_active or trigger is not None) and not evaluation.active:
             self._close_alert_incident(
                 cur,
                 active_map,

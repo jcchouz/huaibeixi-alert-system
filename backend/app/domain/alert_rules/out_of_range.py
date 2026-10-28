@@ -56,8 +56,9 @@ class OutOfRangeAlertRule:
             if started_at is None:
                 started_at = sample_time
             if count >= target_count:
-                active = True
                 snapshot = (value, sample_time)
+        # 只有最后一个采样点仍处于连续命中区间时，事件才保持活动。
+        active = count >= target_count
         return count, started_at, active, snapshot
 
     def evaluate(self, context: RuleContext) -> RuleEvaluation:

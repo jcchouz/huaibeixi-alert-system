@@ -276,6 +276,109 @@ def test_realtime_threshold_streak_continues_across_one_second_scans(
     assert not any("LOWER(sensor_no) = %s" in sql for sql in cursor.sql_calls)
 
 
+def test_normal_sample_after_threshold_trigger_closes_open_incident(
+    monkeypatch,
+) -> None:
+    engine = AlertAnalyticsEngine()
+    key = engine.make_key("sensor-1", "x")
+    alert_key = engine._alert_key("sensor-1", "x", ALERT_TYPE_THRESHOLD)
+    window_start = datetime(2026, 10, 20, 12, 0, 0)
+    window_end = window_start + timedelta(seconds=1)
+    record = {
+        "id": "alert-1",
+        "sensor_no": "sensor-1",
+        "channel": "x",
+        "alert_type": ALERT_TYPE_THRESHOLD,
+        "alert_level": 3,
+        "alert_status": 0,
+        "end_time": None,
+    }
+    engine.channel_states[key] = {
+        "id": "threshold-1",
+        "key": key,
+        "sensor_no_lower": "sensor-1",
+        "channel": "x",
+        "instrument_id": None,
+        "offline_timeout_ms": 5_000.0,
+        "last_ts": "2026-10-20 11:59:59",
+        "level1_upper": 30.0,
+        "level2_upper": 20.0,
+        "level3_upper": 10.0,
+        "level1_lower": None,
+        "level2_lower": None,
+        "level3_lower": None,
+        "physical_min": -100.0,
+        "physical_max": 100.0,
+        "threshold_confirm_samples": 3,
+        "threshold_streak_count": 3,
+        "threshold_streak_started_at": "2026-10-20 11:59:59",
+        "threshold_condition_active": True,
+        "threshold_condition_level": 3,
+        "oor_confirm_samples": 3,
+        "oor_streak_count": 0,
+        "oor_condition_active": False,
+        "stuck_confirm_samples": 100,
+        "stuck_streak_count": 0,
+        "stuck_condition_active": False,
+        "offline_condition_active": False,
+    }
+    engine._cache_sample_query(engine.channel_states.values())
+    engine._active_alert_cache = {alert_key: dict(record)}
+
+    class ClosingCursor:
+        def __init__(self) -> None:
+            self.rows: list[dict[str, Any]] = []
+            self.last_sql = ""
+
+        def execute(
+            self,
+            sql: str,
+            params: tuple[Any, ...] | None = None,
+        ) -> None:
+            self.last_sql = sql
+            if "value IS NOT NULL" in sql:
+                self.rows = [
+                    {
+                        "s_no": "sensor-1",
+                        "ch": "x",
+                        "sample_cnt": 4,
+                        "sample_times": [
+                            window_start,
+                            window_start + timedelta(milliseconds=100),
+                            window_start + timedelta(milliseconds=200),
+                            window_start + timedelta(milliseconds=300),
+                        ],
+                        "sample_values": [12.0, 12.0, 12.0, 5.0],
+                    }
+                ]
+            elif "SET end_time = %s" in sql:
+                record["end_time"] = params[0]
+                self.rows = [dict(record)]
+            else:
+                self.rows = []
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return self.rows
+
+        def fetchone(self) -> dict[str, Any] | None:
+            return self.rows[0] if self.rows else None
+
+    cursor = ClosingCursor()
+
+    @contextmanager
+    def fake_get_db_cursor(commit: bool = False):
+        yield cursor
+
+    monkeypatch.setattr(engine_module, "get_db_cursor", fake_get_db_cursor)
+
+    engine.scan_realtime_alerts(window_start, window_end)
+
+    assert engine.channel_states[key]["threshold_condition_active"] is False
+    assert engine.channel_states[key]["threshold_streak_count"] == 0
+    assert record["end_time"] == window_end
+    assert engine._active_alert_cache == {}
+
+
 def test_no_data_still_alerts_offline_once_per_unrecovered_incident(
     monkeypatch,
 ) -> None:

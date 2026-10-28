@@ -49,8 +49,9 @@ class StuckAlertRule:
                 since = sample_time
             last_value = value
             if count >= target_count:
-                active = True
                 snapshot = (value, sample_time)
+        # 只有最后一个采样点仍满足死值条件时，事件才保持活动。
+        active = count >= target_count
         return count, last_value, since, active, snapshot
 
     def evaluate(self, context: RuleContext) -> RuleEvaluation:

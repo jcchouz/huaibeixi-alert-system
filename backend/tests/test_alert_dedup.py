@@ -150,6 +150,13 @@ def test_close_alert_incident_writes_recovery_time() -> None:
     )
     assert "update_time" not in update_sql
     assert "trigger_count" not in update_sql
-    assert update_params == (recovered_at, "open-alert")
+    assert "LOWER(sensor_no) = %s" in update_sql
+    assert "alert_type = %s" in update_sql
+    assert update_params == (
+        recovered_at,
+        "sensor-1",
+        "x",
+        ALERT_TYPE_THRESHOLD,
+    )
     assert result is not None
     assert not active_map
