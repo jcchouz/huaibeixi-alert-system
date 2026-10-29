@@ -67,11 +67,11 @@ def env_bool(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be a boolean value, got {value!r}")
 
 
-ENABLE_THRESHOLD_ALERT = env_bool("ENABLE_THRESHOLD_ALERT", True)
-ENABLE_STUCK_ALERT = env_bool("ENABLE_STUCK_ALERT", True)
-ENABLE_OOR_ALERT = env_bool("ENABLE_OOR_ALERT", True)
-ENABLE_SENSOR_OFFLINE_ALERT = env_bool("ENABLE_SENSOR_OFFLINE_ALERT", True)
-ENABLE_DAQ_OFFLINE_ALERT = env_bool("ENABLE_DAQ_OFFLINE_ALERT", True)
+ENABLE_THRESHOLD_ALERT = env_bool("ENABLE_THRESHOLD_ALERT", False)
+ENABLE_STUCK_ALERT = env_bool("ENABLE_STUCK_ALERT", False)
+ENABLE_OOR_ALERT = env_bool("ENABLE_OOR_ALERT", False)
+ENABLE_SENSOR_OFFLINE_ALERT = env_bool("ENABLE_SENSOR_OFFLINE_ALERT", False)
+ENABLE_DAQ_OFFLINE_ALERT = env_bool("ENABLE_DAQ_OFFLINE_ALERT", False)
 
 
 @dataclass(frozen=True)
