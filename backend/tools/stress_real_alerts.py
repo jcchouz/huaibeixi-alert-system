@@ -161,6 +161,44 @@ def database_now(conn: Any) -> datetime:
     return row[0]
 
 
+def floor_statistics_boundary(value: datetime, window_minutes: int) -> datetime:
+    """将时间向下对齐到指定统计周期的自然日窗口边界。"""
+    day_start = value.replace(hour=0, minute=0, second=0, microsecond=0)
+    elapsed_minutes = int((value - day_start).total_seconds() // 60)
+    return day_start + timedelta(
+        minutes=(elapsed_minutes // window_minutes) * window_minutes
+    )
+
+
+def wait_for_statistics_alignment(
+    conn: Any,
+    window_minutes_list: Sequence[int],
+) -> datetime:
+    """等待下一个最长统计窗口开始，确保压测数据进入完整周期。"""
+    alignment_minutes = max(window_minutes_list)
+    now = database_now(conn)
+    target = floor_statistics_boundary(now, alignment_minutes) + timedelta(
+        minutes=alignment_minutes,
+        seconds=1,
+    )
+    if alignment_minutes <= 1:
+        target = now
+    else:
+        print(
+            f"[wait] statistics alignment target={target.isoformat(' ')}",
+            flush=True,
+        )
+    deadline = time.monotonic() + alignment_minutes * 60 + 15
+    while time.monotonic() < deadline:
+        now = database_now(conn)
+        if now >= target:
+            return now
+        time.sleep(min(5.0, max(0.2, (target - now).total_seconds())))
+    raise StressError(
+        f"database clock did not reach statistics alignment target {target}"
+    )
+
+
 def database_identity(conn: Any) -> dict[str, Any]:
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
@@ -201,11 +239,21 @@ def verify_health(health: dict[str, Any]) -> dict[str, Any]:
     station_code = str(engine.get("stationCode") or "").strip()
     if not station_code:
         raise StressError("health response is missing engine.stationCode")
+    raw_periods = detection.get("windowMinutesList") or [
+        detection.get("windowMinutes") or 1
+    ]
+    try:
+        periods = sorted({int(item) for item in raw_periods})
+    except (TypeError, ValueError) as exc:
+        raise StressError("health response has invalid statistics windows") from exc
+    if not periods or any(item <= 0 for item in periods):
+        raise StressError("health response has invalid statistics windows")
     return {
         "stationCode": station_code,
         "loadedRulesCount": int(engine.get("loadedRulesCount") or 0),
         "intervalSeconds": float(detection.get("intervalSeconds") or 1),
-        "windowMinutes": int(detection.get("windowMinutes") or 1),
+        "windowMinutes": periods[0],
+        "windowMinutesList": periods,
         "lagSeconds": float(detection.get("lagSeconds") or 0),
     }
 
@@ -537,6 +585,8 @@ def verify_statistics(
 ) -> dict[str, Any]:
     expected = {channel.key for channel in channels}
     deadline = time.monotonic() + timeout
+    query_start = floor_statistics_boundary(start_time, window_minutes)
+    query_end = end_time + timedelta(minutes=window_minutes)
     rows: list[tuple[Any, ...]] = []
     while time.monotonic() < deadline:
         with conn.cursor() as cur:
@@ -553,8 +603,8 @@ def verify_statistics(
                 GROUP BY LOWER(sensor_no), COALESCE(channel, '')
                 """,
                 (
-                    start_time.replace(second=0, microsecond=0),
-                    end_time + timedelta(minutes=window_minutes),
+                    query_start,
+                    query_end,
                     f"{window_minutes}m",
                     [key[0] for key in expected],
                     [key[1] for key in expected],
@@ -659,12 +709,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             summary["passed"] = True
             return summary
 
+        session_start = wait_for_statistics_alignment(
+            conn,
+            health_config["windowMinutesList"],
+        )
         observer = HealthObserver(args.health_url, args.health_timeout)
         import threading
 
         observer_thread = threading.Thread(target=observer.run, daemon=True)
         observer_thread.start()
-        session_start = database_now(conn)
         phase_rows = 0
         try:
             for phase in ("normal", "threshold", "oor"):
@@ -736,13 +789,34 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         final_health = fetch_json(args.health_url, args.health_timeout)
         final_config = verify_health(final_health)
         alert_result = verify_alerts(expected, observed)
-        stats_result = verify_statistics(
-            conn,
-            channels,
-            session_start,
-            test_end,
-            final_config["windowMinutes"],
-        )
+        statistics_results: dict[str, dict[str, Any]] = {}
+        for window_minutes in final_config["windowMinutesList"]:
+            statistics_results[f"{window_minutes}m"] = verify_statistics(
+                conn,
+                channels,
+                session_start,
+                test_end,
+                window_minutes,
+                timeout=window_minutes * 60 + 45,
+            )
+        statistics_failures = [
+            f"{period_type}: {failure}"
+            for period_type, result in statistics_results.items()
+            for failure in result["failures"]
+        ]
+        stats_result = {
+            "passed": all(
+                result["passed"] for result in statistics_results.values()
+            ),
+            "periodType": (
+                next(iter(statistics_results))
+                if len(statistics_results) == 1
+                else None
+            ),
+            "periodTypes": list(statistics_results),
+            "results": statistics_results,
+            "failures": statistics_failures,
+        }
         observer_result = observer.summary()
         rows_read_back = 0
         with conn.cursor() as cur:

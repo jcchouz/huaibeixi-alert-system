@@ -18,7 +18,7 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements-dev.txt
       - run: python -m pip install -r requirements-dev.txt
-      - run: ruff check app tests
+      - run: ruff check app tests tools
       - run: pytest --cov=app --cov-report=term-missing
       - run: alembic upgrade head --sql > /tmp/schema.sql
 

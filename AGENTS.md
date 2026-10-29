@@ -10,7 +10,7 @@
 
 - `AlertDetectionWorker` 是生产检测入口，随 FastAPI 生命周期启动，负责按数据库时间持续检测 `t_monitor` 原始采样点，并周期性生成统计记录。
 - 服务启动时以数据库当前时间为检测边界，不恢复历史水位、通道状态或启动前数据。
-- `t_stat_record` 按完整窗口生成，默认窗口为 1 分钟，可通过 `DETECTION_WINDOW_MINUTES` 配置。
+- `t_stat_record` 按完整窗口生成，默认同时生成 1 分钟和 10 分钟统计；可通过 `DETECTION_WINDOW_MINUTES` 配置逗号分隔的多个窗口，各窗口独立推进水位。
 - 通道离线、采集仪离线、阈值超限、传感器死值和超物理量程预警按原始采样点连续命中判定，不等待统计窗口结束。
 - 阈值超限和超物理量程使用 `DETECTION_CONFIRM_SECONDS`，传感器死值使用 `DETECTION_STUCK_SECONDS`，按 `t_sensor.frequency` 折算为连续采样点数（最少 3 点）；通道离线使用 `DETECTION_OFFLINE_SECONDS`，超时至少为 5 个采样周期，采集仪离线复用通道离线结果。
 - 实时预警扫描周期由 `DETECTION_INTERVAL_SECONDS` 配置，统计窗口只影响 `t_stat_record`，不得阻塞实时预警。

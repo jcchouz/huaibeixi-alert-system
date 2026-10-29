@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Literal
+from typing import Annotated, List, Literal, Tuple
 
-from pydantic import Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 
@@ -66,11 +66,9 @@ class Settings(BaseSettings):
         le=300,
         validation_alias="DETECTION_LAG_SECONDS",
     )
-    # t_stat_record 统计窗口长度，单位为分钟。
-    detection_window_minutes: int = Field(
-        default=1,
-        ge=1,
-        le=1440,
+    # t_stat_record 同时生成的统计窗口，单位为分钟；环境变量使用逗号分隔。
+    detection_window_minutes: Annotated[Tuple[int, ...], NoDecode] = Field(
+        default=(1, 10),
         validation_alias="DETECTION_WINDOW_MINUTES",
     )
     # 阈值超限和超量程确认的基准秒数；按频率折算为样本点数，最少 3 点。
@@ -127,6 +125,28 @@ class Settings(BaseSettings):
     log_json: bool = Field(default=True, validation_alias="LOG_JSON")
     # 日志文件目录，默认为后端的 logs 目录。
     log_dir: Path = Field(default=BACKEND_DIR / "logs", validation_alias="LOG_DIR")
+
+    @field_validator("detection_window_minutes", mode="before")
+    @classmethod
+    def parse_detection_window_minutes(cls, value: object) -> Tuple[int, ...]:
+        """解析并校验逗号分隔或序列形式的统计窗口分钟数。"""
+        if isinstance(value, str):
+            raw_values = [item.strip() for item in value.split(",")]
+        elif isinstance(value, (int, float)):
+            raw_values = [value]
+        else:
+            raw_values = list(value)  # type: ignore[arg-type]
+
+        try:
+            minutes = {int(item) for item in raw_values if str(item).strip()}
+        except (TypeError, ValueError) as exc:
+            raise ValueError("DETECTION_WINDOW_MINUTES 必须为逗号分隔的整数") from exc
+
+        if not minutes:
+            raise ValueError("DETECTION_WINDOW_MINUTES 至少需要配置一个窗口")
+        if any(item < 1 or item > 1440 for item in minutes):
+            raise ValueError("DETECTION_WINDOW_MINUTES 的每个窗口必须在 1 到 1440 分钟之间")
+        return tuple(sorted(minutes))
 
     @property
     def dsn(self) -> str:

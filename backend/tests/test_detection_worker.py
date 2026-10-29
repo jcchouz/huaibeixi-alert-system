@@ -50,16 +50,28 @@ class FakeEngine:
 def make_worker(
     engine: FakeEngine,
     *,
-    window_minutes: int = 1,
+    window_minutes: tuple[int, ...] = (1, 10),
 ) -> AlertDetectionWorker:
     settings = Settings(
         environment="development",
+        debug=False,
         detection_enabled=True,
         detection_interval_seconds=1,
         detection_lag_seconds=5,
         detection_window_minutes=window_minutes,
     )
     return AlertDetectionWorker(engine, settings)  # type: ignore[arg-type]
+
+
+def test_detection_windows_accept_comma_separated_minutes(monkeypatch) -> None:
+    monkeypatch.setenv("DETECTION_WINDOW_MINUTES", "10, 1,10")
+    settings = Settings(
+        _env_file=None,
+        environment="development",
+        debug=False,
+    )
+
+    assert settings.detection_window_minutes == (1, 10)
 
 
 def test_initialize_starts_from_current_time_without_historical_state() -> None:
@@ -72,7 +84,11 @@ def test_initialize_starts_from_current_time_without_historical_state() -> None:
     assert engine.sessions == [started_at]
     assert worker._detection_started_at == started_at
     assert worker._last_alert_scan_at == started_at
-    # 当前窗口包含启动前数据，因此统计从下一个完整窗口开始。
+    # 每个周期当前窗口都包含启动前数据，因此从各自的下一个完整窗口开始。
+    assert worker._last_window_ends == {
+        1: datetime(2026, 10, 20, 15, 43),
+        10: datetime(2026, 10, 20, 15, 50),
+    }
     assert worker._last_window_end == datetime(2026, 10, 20, 15, 43)
 
 
@@ -263,12 +279,40 @@ def test_statistics_processes_all_due_windows_in_order() -> None:
         (datetime(2026, 10, 20, 15, 42), datetime(2026, 10, 20, 15, 43)),
         (datetime(2026, 10, 20, 15, 43), datetime(2026, 10, 20, 15, 44)),
     ]
-    assert worker._last_window_end == datetime(2026, 10, 20, 15, 44)
+    assert worker._last_window_ends == {
+        1: datetime(2026, 10, 20, 15, 44),
+        10: datetime(2026, 10, 20, 15, 50),
+    }
 
 
-def test_detection_worker_supports_a_configurable_window() -> None:
+def test_statistics_generates_one_minute_and_ten_minute_windows() -> None:
     engine = FakeEngine()
-    worker = make_worker(engine, window_minutes=10)
+    worker = make_worker(engine)
+    worker.initialize(datetime(2026, 10, 20, 15, 40))
+
+    results = worker.process_statistics_once(datetime(2026, 10, 20, 15, 50, 5))
+
+    assert len(results) == 11
+    assert engine.period_types.count("1m") == 10
+    assert engine.period_types.count("10m") == 1
+    ten_minute_index = engine.period_types.index("10m")
+    assert engine.windows[ten_minute_index] == (
+        datetime(2026, 10, 20, 15, 40),
+        datetime(2026, 10, 20, 15, 50),
+    )
+    assert worker._last_window_ends == {
+        1: datetime(2026, 10, 20, 15, 50),
+        10: datetime(2026, 10, 20, 15, 50),
+    }
+    assert worker.get_status()["lastWindowEnds"] == {
+        "1m": "2026-10-20 15:50:00",
+        "10m": "2026-10-20 15:50:00",
+    }
+
+
+def test_detection_worker_supports_a_single_configured_window() -> None:
+    engine = FakeEngine()
+    worker = make_worker(engine, window_minutes=(10,))
     worker.initialize(datetime(2026, 10, 20, 15, 30, 30))
 
     current_time = datetime(2026, 10, 20, 15, 42, 30)
@@ -276,7 +320,7 @@ def test_detection_worker_supports_a_configurable_window() -> None:
 
     assert results == []
     assert engine.alert_scans == []
-    assert worker._last_window_end == datetime(2026, 10, 20, 15, 40)
+    assert worker._last_window_ends == {10: datetime(2026, 10, 20, 15, 40)}
     assert engine.windows == []
 
 
@@ -311,7 +355,7 @@ def test_statistics_loop_uses_a_monotonic_window_deadline(monkeypatch) -> None:
 
     def process_statistics_once(current_time: datetime) -> list[dict]:
         if current_time >= datetime(2026, 10, 20, 15, 43, 5):
-            worker._last_window_end = datetime(2026, 10, 20, 15, 43)
+            worker._last_window_ends[1] = datetime(2026, 10, 20, 15, 43)
         return []
 
     monkeypatch.setattr(worker, "_current_time", lambda: next(current_times))
@@ -340,10 +384,10 @@ def test_statistics_loop_uses_a_monotonic_window_deadline(monkeypatch) -> None:
 
 def test_startup_on_window_boundary_uses_next_complete_window() -> None:
     engine = FakeEngine()
-    worker = make_worker(engine, window_minutes=10)
+    worker = make_worker(engine, window_minutes=(10,))
     worker.initialize(datetime(2026, 10, 20, 15, 30))
 
-    assert worker._last_window_end == datetime(2026, 10, 20, 15, 30)
+    assert worker._last_window_ends == {10: datetime(2026, 10, 20, 15, 30)}
 
 
 def test_worker_starts_separate_realtime_and_statistics_threads(monkeypatch) -> None:

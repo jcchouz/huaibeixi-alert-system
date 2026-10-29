@@ -250,8 +250,6 @@ def assign_alert_scenarios(plans: list[ChannelPlan]) -> list[ChannelPlan]:
         plan = assigned[stuck_index]
         assigned[stuck_index] = replace(plan, scenario="stuck", amplitude=0.0)
 
-    # 只取一个超阈值的传感器，其他都不要
-    assigned = assigned[:1]
     return assigned
 
 

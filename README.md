@@ -84,13 +84,13 @@ The injector (`backend/tools/inject_threshold.py`) only writes one channel to
 breakpoint sequence, verification SQL and troubleshooting notes.
 
 Production only needs the backend service. It scans newly arrived raw samples
-from `t_monitor` for alerts every second by default and writes one-minute
-statistics to `t_stat_record`. The service is designed for a single backend
+from `t_monitor` for alerts every second by default and writes one-minute and
+ten-minute statistics to `t_stat_record`. The service is designed for a single backend
 instance. On startup it creates a database-time boundary and only processes
 samples and complete statistics windows after that boundary; historical
 watermarks and catch-up processing are not used. Configure the realtime alert interval
-with `DETECTION_INTERVAL_SECONDS` and the statistics window with
-`DETECTION_WINDOW_MINUTES`. Each alert loop delays scanning by one
+with `DETECTION_INTERVAL_SECONDS` and the statistics windows with
+`DETECTION_WINDOW_MINUTES` (comma-separated, default `1,10`). Each alert loop delays scanning by one
 `DETECTION_INTERVAL_SECONDS` window to allow external samples to be committed;
 with the default one-second interval it processes `[now-2s, now-1s)`. Each
 loop advances at most one interval, and if a window takes longer than that,
@@ -185,7 +185,8 @@ cd backend
 
 The all-alert test requires a running backend with all five alert switches
 enabled. It verifies threshold, out-of-range, stuck, channel offline and
-collector offline alerts plus one-minute statistics, and keeps its test data.
+collector offline alerts plus one-minute and ten-minute statistics, and keeps
+its test data.
 
 ## Docker
 

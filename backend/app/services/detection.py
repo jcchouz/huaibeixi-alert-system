@@ -11,7 +11,7 @@ import logging
 import threading
 import time
 from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.core.config import Settings
 from app.core.serialization import serialize_val
@@ -47,6 +47,7 @@ class AlertDetectionWorker:
         self._detection_started_at: Optional[datetime] = None
         self._last_alert_scan_at: Optional[datetime] = None
         self._last_window_end: Optional[datetime] = None
+        self._last_window_ends: Dict[int, datetime] = {}
         self._last_run_at: Optional[datetime] = None
         self._last_result: Optional[Dict[str, Any]] = None
         self._last_alert_result: Optional[Dict[str, Any]] = None
@@ -79,7 +80,7 @@ class AlertDetectionWorker:
             thread.start()
         logger.info(
             "Alert detection worker started "
-            "(alerts=%ss, statistics=%sm, stats-lag=%ss).",
+            "(alerts=%ss, statistics_windows=%s, stats-lag=%ss).",
             self.interval_seconds,
             self.window_minutes,
             self.lag_seconds,
@@ -110,11 +111,19 @@ class AlertDetectionWorker:
 
         self._detection_started_at = now
         self._last_alert_scan_at = now
-        self._last_window_end = self._first_statistics_boundary_after(now)
+        self._last_window_ends = {
+            minutes: self._first_statistics_boundary_after(now, minutes)
+            for minutes in self.window_minutes
+        }
+        # 保留覆盖最短周期的旧状态字段，兼容现有运维状态读取。
+        self._last_window_end = self._last_window_ends[self.window_minutes[0]]
         logger.info(
-            "Detection session initialized at %s; statistics starts after %s.",
+            "Detection session initialized at %s; statistics start after %s.",
             now,
-            self._last_window_end,
+            {
+                f"{minutes}m": boundary
+                for minutes, boundary in self._last_window_ends.items()
+            },
         )
 
     def scan_alerts_once(self, current_time: datetime) -> Optional[Dict[str, Any]]:
@@ -200,39 +209,49 @@ class AlertDetectionWorker:
         return summary
 
     def process_statistics_once(self, current_time: datetime) -> List[Dict[str, Any]]:
-        """按顺序处理当前所有已到期的统计窗口。"""
-        # 只处理落库延迟之后已经闭合的窗口，避免统计到仍在写入的数据。
-        eligible_end = self.latest_eligible_window_end(current_time)
-        last_window_end = self._last_window_end
-
-        if last_window_end is not None and eligible_end <= last_window_end:
-            return []
-
-        if last_window_end is None:
+        """按结束时间顺序处理所有周期在当前时刻已到期的完整窗口。"""
+        if not self._last_window_ends:
             # 未经初始化时不处理历史窗口。
             return []
 
-        # 只处理本次启动之后尚未写入的完整窗口。
-        first_end = last_window_end + timedelta(minutes=self.window_minutes)
-        if first_end > eligible_end:
-            return []
-
         results: List[Dict[str, Any]] = []
-        window_end = first_end
-        while window_end <= eligible_end:
-            window_start = window_end - timedelta(minutes=self.window_minutes)
+        eligible_ends = {
+            minutes: self.latest_eligible_window_end(current_time, minutes)
+            for minutes in self.window_minutes
+            if minutes in self._last_window_ends
+        }
+
+        while True:
+            due_windows: List[Tuple[datetime, int]] = []
+            for minutes, last_window_end in self._last_window_ends.items():
+                window_end = last_window_end + timedelta(minutes=minutes)
+                if window_end <= eligible_ends[minutes]:
+                    due_windows.append((window_end, minutes))
+
+            if not due_windows:
+                break
+
+            # 同一结束时刻先写短周期，再写长周期，跨周期时始终按时间顺序推进。
+            window_end, minutes = min(
+                due_windows,
+                key=lambda item: (item[0], item[1]),
+            )
+            window_start = window_end - timedelta(minutes=minutes)
+            period_type = f"{minutes}m"
             # 一个窗口成功后立即推进水位，异常时下次只重试尚未完成的窗口。
             result = self.engine.record_statistics_window(
                 window_start,
                 window_end,
-                period_type=f"{self.window_minutes}m",
+                period_type=period_type,
             )
             results.append(result)
-            # 每完成一个窗口就推进一次统计水位。
+            # 每个统计周期独立推进水位，短周期不会覆盖长周期的处理进度。
+            self._last_window_ends[minutes] = window_end
             self._last_window_end = window_end
             self._last_result = {
                 "windowStart": serialize_val(window_start),
                 "windowEnd": serialize_val(window_end),
+                "periodType": period_type,
                 "rawPointsProcessed": int(result.get("rawPointsProcessed") or 0),
                 "upsertedStatsCount": int(result.get("upsertedStatsCount") or 0),
                 "elapsedMs": result.get("elapsedMs"),
@@ -240,42 +259,61 @@ class AlertDetectionWorker:
             self._last_statistics_error = None
             self._last_error = None
             self._statistics_cycles += 1
-            window_end += timedelta(minutes=self.window_minutes)
 
         return results
 
-    def _window_boundary(self, value: datetime) -> datetime:
-        """Floor a datetime to the configured natural-day window boundary."""
+    def _window_boundary(
+        self,
+        value: datetime,
+        window_minutes: Optional[int] = None,
+    ) -> datetime:
+        """将时间向下对齐到指定自然日窗口边界。"""
+        window_minutes = window_minutes or self.window_minutes[0]
         day_start = value.replace(hour=0, minute=0, second=0, microsecond=0)
         elapsed_minutes = int((value - day_start).total_seconds() // 60)
         return day_start + timedelta(
-            minutes=(elapsed_minutes // self.window_minutes) * self.window_minutes
+            minutes=(elapsed_minutes // window_minutes) * window_minutes
         )
 
-    def _first_statistics_boundary_after(self, started_at: datetime) -> datetime:
-        """返回启动后第一个完整统计窗口的起始边界。"""
-        block_start = self._window_boundary(started_at)
+    def _first_statistics_boundary_after(
+        self,
+        started_at: datetime,
+        window_minutes: Optional[int] = None,
+    ) -> datetime:
+        """返回指定周期在启动后第一个完整统计窗口的起始边界。"""
+        window_minutes = window_minutes or self.window_minutes[0]
+        block_start = self._window_boundary(started_at, window_minutes)
         # 启动时间落在窗口中间时，当前窗口包含启动前数据，跳过它。
         return (
             block_start
             if started_at == block_start
-            else block_start + timedelta(minutes=self.window_minutes)
+            else block_start + timedelta(minutes=window_minutes)
         )
 
-    def latest_eligible_window_end(self, now: datetime) -> datetime:
-        """应用落库延迟和统计周期后，返回最近完整窗口结束时间。"""
+    def latest_eligible_window_end(
+        self,
+        now: datetime,
+        window_minutes: Optional[int] = None,
+    ) -> datetime:
+        """应用落库延迟和指定周期后，返回最近完整窗口结束时间。"""
         # 先减去允许的落库延迟，再按自然日锚点对齐到完整窗口边界。
         cutoff = now - timedelta(seconds=self.lag_seconds)
-        return self._window_boundary(cutoff)
+        return self._window_boundary(
+            cutoff,
+            window_minutes or self.window_minutes[0],
+        )
 
     def _next_statistics_scan_at(self) -> Optional[datetime]:
         """返回下一轮统计窗口允许开始处理的时间。"""
-        last_window_end = self._last_window_end
-        if last_window_end is None:
+        if not self._last_window_ends:
             return None
-        return last_window_end + timedelta(
-            minutes=self.window_minutes,
-            seconds=self.lag_seconds,
+        return min(
+            last_window_end
+            + timedelta(
+                minutes=minutes,
+                seconds=self.lag_seconds,
+            )
+            for minutes, last_window_end in self._last_window_ends.items()
         )
 
     def _statistics_wait_seconds(
@@ -310,7 +348,8 @@ class AlertDetectionWorker:
             "running": running,
             "intervalSeconds": self.interval_seconds,
             "lagSeconds": self.lag_seconds,
-            "windowMinutes": self.window_minutes,
+            "windowMinutes": self.window_minutes[0],
+            "windowMinutesList": list(self.window_minutes),
             "detectionMode": "realtime_sample_groups",
             "confirmSeconds": self.settings.detection_confirm_seconds,
             "thresholdConfirmMode": "frequency_sample_count",
@@ -349,6 +388,10 @@ class AlertDetectionWorker:
                 else None
             ),
             "lastWindowEnd": serialize_val(self._last_window_end),
+            "lastWindowEnds": {
+                f"{minutes}m": serialize_val(window_end)
+                for minutes, window_end in self._last_window_ends.items()
+            },
             "lastResult": dict(self._last_result) if self._last_result else None,
             "lastError": self._last_error,
             "lastAlertError": self._last_alert_error,

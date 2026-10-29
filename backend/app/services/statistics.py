@@ -89,7 +89,7 @@ class StatisticsService:
     ) -> Dict[str, Any]:
         """返回极值时间序列和区间汇总。"""
         sensor_no = (sensor_no or "sensor-01").strip().lower()
-        period_type = "1m"
+        period_type = (period_type or "1m").strip().lower()
         with get_db_cursor() as cur:
             # 调用方未指定通道时，自动解析默认通道。
             if channel is None:
