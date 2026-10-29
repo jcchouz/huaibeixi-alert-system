@@ -122,7 +122,9 @@ class AlertAnalyticsEngine:
         self.channel_states: Dict[str, Dict[str, Any]] = {}
         self.sensor_meta: Dict[str, Dict[str, Any]] = {}
         self.instrument_meta: Dict[str, Dict[str, Any]] = {}
+        # 采集仪上一轮条件状态；缺少键表示本进程尚未建立该采集仪的检测基线。
         self._daq_condition_active: Dict[str, bool] = {}
+        # 区分“尚未建立基线”和“上一轮明确为正常”，重启后避免刷新已有采集仪预警。如果数据库中仍存在未关闭的采集仪离线预警，state_known=False 会阻止首轮扫描刷新旧预警。完成一轮扫描后才标记为状态已知
         self._daq_state_known: Set[str] = set()
         self.last_rule_load_time: Optional[datetime] = None
         self.confirm_seconds = max(0.001, float(confirm_seconds))
