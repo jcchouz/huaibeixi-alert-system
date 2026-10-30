@@ -892,6 +892,7 @@ class AlertAnalyticsEngine:
             "unit",
             "range_min",
             "range_max",
+            "threshold_basis",
             "level1_upper",
             "level1_lower",
             "level2_upper",

@@ -133,3 +133,5 @@ def test_alert_api_uses_polling_and_has_no_removed_features() -> None:
     assert "offline_points" not in threshold_schema
     assert "offline_timeout_ms" not in threshold_schema
     assert "stuck_time_ms" not in threshold_schema
+    assert "threshold_basis" in threshold_schema
+    assert "thresholdBasis" in threshold_schema

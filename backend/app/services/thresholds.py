@@ -42,8 +42,10 @@ class ThresholdService:
         station_name: str | None,
         keyword: str | None,
     ) -> Dict[str, Any]:
-        """返回内存中的规则列表和可用筛选值。"""
+        """返回内存中的规则列表，并合并数据库中的设置依据。"""
         all_rules = self.engine.channel_states.values()
+        with get_db_cursor() as cur:
+            threshold_bases = self.repository.fetch_threshold_bases(cur)
         all_physical_quantities = sorted(
             {rule.get("physical_quantity") for rule in all_rules if rule.get("physical_quantity")}
         )
@@ -53,6 +55,8 @@ class ThresholdService:
         # 在已加载的规则快照上应用可选筛选条件。
         filtered: List[Dict[str, Any]] = []
         for rule in all_rules:
+            rule = dict(rule)
+            rule["threshold_basis"] = threshold_bases.get(str(rule.get("id")))
             if sensor_no and sensor_no.strip().lower() not in (rule.get("sensor_no") or "").lower():
                 continue
             if physical_quantity and physical_quantity.strip() != (
@@ -66,7 +70,8 @@ class ThresholdService:
                 haystack = (
                     f"{rule.get('sensor_no', '')} {rule.get('sensor_name', '')} "
                     f"{rule.get('physical_quantity', '')} {rule.get('channel', '')} "
-                    f"{rule.get('station_name', '')} {rule.get('position', '')}"
+                    f"{rule.get('station_name', '')} {rule.get('position', '')} "
+                    f"{rule.get('threshold_basis', '')}"
                 ).lower()
                 if keyword_lower not in haystack:
                     continue
@@ -419,6 +424,11 @@ class ThresholdService:
                 body.range_max,
                 body.rangeMax,
                 row["range_max"],
+            ),
+            "threshold_basis": pick(
+                body.threshold_basis,
+                body.thresholdBasis,
+                row.get("threshold_basis"),
             ),
             "update_by": "web",
         }

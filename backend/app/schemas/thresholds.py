@@ -26,6 +26,8 @@ class ThresholdUpdateRequest(BaseModel):
     rangeMin: Optional[float] = None
     range_max: Optional[float] = None
     rangeMax: Optional[float] = None
+    threshold_basis: Optional[str] = None
+    thresholdBasis: Optional[str] = None
 
 
 class ThresholdBatchUpdateRequest(ThresholdUpdateRequest):
@@ -70,6 +72,7 @@ class ThresholdRule(BaseModel):
     sensor_no: Optional[str] = None
     channel: Optional[str] = None
     create_by: Optional[str] = None
+    threshold_basis: Optional[str] = None
     range_min: Optional[float] = None
     range_max: Optional[float] = None
 

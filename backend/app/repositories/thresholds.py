@@ -39,8 +39,19 @@ class ThresholdRepository:
         return [dict(row) for row in cur.fetchall()]
 
     @staticmethod
+    def fetch_threshold_bases(cur: Any) -> Dict[str, Optional[str]]:
+        """加载全部阈值规则的设置依据。"""
+        cur.execute(
+            "SELECT id, threshold_basis FROM public.t_alert_threshold"
+        )
+        return {
+            str(row["id"]): row["threshold_basis"]
+            for row in cur.fetchall()
+        }
+
+    @staticmethod
     def update_rule(cur: Any, threshold_id: str, values: Dict[str, Any]) -> Dict[str, Any]:
-        """持久化已校验的阈值和物理量程。"""
+        """持久化已校验的阈值、物理量程和设置依据。"""
         cur.execute(
             """
             UPDATE public.t_alert_threshold
@@ -52,6 +63,7 @@ class ThresholdRepository:
                 level3_lower = %s,
                 range_min = %s,
                 range_max = %s,
+                threshold_basis = %s,
                 update_by = %s,
                 update_time = NOW()
             WHERE id = %s
@@ -66,6 +78,7 @@ class ThresholdRepository:
                 values["level3_lower"],
                 values["range_min"],
                 values["range_max"],
+                values["threshold_basis"],
                 values["update_by"],
                 threshold_id,
             ),

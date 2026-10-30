@@ -115,6 +115,18 @@
           </template>
         </el-table-column>
 
+        <el-table-column prop="threshold_basis" label="阈值设置依据" min-width="180">
+          <template #default="{ row }">
+            <el-tooltip
+              :content="row.threshold_basis || ''"
+              :disabled="!row.threshold_basis"
+              placement="top"
+            >
+              <span class="threshold-basis-text">{{ row.threshold_basis || '-' }}</span>
+            </el-tooltip>
+          </template>
+        </el-table-column>
+
         <el-table-column label="🔴 一级阈值 (红色紧急 L1)" width="170" align="center">
           <template #default="{ row }">
             <div class="mono-num limit-box l1-box">
@@ -245,6 +257,19 @@
           <el-col :span="12">
             <el-form-item label="量程最大值">
               <el-input-number v-model="editForm.range_max" :precision="5" :controls="false" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+
+          <el-col :span="24">
+            <el-form-item label="阈值设置依据">
+              <el-input
+                v-model="editForm.threshold_basis"
+                type="textarea"
+                :rows="3"
+                maxlength="1000"
+                show-word-limit
+                placeholder="例如：设计规范、历史统计或专家经验"
+              />
             </el-form-item>
           </el-col>
 
@@ -482,7 +507,7 @@ const filteredRules = computed(() => {
     if (filters.physicalQuantity && r.physical_quantity !== filters.physicalQuantity) return false
     if (filters.keyword.trim()) {
       const kw = filters.keyword.trim().toLowerCase()
-      const text = `${r.sensor_no || ''} ${r.sensor_name || ''} ${r.channel || ''} ${r.physical_quantity || ''}`.toLowerCase()
+      const text = `${r.sensor_no || ''} ${r.sensor_name || ''} ${r.channel || ''} ${r.physical_quantity || ''} ${r.threshold_basis || ''}`.toLowerCase()
       if (!text.includes(kw)) return false
     }
     return true
@@ -535,7 +560,8 @@ const editForm = reactive({
   level3_lower: 0,
   frequency: '',
   range_min: null,
-  range_max: null
+  range_max: null,
+  threshold_basis: ''
 })
 
 function openEditModal(row) {
@@ -553,7 +579,8 @@ function openEditModal(row) {
     level3_lower: Number(row.level3_lower ?? -6),
     frequency: String(row.frequency ?? ''),
     range_min: row.range_min === null || row.range_min === undefined ? null : Number(row.range_min),
-    range_max: row.range_max === null || row.range_max === undefined ? null : Number(row.range_max)
+    range_max: row.range_max === null || row.range_max === undefined ? null : Number(row.range_max),
+    threshold_basis: row.threshold_basis || ''
   })
   editDialogVisible.value = true
 }
@@ -578,7 +605,8 @@ async function submitSingleEdit() {
       level3_upper: editForm.level3_upper,
       level3_lower: editForm.level3_lower,
       range_min: editForm.range_min,
-      range_max: editForm.range_max
+      range_max: editForm.range_max,
+      threshold_basis: editForm.threshold_basis
     })
     ElMessage.success('阈值规则已保存并完成零停机热更新')
     editDialogVisible.value = false
@@ -948,6 +976,16 @@ onBeforeUnmount(() => {
   border-radius: 4px;
   font-size: 12px;
   font-weight: 600;
+}
+
+.threshold-basis-text {
+  display: block;
+  overflow: hidden;
+  color: var(--shm-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .l1-box {

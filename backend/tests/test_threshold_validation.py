@@ -5,6 +5,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.core.config import Settings
+from app.schemas.thresholds import ThresholdUpdateRequest
 from app.services.thresholds import ThresholdService
 
 
@@ -104,3 +105,27 @@ def test_range_min_must_not_exceed_range_max() -> None:
             {"range_min": 10.0, "range_max": -10.0}
         )
     assert error.value.status_code == 400
+
+
+def test_threshold_basis_is_merged_and_preserved() -> None:
+    service = ThresholdService(None, None, None)  # type: ignore[arg-type]
+    row = {
+        "level1_upper": 10.0,
+        "level1_lower": -10.0,
+        "level2_upper": 8.0,
+        "level2_lower": -8.0,
+        "level3_upper": 5.0,
+        "level3_lower": -5.0,
+        "range_min": -12.0,
+        "range_max": 12.0,
+        "threshold_basis": "历史统计",
+    }
+
+    updated = service._merged_values(
+        row,
+        ThresholdUpdateRequest(thresholdBasis="设计规范"),
+    )
+    preserved = service._merged_values(row, ThresholdUpdateRequest())
+
+    assert updated["threshold_basis"] == "设计规范"
+    assert preserved["threshold_basis"] == "历史统计"
