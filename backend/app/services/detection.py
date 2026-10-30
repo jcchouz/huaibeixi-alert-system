@@ -215,6 +215,7 @@ class AlertDetectionWorker:
             return []
 
         results: List[Dict[str, Any]] = []
+        # 统计周期当前的“最大可处理窗口结束水位”。
         eligible_ends = {
             minutes: self.latest_eligible_window_end(current_time, minutes)
             for minutes in self.window_minutes
