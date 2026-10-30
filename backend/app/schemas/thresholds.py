@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, List, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ThresholdUpdateRequest(BaseModel):
@@ -26,8 +26,8 @@ class ThresholdUpdateRequest(BaseModel):
     rangeMin: Optional[float] = None
     range_max: Optional[float] = None
     rangeMax: Optional[float] = None
-    threshold_basis: Optional[str] = None
-    thresholdBasis: Optional[str] = None
+    threshold_basis: Optional[str] = Field(default=None, max_length=1000)
+    thresholdBasis: Optional[str] = Field(default=None, max_length=1000)
 
 
 class ThresholdBatchUpdateRequest(ThresholdUpdateRequest):

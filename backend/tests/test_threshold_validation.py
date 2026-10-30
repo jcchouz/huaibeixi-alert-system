@@ -129,3 +129,10 @@ def test_threshold_basis_is_merged_and_preserved() -> None:
 
     assert updated["threshold_basis"] == "设计规范"
     assert preserved["threshold_basis"] == "历史统计"
+
+
+def test_threshold_basis_has_length_limit() -> None:
+    ThresholdUpdateRequest(threshold_basis="说" * 1000)
+
+    with pytest.raises(ValidationError):
+        ThresholdUpdateRequest(threshold_basis="说" * 1001)
