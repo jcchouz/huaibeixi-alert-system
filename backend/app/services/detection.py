@@ -423,6 +423,7 @@ class AlertDetectionWorker:
                 self.interval_seconds,
                 round(elapsed, 3),
                 wait_seconds,
+                extra={"file_only": True},
             )
             self._stop_event.wait(wait_seconds)
 
@@ -455,5 +456,6 @@ class AlertDetectionWorker:
                 "Statistics loop waiting: elapsed_seconds=%s, wait_seconds=%s.",
                 round(elapsed, 3),
                 wait_seconds,
+                extra={"file_only": True},
             )
             self._stop_event.wait(wait_seconds)

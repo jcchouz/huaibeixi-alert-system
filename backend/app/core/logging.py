@@ -17,6 +17,13 @@ LOG_FILE_BACKUP_COUNT = 5
 LOG_FILE_NAME = "alert-system.log"
 
 
+class ConsoleLogFilter(logging.Filter):
+    """过滤标记为仅写入文件的日志记录。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not getattr(record, "file_only", False)
+
+
 class JsonFormatter(logging.Formatter):
     """将一条日志记录转换为结构化 JSON。"""
 
@@ -58,6 +65,7 @@ def configure_logging(settings: Settings) -> None:
 
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setFormatter(formatter)
+    stream_handler.addFilter(ConsoleLogFilter())
 
     settings.log_dir.mkdir(parents=True, exist_ok=True)
     file_handler = RotatingFileHandler(
