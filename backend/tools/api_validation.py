@@ -93,8 +93,9 @@ def restore_table(conn: Any, table: str, path: Path) -> int:
         cur.copy_expert(f"COPY public.{table} FROM STDIN WITH BINARY", fh)
     if table == "t_alert_record":
         cur.execute(
-            "SELECT setval('public.seq_alert_record', "
-            "(SELECT COALESCE(MAX(seq), 0) FROM public.t_alert_record), true)"
+            "SELECT setval(pg_get_serial_sequence('public.t_alert_record', 'seq'), "
+            "GREATEST(COALESCE(MAX(seq), 1), 1), COALESCE(MAX(seq), 0) > 0) "
+            "FROM public.t_alert_record"
         )
     conn.commit()
     cur.execute(f"SELECT COUNT(*) FROM public.{table}")

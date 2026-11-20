@@ -86,22 +86,14 @@ GROUP BY LOWER(sensor_no), COALESCE(channel, '')
 ORDER BY s_no, ch
 """
 
-# 仅执行统计时使用的批量更新插入语句。
-STAT_UPSERT_SQL = """
+# 统计表没有唯一约束，写入前按窗口替换，避免依赖 ON CONFLICT。
+STAT_INSERT_SQL = """
 INSERT INTO public.t_stat_record (
-    sensor_no, channel, period_type, stat_time,
+    id, sensor_no, channel, period_type, stat_time,
     val_max, val_min, val_avg,
     max_time, min_time, sample_count,
     create_by, create_time
 ) VALUES %s
-ON CONFLICT (stat_time, sensor_no, channel, period_type)
-DO UPDATE SET
-    val_max = EXCLUDED.val_max,
-    val_min = EXCLUDED.val_min,
-    val_avg = EXCLUDED.val_avg,
-    max_time = EXCLUDED.max_time,
-    min_time = EXCLUDED.min_time,
-    sample_count = EXCLUDED.sample_count
 """
 
 class AlertAnalyticsEngine:
@@ -702,7 +694,9 @@ class AlertAnalyticsEngine:
             cur.execute(
                 """
                 UPDATE public.t_alert_record
-                SET seq = nextval('public.seq_alert_record'),
+                SET seq = nextval(
+                        pg_get_serial_sequence('public.t_alert_record', 'seq')
+                    ),
                     alert_category = %s,
                     threshold_id = COALESCE(%s, threshold_id),
                     alert_level = LEAST(alert_level, %s),
@@ -723,7 +717,9 @@ class AlertAnalyticsEngine:
                     trigger_val, create_time, alert_status, end_time,
                     rule_snapshot
                 ) VALUES (
-                    %s, nextval('public.seq_alert_record'), %s, %s, %s,
+                    %s, nextval(
+                            pg_get_serial_sequence('public.t_alert_record', 'seq')
+                        ), %s, %s, %s,
                     %s, %s, %s,
                     %s, %s, 0, NULL, %s
                 )
@@ -1275,6 +1271,7 @@ class AlertAnalyticsEngine:
                     continue
                 stat_rows.append(
                     (
+                        uuid.uuid4().hex,
                         rule["sensor_no_lower"],
                         rule.get("channel") or "",
                         period_type,
@@ -1289,12 +1286,20 @@ class AlertAnalyticsEngine:
                 )
 
             if stat_rows:
+                cur.execute(
+                    """
+                    DELETE FROM public.t_stat_record
+                    WHERE period_type = %s
+                      AND stat_time = %s
+                    """,
+                    (period_type, window_start),
+                )
                 execute_values(
                     cur,
-                    STAT_UPSERT_SQL,
+                    STAT_INSERT_SQL,
                     stat_rows,
                     template=(
-                        "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                        "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
                         "'system', NOW())"
                     ),
                     page_size=len(stat_rows),

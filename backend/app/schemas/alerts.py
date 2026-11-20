@@ -45,6 +45,8 @@ class AlertCreateRequest(BaseModel):
     alert_level: Optional[int] = None
     triggerVal: Optional[float] = None
     trigger_val: Optional[float] = None
+    alertFunction: Optional[int] = Field(None, ge=1, le=2)
+    alert_function: Optional[int] = Field(None, ge=1, le=2)
 
 
 class AlertRecord(BaseModel):
@@ -66,6 +68,7 @@ class AlertRecord(BaseModel):
     handle_phone: Optional[str] = None
     handle_time: Optional[str] = None
     handle_opinion: Optional[str] = None
+    alert_function: Optional[int] = None
 
 
 class AlertStatusCounts(BaseModel):

@@ -85,7 +85,7 @@ def test_statistics_window_skips_alert_detection(monkeypatch) -> None:
     assert result["upsertedStatsCount"] == 2
 
 
-def test_statistics_batch_supplies_create_by_and_create_time(monkeypatch) -> None:
+def test_statistics_batch_supplies_id_create_by_and_create_time(monkeypatch) -> None:
     engine = AlertAnalyticsEngine()
     key = engine.make_key("sensor-1", "x")
     engine.channel_states[key] = {
@@ -97,26 +97,30 @@ def test_statistics_batch_supplies_create_by_and_create_time(monkeypatch) -> Non
     class StatisticsCursor:
         def __init__(self) -> None:
             self.rows: list[dict[str, Any]] = []
+            self.deleted_stat_bucket = False
 
         def execute(
             self,
             sql: str,
             params: tuple[Any, ...] | None = None,
         ) -> None:
-            self.rows = [
-                {
-                    "s_no": "sensor-1",
-                    "ch": "x",
-                    "sample_cnt": 2,
-                    "val_max": 2.0,
-                    "val_min": 1.0,
-                    "val_avg": 1.5,
-                    "first_ts": params[0],
-                    "last_ts": params[1],
-                    "min_time": params[0],
-                    "max_time": params[1],
-                }
-            ]
+            if "FROM public.t_monitor" in sql:
+                self.rows = [
+                    {
+                        "s_no": "sensor-1",
+                        "ch": "x",
+                        "sample_cnt": 2,
+                        "val_max": 2.0,
+                        "val_min": 1.0,
+                        "val_avg": 1.5,
+                        "first_ts": params[0],
+                        "last_ts": params[1],
+                        "min_time": params[0],
+                        "max_time": params[1],
+                    }
+                ]
+            elif "DELETE FROM public.t_stat_record" in sql:
+                self.deleted_stat_bucket = True
 
         def fetchall(self) -> list[dict[str, Any]]:
             return self.rows
@@ -141,7 +145,10 @@ def test_statistics_batch_supplies_create_by_and_create_time(monkeypatch) -> Non
     )
 
     assert len(captured["rows"]) == 1
+    assert len(captured["rows"][0][0]) == 32
+    assert "ON CONFLICT" not in captured["sql"]
     assert "'system', NOW()" in captured["template"]
+    assert cursor.deleted_stat_bucket is True
 
 
 def test_existing_same_level_alert_is_not_refreshed_on_every_scan() -> None:
@@ -660,7 +667,7 @@ def test_statistics_window_does_not_block_realtime_alert_scan(
     assert not statistics_thread.is_alive()
 
 
-def test_statistics_window_uses_one_batch_upsert(monkeypatch) -> None:
+def test_statistics_window_replaces_bucket_with_one_batch_insert(monkeypatch) -> None:
     engine = AlertAnalyticsEngine()
     window_start = datetime(2026, 10, 20, 12, 0)
     window_end = datetime(2026, 10, 20, 12, 1)
@@ -683,22 +690,22 @@ def test_statistics_window_uses_one_batch_upsert(monkeypatch) -> None:
             params: tuple[Any, ...] | None = None,
         ) -> None:
             self.sql_calls.append(sql)
-            assert "GROUP BY LOWER(sensor_no), COALESCE(channel, '')" in sql
-            self.rows = [
-                {
-                    "s_no": sensor_no,
-                    "ch": channel,
-                    "sample_cnt": 10,
-                    "val_max": 2.0,
-                    "val_min": 1.0,
-                    "val_avg": 1.5,
-                    "first_ts": window_start,
-                    "last_ts": window_end - timedelta(seconds=1),
-                    "min_time": window_start,
-                    "max_time": window_end - timedelta(seconds=1),
-                }
-                for sensor_no, channel in (("sensor-1", "x"), ("sensor-2", "y"))
-            ]
+            if "GROUP BY LOWER(sensor_no), COALESCE(channel, '')" in sql:
+                self.rows = [
+                    {
+                        "s_no": sensor_no,
+                        "ch": channel,
+                        "sample_cnt": 10,
+                        "val_max": 2.0,
+                        "val_min": 1.0,
+                        "val_avg": 1.5,
+                        "first_ts": window_start,
+                        "last_ts": window_end - timedelta(seconds=1),
+                        "min_time": window_start,
+                        "max_time": window_end - timedelta(seconds=1),
+                    }
+                    for sensor_no, channel in (("sensor-1", "x"), ("sensor-2", "y"))
+                ]
 
         def fetchall(self) -> list[dict[str, Any]]:
             return self.rows
@@ -727,9 +734,12 @@ def test_statistics_window_uses_one_batch_upsert(monkeypatch) -> None:
     result = engine.record_statistics_window(window_start, window_end)
 
     assert result["upsertedStatsCount"] == 2
-    assert len(cursor.sql_calls) == 1
+    assert len(cursor.sql_calls) == 2
+    assert "DELETE FROM public.t_stat_record" in cursor.sql_calls[1]
     assert len(batches) == 1
     assert len(batches[0][1]) == 2
+    assert "ON CONFLICT" not in batches[0][0]
+    assert all(len(row[0]) == 32 for row in batches[0][1])
     assert batches[0][2] == 2
 
 

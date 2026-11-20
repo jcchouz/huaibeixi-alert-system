@@ -124,7 +124,7 @@ AlertDetectionWorker
       -> 提交后发布 channel_states
   -> AlertAnalyticsEngine._record_statistics_window()
       -> WINDOW_AGG_SQL 聚合 t_monitor
-      -> 批量 UPSERT t_stat_record
+      -> 按完整窗口替换 t_stat_record
 ```
 
 依赖顺序：

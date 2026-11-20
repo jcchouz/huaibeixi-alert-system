@@ -237,7 +237,9 @@ class AlertRepository:
                     handle_phone = %s,
                     handle_time = NOW(),
                     handle_opinion = %s,
-                    seq = nextval('public.seq_alert_record')
+                    seq = nextval(
+                        pg_get_serial_sequence('public.t_alert_record', 'seq')
+                    )
                 WHERE id = %s
                 RETURNING *
                 """,
@@ -272,7 +274,9 @@ class AlertRepository:
                     handle_by = %s,
                     handle_phone = %s,
                     handle_time = NOW(),
-                    seq = nextval('public.seq_alert_record')
+                    seq = nextval(
+                        pg_get_serial_sequence('public.t_alert_record', 'seq')
+                    )
                 WHERE {' AND '.join(where_clauses)}
                 RETURNING id
                 """,
@@ -290,6 +294,7 @@ class AlertRepository:
         alert_type: str,
         alert_level: int,
         trigger_val: float,
+        alert_function: Optional[int] = None,
         rule_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """插入人工创建的预警记录。"""
@@ -300,11 +305,13 @@ class AlertRepository:
                 INSERT INTO public.t_alert_record (
                     id, sensor_no, threshold_id, trigger_val, create_time,
                     alert_status, channel, seq, alert_type, alert_category,
-                    alert_level, end_time, rule_snapshot
+                    alert_level, end_time, rule_snapshot, alert_function
                 ) VALUES (
                     %s, %s, %s, %s, NOW(),
-                    0, %s, nextval('public.seq_alert_record'), %s, %s,
-                    %s, NULL, %s
+                    0, %s, nextval(
+                        pg_get_serial_sequence('public.t_alert_record', 'seq')
+                    ), %s, %s,
+                    %s, NULL, %s, %s
                 )
                 RETURNING *
                 """,
@@ -318,6 +325,7 @@ class AlertRepository:
                     alert_category,
                     alert_level,
                     Json(rule_snapshot or {}),
+                    alert_function,
                 ),
             )
             return dict(cur.fetchone())

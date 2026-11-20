@@ -259,8 +259,9 @@ def restore_alert_record(conn: Any, payload: bytes) -> None:
     buf = io.BytesIO(payload)
     cur.copy_expert("COPY public.t_alert_record FROM STDIN WITH BINARY", buf)
     cur.execute(
-        "SELECT setval('public.seq_alert_record', "
-        "(SELECT COALESCE(MAX(seq), 0) FROM public.t_alert_record), true)"
+        "SELECT setval(pg_get_serial_sequence('public.t_alert_record', 'seq'), "
+        "GREATEST(COALESCE(MAX(seq), 1), 1), COALESCE(MAX(seq), 0) > 0) "
+        "FROM public.t_alert_record"
     )
     conn.commit()
 

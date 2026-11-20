@@ -172,6 +172,24 @@ def test_non_threshold_alert_is_forced_to_level_one() -> None:
     }
 
 
+def test_alert_function_is_forwarded_to_repository() -> None:
+    repository = FakeAlertRepository()
+    service = AlertService(
+        repository,  # type: ignore[arg-type]
+        FakeEngine(),  # type: ignore[arg-type]
+    )
+
+    service.create_alert(
+        AlertCreateRequest(
+            sensorNo="sensor-1",
+            channel="x",
+            alertFunction=2,
+        )
+    )
+
+    assert repository.created_payload["alert_function"] == 2
+
+
 def test_alert_list_returns_counts_for_the_whole_filtered_scope() -> None:
     service = AlertService(
         FakeAlertRepository(),  # type: ignore[arg-type]
