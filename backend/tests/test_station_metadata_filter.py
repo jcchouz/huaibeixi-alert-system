@@ -69,6 +69,7 @@ class MetadataCursor:
                     "sensor_no": "sensor-yh",
                     "physical_quantity": "temperature",
                     "channel": "x",
+                    "alert_function": 2,
                     "range_min": 0,
                     "range_max": 100,
                 }
@@ -125,6 +126,7 @@ def test_load_thresholds_filters_all_metadata_by_station_code(monkeypatch) -> No
     assert "WHERE cb.station = %s" in sensor_sql
     assert sensor_params == ("玉环站", "YHZ")
     assert "AND cb.station = %s" in threshold_sql
+    assert "t_sensor_type" not in threshold_sql
     assert threshold_params == ("YHZ",)
 
 
@@ -154,3 +156,4 @@ def test_load_thresholds_derives_offline_timeout(
 
     rule = next(iter(engine.channel_states.values()))
     assert rule["offline_timeout_ms"] == pytest.approx(expected_ms)
+    assert rule["alert_function"] == 2

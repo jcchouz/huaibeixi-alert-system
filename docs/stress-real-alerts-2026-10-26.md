@@ -60,7 +60,6 @@
 
 ```powershell
 cd backend
-$env:DEBUG = "false"
 $env:DETECTION_ALERT_THRESHOLD_ENABLED = "true"
 $env:DETECTION_ALERT_OFFLINE_ENABLED = "true"
 $env:DETECTION_ALERT_DAQ_OFFLINE_ENABLED = "true"

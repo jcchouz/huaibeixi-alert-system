@@ -152,9 +152,15 @@ class AlertService:
             alert_level = NON_THRESHOLD_ALERT_LEVEL
 
         trigger_val = float(pick(body.triggerVal, body.trigger_val, 0.0))
-        alert_function = pick(body.alertFunction, body.alert_function)
         key = self.engine.make_key(sensor_no, channel)
         rule = self.engine.channel_states.get(key) or {}
+        alert_function = self.engine.normalize_alert_function(
+            pick(
+                body.alertFunction,
+                body.alert_function,
+                rule.get("alert_function"),
+            )
+        )
         created = self.repository.create(
             alert_id=uuid.uuid4().hex,
             sensor_no=sensor_no,

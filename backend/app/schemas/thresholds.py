@@ -71,6 +71,7 @@ class ThresholdRule(BaseModel):
     id: Optional[str] = None
     sensor_no: Optional[str] = None
     channel: Optional[str] = None
+    alert_function: Optional[int] = Field(None, ge=1, le=2)
     create_by: Optional[str] = None
     threshold_basis: Optional[str] = None
     range_min: Optional[float] = None

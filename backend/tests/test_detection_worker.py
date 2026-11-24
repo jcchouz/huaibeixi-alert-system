@@ -54,7 +54,6 @@ def make_worker(
 ) -> AlertDetectionWorker:
     settings = Settings(
         environment="development",
-        debug=False,
         detection_enabled=True,
         detection_interval_seconds=1,
         detection_lag_seconds=5,
@@ -68,7 +67,6 @@ def test_detection_windows_accept_comma_separated_minutes(monkeypatch) -> None:
     settings = Settings(
         _env_file=None,
         environment="development",
-        debug=False,
     )
 
     assert settings.detection_window_minutes == (1, 10)

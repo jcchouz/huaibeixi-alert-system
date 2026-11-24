@@ -36,7 +36,6 @@ class Settings(BaseSettings):
         default="development",
         validation_alias="ENVIRONMENT",
     )
-    debug: bool = Field(default=False, validation_alias="DEBUG")
     api_prefix: str = Field(default="/api", validation_alias="API_PREFIX")
     service_version: str = Field(default="3.0.0", validation_alias="SERVICE_VERSION")
 

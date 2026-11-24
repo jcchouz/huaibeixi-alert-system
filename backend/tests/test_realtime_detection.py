@@ -816,6 +816,22 @@ def test_daq_offline_requires_every_channel_offline(monkeypatch) -> None:
     assert engine._daq_condition_active[instrument_id] is True
 
 
+def test_instrument_alert_function_requires_a_single_channel_function() -> None:
+    resolved = AlertAnalyticsEngine.resolve_instrument_alert_functions(
+        [
+            {"instrument_id": "instrument-structure", "alert_function": 1},
+            {"instrument_id": "instrument-structure", "alert_function": 1},
+            {"instrument_id": "instrument-mixed", "alert_function": 1},
+            {"instrument_id": "instrument-mixed", "alert_function": 2},
+        ]
+    )
+
+    assert resolved == {
+        "instrument-structure": 1,
+        "instrument-mixed": None,
+    }
+
+
 def test_disabled_alert_type_switch_skips_alert_creation() -> None:
     """关闭某类预警后条件命中也不再写入预警，其他类型不受影响。"""
     engine = AlertAnalyticsEngine(

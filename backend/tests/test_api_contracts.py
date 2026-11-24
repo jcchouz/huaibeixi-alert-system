@@ -58,6 +58,15 @@ def test_station_name_is_configurable(monkeypatch) -> None:
     assert app.state.engine.get_status()["stationName"] == "测试站"
 
 
+def test_host_debug_environment_is_ignored(monkeypatch) -> None:
+    monkeypatch.setenv("DEBUG", "release")
+
+    settings = Settings(_env_file=None, environment="development")
+
+    assert "debug" not in Settings.model_fields
+    assert settings.environment == "development"
+
+
 def test_engine_enriches_missing_station_with_configured_name() -> None:
     engine = AlertAnalyticsEngine(station_name="测试站")
 

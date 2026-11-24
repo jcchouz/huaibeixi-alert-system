@@ -58,6 +58,69 @@ def test_handled_alert_is_not_reused_for_a_new_incident() -> None:
     assert "update_time" not in insert_sql
     assert "end_time" in insert_sql
     assert "rule_snapshot" in insert_sql
+    assert "alert_function" in insert_sql
+
+
+def test_alert_function_is_written_to_new_and_existing_incidents() -> None:
+    class ExistingAlertCursor(RecordingCursor):
+        def fetchone(self) -> dict[str, Any] | None:
+            if "SELECT id" in self.last_sql:
+                return {"id": "open-alert"}
+            return {
+                "id": "open-alert",
+                "sensor_no": "sensor-1",
+                "channel": "x",
+                "alert_type": ALERT_TYPE_THRESHOLD,
+                "alert_category": 0,
+                "alert_function": 1,
+                "alert_level": 1,
+                "alert_status": 0,
+                "end_time": None,
+            }
+
+    engine = AlertAnalyticsEngine()
+    insert_cursor = RecordingCursor()
+    engine._upsert_alert_incident(
+        insert_cursor,
+        sensor_no="sensor-1",
+        channel="x",
+        threshold_id="threshold-1",
+        alert_type=ALERT_TYPE_THRESHOLD,
+        alert_level=1,
+        trigger_val=12.0,
+        fire_time=datetime(2026, 11, 24, 12, 0, 0),
+        alert_function=2,
+    )
+
+    _, insert_params = next(
+        (sql, params)
+        for sql, params in insert_cursor.executions
+        if "INSERT INTO public.t_alert_record" in sql
+    )
+    assert insert_params is not None
+    assert insert_params[-1] == 2
+
+    update_cursor = ExistingAlertCursor()
+    engine._upsert_alert_incident(
+        update_cursor,
+        sensor_no="sensor-1",
+        channel="x",
+        threshold_id="threshold-1",
+        alert_type=ALERT_TYPE_THRESHOLD,
+        alert_level=1,
+        trigger_val=12.0,
+        fire_time=datetime(2026, 11, 24, 12, 0, 1),
+        alert_function=2,
+    )
+
+    update_sql, update_params = next(
+        (sql, params)
+        for sql, params in update_cursor.executions
+        if "UPDATE public.t_alert_record" in sql
+    )
+    assert "alert_function = COALESCE(%s, alert_function)" in update_sql
+    assert update_params is not None
+    assert update_params[1] == 2
 
 
 def test_rule_snapshot_contains_rule_definition_without_runtime_state() -> None:
@@ -82,6 +145,17 @@ def test_rule_snapshot_contains_rule_definition_without_runtime_state() -> None:
     assert snapshot["offline_timeout_ms"] == 5000
     assert "last_ts" not in snapshot
     assert "threshold_condition_active" not in snapshot
+
+
+def test_rule_snapshot_contains_alert_function() -> None:
+    engine = AlertAnalyticsEngine()
+
+    snapshot = engine.build_rule_snapshot(
+        {"id": "threshold-1", "alert_function": 2},
+        ALERT_TYPE_THRESHOLD,
+    )
+
+    assert snapshot["alert_function"] == 2
 
 
 def test_rule_snapshot_is_only_written_when_alert_is_created() -> None:

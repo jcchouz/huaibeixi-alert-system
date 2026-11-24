@@ -143,6 +143,15 @@ class AlertAnalyticsEngine:
         """生成标准化的传感器和通道组合键。"""
         return f"{(sensor_no or '').strip().lower()}:{(channel or '').strip()}"
 
+    @staticmethod
+    def normalize_alert_function(value: Any) -> Optional[int]:
+        """将预警功能分类标准化为 1（结构）或 2（环境）。"""
+        try:
+            alert_function = int(value)
+        except (TypeError, ValueError):
+            return None
+        return alert_function if alert_function in (1, 2) else None
+
     def is_alert_type_enabled(self, alert_type: str) -> bool:
         """返回某类预警的检测开关状态，未配置的类型默认启用。
 
@@ -658,6 +667,7 @@ class AlertAnalyticsEngine:
         alert_level: int,
         trigger_val: Optional[float],
         fire_time: datetime,
+        alert_function: Optional[int] = None,
         rule_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """新增或刷新未处理预警事件。
@@ -674,6 +684,7 @@ class AlertAnalyticsEngine:
         """
         alert_type = normalize_alert_type(alert_type) or alert_type
         alert_category = alert_category_for_type(alert_type)
+        alert_function = self.normalize_alert_function(alert_function)
         cur.execute(
             """
             SELECT id
@@ -698,13 +709,21 @@ class AlertAnalyticsEngine:
                         pg_get_serial_sequence('public.t_alert_record', 'seq')
                     ),
                     alert_category = %s,
+                    alert_function = COALESCE(%s, alert_function),
                     threshold_id = COALESCE(%s, threshold_id),
                     alert_level = LEAST(alert_level, %s),
                     trigger_val = %s
                 WHERE id = %s
                 RETURNING *
                 """,
-                (alert_category, threshold_id, alert_level, trigger_val, existing["id"]),
+                (
+                    alert_category,
+                    alert_function,
+                    threshold_id,
+                    alert_level,
+                    trigger_val,
+                    existing["id"],
+                ),
             )
         else:
             # 新建事件，并分配新的轮询序列号。
@@ -715,13 +734,13 @@ class AlertAnalyticsEngine:
                     id, seq, sensor_no, channel, threshold_id,
                     alert_type, alert_category, alert_level,
                     trigger_val, create_time, alert_status, end_time,
-                    rule_snapshot
+                    rule_snapshot, alert_function
                 ) VALUES (
                     %s, nextval(
                             pg_get_serial_sequence('public.t_alert_record', 'seq')
                         ), %s, %s, %s,
                     %s, %s, %s,
-                    %s, %s, 0, NULL, %s
+                    %s, %s, 0, NULL, %s, %s
                 )
                 RETURNING *
                 """,
@@ -736,6 +755,7 @@ class AlertAnalyticsEngine:
                     trigger_val,
                     fire_time,
                     Json(serialize_val(rule_snapshot or {})),
+                    alert_function,
                 ),
             )
         row = cur.fetchone()
@@ -868,6 +888,7 @@ class AlertAnalyticsEngine:
             alert_level=alert_level,
             trigger_val=trigger_val,
             fire_time=fire_time,
+            alert_function=rule.get("alert_function"),
             rule_snapshot=self.build_rule_snapshot(rule, alert_type),
         )
         active_map[key] = alert
@@ -884,6 +905,7 @@ class AlertAnalyticsEngine:
             "id",
             "sensor_no",
             "channel",
+            "alert_function",
             "physical_quantity",
             "unit",
             "range_min",
@@ -912,6 +934,29 @@ class AlertAnalyticsEngine:
             if value is not None:
                 snapshot[field] = serialize_val(value)
         return snapshot
+
+    @classmethod
+    def resolve_instrument_alert_functions(
+        cls,
+        rules: Iterable[Dict[str, Any]],
+    ) -> Dict[str, Optional[int]]:
+        """从通道规则汇总采集仪功能分类，混合分类时返回空值。"""
+        instrument_functions: Dict[str, Set[int]] = {}
+        for rule in rules:
+            instrument_id = str(rule.get("instrument_id") or "").strip()
+            if not instrument_id:
+                continue
+            alert_function = cls.normalize_alert_function(rule.get("alert_function"))
+            instrument_functions.setdefault(instrument_id, set())
+            if alert_function is not None:
+                instrument_functions[instrument_id].add(alert_function)
+
+        resolved: Dict[str, Optional[int]] = {}
+        for instrument_id, functions in instrument_functions.items():
+            resolved[instrument_id] = (
+                next(iter(functions)) if len(functions) == 1 else None
+            )
+        return resolved
 
     def _apply_rule_evaluation(
         self,
@@ -1089,6 +1134,7 @@ class AlertAnalyticsEngine:
                 for r in rules
                 if (r.get("instrument_id") or "").strip()
             )
+            instrument_alert_functions = self.resolve_instrument_alert_functions(rules)
             # 汇总本轮已判定离线的通道键，循环结束后据此聚合采集仪级离线预警。
             offline_by_instrument: Dict[str, Set[str]] = {}
 
@@ -1219,6 +1265,7 @@ class AlertAnalyticsEngine:
                         alert_level=NON_THRESHOLD_ALERT_LEVEL,
                         trigger_val=0.0,
                         fire_time=window_end,
+                        alert_function=instrument_alert_functions.get(instrument_id),
                         rule_snapshot={
                             "alert_type": ALERT_TYPE_DAQ_OFFLINE,
                             "offline_seconds": self.offline_seconds,

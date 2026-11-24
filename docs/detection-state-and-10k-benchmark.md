@@ -47,7 +47,6 @@
 
 ```powershell
 cd backend
-$env:DEBUG = "false"
 .\\.venv\\Scripts\\python.exe tools/benchmark_10k.py `
   --rows-per-second 10000 `
   --seconds 10 `

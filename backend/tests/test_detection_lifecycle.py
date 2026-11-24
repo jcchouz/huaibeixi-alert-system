@@ -24,7 +24,7 @@ def test_force_refresh_updates_existing_same_level_alert() -> None:
         object(),
         active_map,
         triggered,
-        rule={"id": "threshold-1"},
+        rule={"id": "threshold-1", "alert_function": 2},
         sensor_no="sensor-1",
         channel="x",
         alert_type=ALERT_TYPE_THRESHOLD,
@@ -37,6 +37,7 @@ def test_force_refresh_updates_existing_same_level_alert() -> None:
 
     assert result is not None
     assert len(calls) == 1
+    assert calls[0]["alert_function"] == 2
     assert len(triggered) == 1
 
 

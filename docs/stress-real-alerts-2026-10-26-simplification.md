@@ -82,7 +82,6 @@
 
 ```powershell
 cd backend
-$env:DEBUG = "false"
 .\.venv\Scripts\python.exe tools/stress_real_alerts.py --mode preflight
 .\.venv\Scripts\python.exe tools/stress_real_alerts.py --mode all `
   --allow-write --confirm-database huaibeixi_db_test `

@@ -661,7 +661,7 @@ def wait_for_offline_alerts(
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
-    settings = Settings(debug=False)
+    settings = Settings()
     conn = psycopg2.connect(
         settings.dsn,
         application_name="real_alert_stress",

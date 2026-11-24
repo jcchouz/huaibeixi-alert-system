@@ -80,7 +80,6 @@
 
 ```powershell
 cd backend
-$env:DEBUG = "false"
 .\.venv\Scripts\python.exe tools/stress_all_alerts.py `
   --mode all `
   --sensor-prefix benchall `

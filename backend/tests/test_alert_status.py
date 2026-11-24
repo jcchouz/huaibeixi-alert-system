@@ -79,6 +79,14 @@ class FakeAlertRepository:
 class FakeEngine:
     channel_states: dict = {}
 
+    @staticmethod
+    def normalize_alert_function(value: object) -> int | None:
+        try:
+            alert_function = int(value)
+        except (TypeError, ValueError):
+            return None
+        return alert_function if alert_function in (1, 2) else None
+
     def make_key(self, sensor_no: str, channel: str) -> str:
         return f"{sensor_no}:{channel}"
 
@@ -188,6 +196,28 @@ def test_alert_function_is_forwarded_to_repository() -> None:
     )
 
     assert repository.created_payload["alert_function"] == 2
+
+
+def test_alert_function_defaults_from_threshold_rule() -> None:
+    class RuleEngine(FakeEngine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.channel_states = {"sensor-1:x": {"alert_function": 1}}
+
+    repository = FakeAlertRepository()
+    service = AlertService(
+        repository,  # type: ignore[arg-type]
+        RuleEngine(),  # type: ignore[arg-type]
+    )
+
+    service.create_alert(
+        AlertCreateRequest(
+            sensorNo="sensor-1",
+            channel="x",
+        )
+    )
+
+    assert repository.created_payload["alert_function"] == 1
 
 
 def test_alert_list_returns_counts_for_the_whole_filtered_scope() -> None:

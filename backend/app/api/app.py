@@ -90,7 +90,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "Bridge structural monitoring alerts and scheduled extreme-value analytics API"
         ),
         version=settings.service_version,
-        debug=settings.debug,
         lifespan=lifespan,
     )
     app.state.settings = settings
