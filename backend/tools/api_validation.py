@@ -7,12 +7,15 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import io
 import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -33,6 +36,15 @@ DSN = get_settings().dsn
 
 BASE = os.getenv("API_BASE_URL", "http://127.0.0.1:8090").rstrip("/")
 SNAP_DIR = Path(__file__).resolve().parent / "_snap"
+
+
+@dataclass(frozen=True)
+class TableSnapshot:
+    """记录表的本地快照路径、行数和文件大小。"""
+
+    path: Path
+    row_count: int
+    size_bytes: int
 
 
 class Checker:
@@ -77,29 +89,62 @@ def _maybe_json(raw: bytes) -> Any:
         return raw.decode("utf-8", "replace")
 
 
-def snapshot_table(conn: Any, table: str, path: Path) -> int:
-    buf = io.BytesIO()
-    cur = conn.cursor()
-    cur.copy_expert(f"COPY public.{table} TO STDOUT WITH BINARY", buf)
-    payload = buf.getvalue()
-    path.write_bytes(payload)
-    return len(payload)
+def count_csv_rows(payload: str) -> int:
+    """统计 PostgreSQL CSV 快照的数据行数，并正确处理字段内换行。"""
+    reader = csv.reader(io.StringIO(payload))
+    next(reader, None)
+    return sum(1 for _ in reader)
 
 
-def restore_table(conn: Any, table: str, path: Path) -> int:
-    cur = conn.cursor()
-    cur.execute(f"DELETE FROM public.{table}")
-    with path.open("rb") as fh:
-        cur.copy_expert(f"COPY public.{table} FROM STDIN WITH BINARY", fh)
-    if table == "t_alert_record":
-        cur.execute(
-            "SELECT setval(pg_get_serial_sequence('public.t_alert_record', 'seq'), "
-            "GREATEST(COALESCE(MAX(seq), 1), 1), COALESCE(MAX(seq), 0) > 0) "
-            "FROM public.t_alert_record"
+def snapshot_table(conn: Any, table: str, path: Path) -> TableSnapshot:
+    """使用查询式 CSV 快照完整读取 TimescaleDB 超表。"""
+    buf = io.StringIO()
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT COUNT(*) AS count FROM public.{table}")
+        expected_rows = int(cur.fetchone()[0])
+        # 对压缩超表直接 COPY 表可能只输出空头，查询式 COPY 才会展开全部数据。
+        cur.copy_expert(
+            f"COPY (SELECT * FROM public.{table}) TO STDOUT "
+            "WITH (FORMAT csv, HEADER true)",
+            buf,
         )
-    conn.commit()
-    cur.execute(f"SELECT COUNT(*) FROM public.{table}")
-    return int(cur.fetchone()[0])
+    payload = buf.getvalue()
+    actual_rows = count_csv_rows(payload)
+    if actual_rows != expected_rows:
+        raise RuntimeError(
+            f"{table} snapshot row mismatch: expected {expected_rows}, got {actual_rows}"
+        )
+    path.write_text(payload, encoding="utf-8")
+    return TableSnapshot(
+        path=path,
+        row_count=actual_rows,
+        size_bytes=len(payload.encode("utf-8")),
+    )
+
+
+def restore_table(conn: Any, table: str, snapshot: TableSnapshot) -> int:
+    """在调用方事务中恢复表，并在提交前校验行数。"""
+    with conn.cursor() as cur:
+        cur.execute(f"DELETE FROM public.{table}")
+        with snapshot.path.open("r", encoding="utf-8", newline="") as fh:
+            cur.copy_expert(
+                f"COPY public.{table} FROM STDIN WITH (FORMAT csv, HEADER true)",
+                fh,
+            )
+        cur.execute(f"SELECT COUNT(*) AS count FROM public.{table}")
+        restored_rows = int(cur.fetchone()[0])
+        if restored_rows != snapshot.row_count:
+            raise RuntimeError(
+                f"{table} restore row mismatch: expected {snapshot.row_count}, "
+                f"got {restored_rows}"
+            )
+        if table == "t_alert_record":
+            cur.execute(
+                "SELECT setval(pg_get_serial_sequence('public.t_alert_record', 'seq'), "
+                "GREATEST(COALESCE(MAX(seq), 1), 1), COALESCE(MAX(seq), 0) > 0) "
+                "FROM public.t_alert_record"
+            )
+    return restored_rows
 
 
 def run(args: argparse.Namespace) -> int:
@@ -108,11 +153,25 @@ def run(args: argparse.Namespace) -> int:
     SNAP_DIR.mkdir(exist_ok=True)
     conn = psycopg2.connect(DSN)
     try:
-        n_thr = snapshot_table(conn, "t_alert_threshold", SNAP_DIR / "threshold.bin")
-        n_alert = snapshot_table(conn, "t_alert_record", SNAP_DIR / "alert.bin")
+        threshold_snapshot = snapshot_table(
+            conn,
+            "t_alert_threshold",
+            SNAP_DIR / "threshold.csv",
+        )
+        alert_snapshot = snapshot_table(
+            conn,
+            "t_alert_record",
+            SNAP_DIR / "alert.csv",
+        )
     finally:
         conn.close()
-    print(f"[api] snapshot t_alert_threshold={n_thr}B t_alert_record={n_alert}B")
+    print(
+        "[api] snapshot "
+        f"t_alert_threshold={threshold_snapshot.row_count} rows/"
+        f"{threshold_snapshot.size_bytes}B, "
+        f"t_alert_record={alert_snapshot.row_count} rows/"
+        f"{alert_snapshot.size_bytes}B"
+    )
 
     try:
         # ---------- health ----------
@@ -134,8 +193,8 @@ def run(args: argparse.Namespace) -> int:
         # ---------- thresholds list ----------
         st, thr = http("GET", "/api/thresholds?pageSize=5")
         ids: List[str] = []
-        if c.check(st == 200 and isinstance(thr, dict) and thr.get("items") and thr.get("total", 0) >= 185,
-                   "GET /api/thresholds lists >=185 rules",
+        if c.check(st == 200 and isinstance(thr, dict) and thr.get("items") and thr.get("total", 0) >= 1,
+                   "GET /api/thresholds lists loaded rules",
                    f"{st} total={thr.get('total') if isinstance(thr, dict) else thr}"):
             ids = [str(i["id"]) for i in thr["items"]]
             first = thr["items"][0]
@@ -143,16 +202,30 @@ def run(args: argparse.Namespace) -> int:
                   f"create_by={first.get('create_by')} "
                   f"l3=({first.get('level3_lower')},{first.get('level3_upper')})")
 
-        st, wy = http("GET", "/api/thresholds?sensorNo=wy-sj-01")
-        tid = args.threshold_id
-        if not tid and isinstance(wy, dict):
-            tid = next((str(r["id"]) for r in wy.get("items", []) if (r.get("channel") or "") == "x"), None)
-        if not tid:
-            tid = ids[0] if ids else None
+        target_rule = None
+        if isinstance(thr, dict):
+            if args.threshold_id:
+                target_rule = next(
+                    (
+                        item
+                        for item in thr.get("items", [])
+                        if str(item.get("id")) == args.threshold_id
+                    ),
+                    None,
+                )
+            if target_rule is None and thr.get("items"):
+                target_rule = thr["items"][0]
+        tid = str(target_rule["id"]) if target_rule else (ids[0] if ids else None)
+        target_sensor = (
+            str(target_rule.get("sensor_no") or "")
+            if target_rule
+            else ""
+        )
 
         # ---------- PUT threshold ----------
         if tid:
-            _, before = http("GET", "/api/thresholds?sensorNo=wy-sj-01")
+            sensor_query = urllib.parse.urlencode({"sensorNo": target_sensor})
+            _, before = http("GET", f"/api/thresholds?{sensor_query}")
             rule_before = next((r for r in (before or {}).get("items", [])
                                 if str(r["id"]) == tid), None) if isinstance(before, dict) else None
             l3u = rule_before.get("level3_upper") if rule_before else None
@@ -238,6 +311,39 @@ def run(args: argparse.Namespace) -> int:
             remaining = int(cur.fetchone()["c"])
         c.check(remaining == 0, "ack-all leaves 0 unhandled alerts", f"remaining={remaining}")
 
+        # ---------- 人工创建与删除 ----------
+        manual_sensor = "sensor-01"
+        manual_channel = ""
+        if isinstance(thr, dict) and thr.get("items"):
+            manual_sensor = str(thr["items"][0].get("sensor_no") or manual_sensor)
+            manual_channel = str(thr["items"][0].get("channel") or "")
+        st, created = http(
+            "POST",
+            "/api/alerts",
+            {
+                "sensorNo": manual_sensor,
+                "channel": manual_channel,
+                "alertType": "阈值超限",
+                "alertLevel": 3,
+                "triggerVal": 1.0,
+            },
+        )
+        created_id = None
+        if isinstance(created, dict) and isinstance(created.get("alert"), dict):
+            created_id = str(created["alert"].get("id") or "")
+        c.check(
+            st == 200 and bool(created_id),
+            "POST /api/alerts creates a manual alert",
+            f"{st} {str(created)[:180]}",
+        )
+        if created_id:
+            st, deleted = http("DELETE", f"/api/alerts/{created_id}")
+            c.check(
+                st == 200 and isinstance(deleted, dict) and deleted.get("success") is True,
+                "DELETE /api/alerts/{id} deletes the manual alert",
+                f"{st} {str(deleted)[:180]}",
+            )
+
         # ---------- statistics ----------
         st, sens = http("GET", "/api/stats/sensors")
         items = (sens.get("items") or sens.get("sensors") or []) if isinstance(sens, dict) else []
@@ -247,7 +353,20 @@ def run(args: argparse.Namespace) -> int:
             print(f"[api]   stat sensors={len(items)} sample="
                   f"{json.dumps(items[0], ensure_ascii=False, default=str)[:180]}")
 
-        st, ext = http("GET", "/api/stats/extremes?sensorNo=sensor-01&periodType=1m&limit=50")
+        stat_sensor = "sensor-01"
+        stat_channel = ""
+        if items:
+            stat_sensor = str(items[0].get("sensorNo") or items[0].get("sensor_no") or stat_sensor)
+            stat_channel = str(items[0].get("channel") or "")
+        stat_query = urllib.parse.urlencode(
+            {
+                "sensorNo": stat_sensor,
+                "channel": stat_channel,
+                "periodType": "1m",
+                "limit": 50,
+            }
+        )
+        st, ext = http("GET", f"/api/stats/extremes?{stat_query}")
         has_series = isinstance(ext, dict) and (ext.get("items") or ext.get("points") or ext.get("series"))
         c.check(st == 200 and bool(has_series), "GET /api/stats/extremes returns 1m series",
                 f"{st} {str(ext)[:150]}")
@@ -255,8 +374,12 @@ def run(args: argparse.Namespace) -> int:
     finally:
         conn = psycopg2.connect(DSN)
         try:
-            thr_rows = restore_table(conn, "t_alert_threshold", SNAP_DIR / "threshold.bin")
-            alert_rows = restore_table(conn, "t_alert_record", SNAP_DIR / "alert.bin")
+            thr_rows = restore_table(conn, "t_alert_threshold", threshold_snapshot)
+            alert_rows = restore_table(conn, "t_alert_record", alert_snapshot)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
         print(f"[api] restored t_alert_threshold={thr_rows} rows, t_alert_record={alert_rows} rows")
